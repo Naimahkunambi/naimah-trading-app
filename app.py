@@ -1,9 +1,8 @@
 # === PAGE SETTINGS (MUST BE FIRST) ===
 import streamlit as st
-
 st.set_page_config(page_title="🚀 Private Trading Web App", layout="wide")
 
-# === IMPORTS ===
+# === OTHER IMPORTS ===
 import requests
 import json
 import datetime
@@ -33,7 +32,7 @@ if "signal" in query_params:
     except Exception as e:
         st.error(f"Failed to receive signal: {e}")
 
-# === TITLE ===
+# === PAGE TITLE ===
 st.title("🚀 Private Trading Web App")
 st.subheader("Auto Signal Reception + Manual Execute + History")
 
@@ -61,7 +60,7 @@ def execute_deriv_trade(symbol, contract_type, lot_size):
         # 2. Buy contract
         trade_data = {
             "buy": 1,
-            "price": lot_size,   # stake amount in USD
+            "price": lot_size,
             "parameters": {
                 "contract_type": contract_type,
                 "symbol": symbol,
@@ -97,9 +96,9 @@ def add_dummy_signal():
         "signal_type": "Sell Stop"
     })
 
-# === PAGES ===
+# === PAGE CONTENT ===
 
-# === Dashboard ===
+# === Dashboard Page ===
 if menu == "📈 Dashboard":
     st.header("📈 Trading Dashboard")
 
@@ -142,7 +141,7 @@ if menu == "📈 Dashboard":
                     st.session_state.executed_trades.append(trade_record)
                     st.success("✅ Trade recorded successfully!")
 
-# === History ===
+# === History Page ===
 elif menu == "📜 History":
     st.header("📜 Executed Trade History")
 
@@ -152,7 +151,7 @@ elif menu == "📜 History":
         for trade in st.session_state.executed_trades:
             st.write(f"Symbol: {trade['symbol']}, Entry: {trade['entry']}, SL: {trade['sl']}, TP: {trade['tp']}, Lot: {trade['lot']}, Type: {trade['contract_type']}, Time: {trade['time']}")
 
-# === Settings ===
+# === Settings Page ===
 elif menu == "⚙️ Settings":
     st.header("⚙️ API Settings")
     st.write(f"**Current API Token:** {API_TOKEN[:5]}...{API_TOKEN[-5:]}")
