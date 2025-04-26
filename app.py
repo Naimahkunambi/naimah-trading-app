@@ -1,6 +1,6 @@
-# === PAGE SETTINGS (MUST BE FIRST) ===
+# === PAGE SETTINGS ===
 import streamlit as st
-st.set_page_config(page_title="🚀 Private Trading Web App", layout="wide")
+st.set_page_config(page_title="👑 Boss Babe Trading Intelligence Web App", layout="wide")
 
 # === OTHER IMPORTS ===
 import requests
@@ -9,15 +9,14 @@ import datetime
 import websocket
 import time
 import re
+import pandas as pd
+import plotly.graph_objs as go
+import random
 
 # === SETTINGS ===
 API_TOKEN = "kabW2n8VL3raHpF"
 APP_ID = "70487"
-DERIV_API_URL = "wss://ws.binaryws.com/websockets/v3?app_id=" + str(APP_ID)
-
-# === PAGE TITLE ===
-st.title("🚀 Private Trading Web App")
-st.subheader("Auto Signal Reception + Manual Execute + History")
+DERIV_API_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}"
 
 # === STATE MEMORY ===
 if "signals" not in st.session_state:
@@ -29,78 +28,66 @@ if "manual_signals" not in st.session_state:
 if "executed_trades" not in st.session_state:
     st.session_state.executed_trades = []
 
+if "demo_trades" not in st.session_state:
+    st.session_state.demo_trades = []
+
+if "chart_data" not in st.session_state:
+    st.session_state.chart_data = None
+
 if "active_contracts" not in st.session_state:
     st.session_state.active_contracts = []
 
+if "badges" not in st.session_state:
+    st.session_state.badges = []
+
 # === FUNCTIONS ===
 
-def execute_deriv_trade(symbol, contract_type, lot_size):
+def fetch_ticks(symbol="R_75", count=100):
     try:
         ws = websocket.create_connection(DERIV_API_URL)
         auth_data = {"authorize": API_TOKEN}
         ws.send(json.dumps(auth_data))
         auth_response = json.loads(ws.recv())
-        if auth_response.get("error"):
-            st.error(f"Authorization failed: {auth_response['error']['message']}")
-            return
-
-        trade_data = {
-            "buy": 1,
-            "price": lot_size,
-            "parameters": {
-                "contract_type": contract_type,
-                "symbol": symbol,
-                "duration": 5,
-                "duration_unit": "m",
-                "basis": "stake",
-                "amount": lot_size,
-                "currency": "USD"
-            },
-            "req_id": 1
+        request_data = {
+            "ticks_history": symbol,
+            "end": "latest",
+            "count": count,
+            "style": "ticks",
+            "granularity": 0
         }
-        ws.send(json.dumps(trade_data))
-        buy_response = json.loads(ws.recv())
-
-        if buy_response.get("error"):
-            st.error(f"Trade failed: {buy_response['error']['message']}")
-        else:
-            st.success(f"🚀 Trade placed successfully on {symbol}!")
-            contract_id = buy_response['buy']['contract_id']
-            st.session_state.active_contracts.append({
-                "contract_id": contract_id,
-                "symbol": symbol,
-                "lot_size": lot_size,
-                "contract_type": contract_type,
-                "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
-
+        ws.send(json.dumps(request_data))
+        data = json.loads(ws.recv())
         ws.close()
+        if "history" in data:
+            return data["history"]["times"], data["history"]["prices"]
+        return None, None
     except Exception as e:
-        st.error(f"❌ Error during trade execution: {str(e)}")
+        st.error(f"Error fetching ticks: {str(e)}")
+        return None, None
 
-def check_contract_status(contract_id):
+def fetch_candles(symbol="R_75", count=100, granularity=60):
     try:
         ws = websocket.create_connection(DERIV_API_URL)
         auth_data = {"authorize": API_TOKEN}
         ws.send(json.dumps(auth_data))
         auth_response = json.loads(ws.recv())
-        if auth_response.get("error"):
-            st.error(f"Authorization failed: {auth_response['error']['message']}")
-            return None
-
-        status_request = {
-            "proposal_open_contract": 1,
-            "contract_id": contract_id
+        request_data = {
+            "ticks_history": symbol,
+            "end": "latest",
+            "count": count,
+            "style": "candles",
+            "granularity": granularity
         }
-        ws.send(json.dumps(status_request))
-        status_response = json.loads(ws.recv())
+        ws.send(json.dumps(request_data))
+        data = json.loads(ws.recv())
         ws.close()
-        return status_response
+        if "candles" in data:
+            return pd.DataFrame(data["candles"])
+        return None
     except Exception as e:
-        st.error(f"❌ Error checking contract status: {str(e)}")
+        st.error(f"Error fetching candles: {str(e)}")
         return None
 
-# === SIGNAL PARSING FUNCTION ===
 def parse_signals(raw_text):
     pattern = re.compile(r"Symbol: (.*?)\n.*?Signal: (.*?)\nEntry: (.*?)\nStop Loss.*?: (.*?)\nTP1.*?: (.*?)\nTP2.*?: (.*?)\n", re.DOTALL)
     matches = pattern.findall(raw_text)
@@ -117,80 +104,115 @@ def parse_signals(raw_text):
         })
     return parsed
 
+def suggest_expiry(signal_type):
+    if "Sell" in signal_type or "Buy" in signal_type:
+        return "5 minutes"
+    return "1 minute"
+
+def random_quote():
+    quotes = [
+        "✨ Bosses don't chase. They attract.",
+        "🌸 Risk smart. Rest confident.",
+        "🚀 Big dreams need bigger discipline.",
+        "👑 Trade like the Queen you are."
+    ]
+    return random.choice(quotes)
+
 # === SIDEBAR MENU ===
-menu = st.sidebar.radio("Menu", ["📈 Dashboard", "📜 History", "⚙️ Settings"])
+st.sidebar.title("👑 Boss Babe Desk")
+menu = st.sidebar.radio("Navigate", [
+    "📈 Dashboard", 
+    "📉 Charts", 
+    "📝 Signals", 
+    "🎮 Demo Play", 
+    "💸 Real Trades", 
+    "📊 Statistics", 
+    "🏆 Badges", 
+    "⚙️ Settings"
+])
+
+# === MAIN BODY ===
 
 # === DASHBOARD ===
 if menu == "📈 Dashboard":
-    st.header("📈 Trading Dashboard")
+    st.header("📈 Dashboard")
+    st.subheader(random_quote())
 
-    st.subheader("📥 Paste Signal Text")
-    raw_text = st.text_area("Paste full signal text here:")
+# === CHARTS ===
+elif menu == "📉 Charts":
+    st.header("📉 Charts Playground")
+    symbol = st.text_input("Enter Symbol (e.g., R_75)", value="R_75")
+    chart_mode = st.radio("Chart Type", ["Candles", "Ticks"], horizontal=True)
+
+    if st.button("🔄 Load Chart"):
+        if chart_mode == "Ticks":
+            times, prices = fetch_ticks(symbol=symbol, count=100)
+            if times and prices:
+                fig = go.Figure(data=go.Scatter(x=pd.to_datetime(times, unit="s"), y=prices, mode='lines'))
+                fig.update_layout(title=f"Tick Chart - {symbol}", template="plotly_white")
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            df = fetch_candles(symbol=symbol, count=100, granularity=60)
+            if df is not None:
+                fig = go.Figure(data=[go.Candlestick(
+                    x=pd.to_datetime(df["epoch"], unit="s"),
+                    open=df["open"],
+                    high=df["high"],
+                    low=df["low"],
+                    close=df["close"]
+                )])
+                fig.update_layout(title=f"Candlestick Chart - {symbol}", template="plotly_white")
+                st.plotly_chart(fig, use_container_width=True)
+
+# === SIGNALS ===
+elif menu == "📝 Signals":
+    st.header("📝 Signal Management")
+    raw_text = st.text_area("Paste your trading signal here:")
 
     if st.button("🔍 Parse Signals"):
         parsed_signals = parse_signals(raw_text)
         if parsed_signals:
             st.session_state.manual_signals.extend(parsed_signals)
-            st.success(f"Parsed {len(parsed_signals)} signals successfully!")
+            st.success(f"✅ Parsed {len(parsed_signals)} signals!")
         else:
-            st.warning("No valid signals found in text.")
+            st.warning("⚠️ No valid signals found.")
 
     if len(st.session_state.manual_signals) > 0:
-        st.subheader("📋 Parsed Manual Trades:")
-
+        st.subheader("🗂️ Parsed Signals")
         for idx, signal in enumerate(st.session_state.manual_signals):
-            with st.expander(f"{signal['symbol']} | {signal['signal_type']} - Entry: {signal['entry']}"):
+            with st.expander(f"{signal['symbol']} | {signal['signal_type']} - Entry {signal['entry']}"):
                 st.write(f"**Stop Loss:** {signal['sl']}")
                 st.write(f"**TP1:** {signal['tp1']}")
                 st.write(f"**TP2:** {signal['tp2']}")
+                expiry_advice = suggest_expiry(signal['signal_type'])
+                st.info(f"💡 Suggested Expiry: **{expiry_advice}**")
 
-                lot_size = st.number_input("💵 Lot Size (Stake $)", value=0.35, key=f"manual_lot_{idx}")
-                tp_choice = st.selectbox("🎯 Choose Take Profit", ("TP1", "TP2"), key=f"manual_tp_choice_{idx}")
+# === DEMO PLAY ===
+elif menu == "🎮 Demo Play":
+    st.header("🎮 Demo Play Mode (Smart Analyzer Coming Soon)")
 
-                if st.button("🚀 Execute Trade", key=f"manual_execute_{idx}"):
-                    selected_tp = signal['tp1'] if tp_choice == "TP1" else signal['tp2']
-                    contract_type = "CALL" if "Buy" in signal['signal_type'] else "PUT"
+# === REAL TRADES ===
+elif menu == "💸 Real Trades":
+    st.header("💸 Real Trading Mode (Connect to Deriv Coming Soon)")
 
-                    execute_deriv_trade(
-                        symbol=signal['symbol'],
-                        contract_type=contract_type,
-                        lot_size=lot_size
-                    )
+# === STATISTICS ===
+elif menu == "📊 Statistics":
+    st.header("📊 Your Trading Statistics")
+    st.write("🚀 Coming Soon in Phase 2.5!")
 
-    if len(st.session_state.active_contracts) > 0:
-        st.subheader("🧾 My Active Trades")
-
-        for idx, active_trade in enumerate(st.session_state.active_contracts):
-            with st.expander(f"{active_trade['symbol']} | {active_trade['contract_type']} | {active_trade['time']}"):
-                st.write(f"Contract ID: {active_trade['contract_id']}")
-
-                if st.button("🚦 Check Status", key=f"check_status_{idx}"):
-                    status = check_contract_status(active_trade['contract_id'])
-                    if status:
-                        if status.get("proposal_open_contract", {}).get("is_sold", False):
-                            result = status["proposal_open_contract"]["status"]
-                            st.success(f"Trade {result.upper()}!")
-                            finished_trade = active_trade.copy()
-                            finished_trade["result"] = result
-                            st.session_state.executed_trades.append(finished_trade)
-                            st.session_state.active_contracts.pop(idx)
-                            st.experimental_rerun()
-                        else:
-                            st.info("Trade still open.")
-
-# === HISTORY ===
-elif menu == "📜 History":
-    st.header("📜 Executed Trade History")
-
-    if len(st.session_state.executed_trades) == 0:
-        st.info("No trades executed yet.")
-    else:
-        for trade in st.session_state.executed_trades:
-            st.write(f"Symbol: {trade['symbol']}, Result: {trade.get('result', 'Pending')}, Lot: {trade['lot_size']}, Type: {trade['contract_type']}, Time: {trade['time']}")
+# === BADGES ===
+elif menu == "🏆 Badges":
+    st.header("🏆 Achievements")
+    st.write("🌸 Coming soon: Earn badges for your trading journey!")
 
 # === SETTINGS ===
 elif menu == "⚙️ Settings":
-    st.header("⚙️ API Settings")
-    st.write(f"**Current API Token:** {API_TOKEN[:5]}...{API_TOKEN[-5:]}")
-    st.write(f"**Current App ID:** {APP_ID}")
-    st.info("🚀 In future versions you can edit these inside the app easily.")
+    st.header("⚙️ Settings & Info")
+    st.write(f"Current API Token: {API_TOKEN[:5]}...{API_TOKEN[-5:]}")
+    st.write(f"App ID: {APP_ID}")
+    st.info("Theme: Pastel Boss Babe Vibes ✨")
+
+# === FOOTER ===
+st.write("---")
+st.write("🌸 Created by Naimah — For Boss Babes Everywhere 🌸")
+
