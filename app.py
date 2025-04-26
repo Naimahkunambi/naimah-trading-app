@@ -1,7 +1,9 @@
-# Install libraries if needed
-# !pip install streamlit requests websocket-client
-
+# === PAGE SETTINGS (MUST BE FIRST) ===
 import streamlit as st
+
+st.set_page_config(page_title="🚀 Private Trading Web App", layout="wide")
+
+# === IMPORTS ===
 import requests
 import json
 import datetime
@@ -13,15 +15,16 @@ API_TOKEN = "kabW2n8VL3raHpF"
 APP_ID = "70487"
 DERIV_API_URL = "wss://ws.binaryws.com/websockets/v3?app_id=" + str(APP_ID)
 
-# === State Memory ===
+# === STATE MEMORY ===
 if "signals" not in st.session_state:
     st.session_state.signals = []
 
 if "executed_trades" not in st.session_state:
     st.session_state.executed_trades = []
 
-# === Handle Incoming Signals (NEW CODE)
-query_params = st.experimental_get_query_params()
+# === LISTEN FOR INCOMING SIGNAL ===
+query_params = st.query_params
+
 if "signal" in query_params:
     try:
         signal_data = json.loads(query_params["signal"][0])
@@ -30,15 +33,14 @@ if "signal" in query_params:
     except Exception as e:
         st.error(f"Failed to receive signal: {e}")
 
-# === Title
-st.set_page_config(page_title="🚀 Private Trading Web App", layout="wide")
+# === TITLE ===
 st.title("🚀 Private Trading Web App")
 st.subheader("Auto Signal Reception + Manual Execute + History")
 
-# === Sidebar Menu
+# === SIDEBAR MENU ===
 menu = st.sidebar.radio("Menu", ["📈 Dashboard", "📜 History", "⚙️ Settings"])
 
-# === Functions ===
+# === FUNCTIONS ===
 
 def execute_deriv_trade(symbol, contract_type, lot_size):
     """Connect to Deriv API and place a trade."""
@@ -95,13 +97,12 @@ def add_dummy_signal():
         "signal_type": "Sell Stop"
     })
 
-# === Pages ===
+# === PAGES ===
 
 # === Dashboard ===
 if menu == "📈 Dashboard":
     st.header("📈 Trading Dashboard")
 
-    # TEST BUTTON: Simulate new signal (replace this with your real webhook/Colab signals)
     if st.button("➕ Add Dummy Signal"):
         add_dummy_signal()
 
