@@ -1,3 +1,5 @@
 streamlit
-requests
 websocket-client
+requests
+plotly
+pandas
