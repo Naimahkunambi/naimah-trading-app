@@ -29,6 +29,9 @@ if "manual_signals" not in st.session_state:
 if "executed_trades" not in st.session_state:
     st.session_state.executed_trades = []
 
+if "active_contracts" not in st.session_state:
+    st.session_state.active_contracts = []
+
 # === FUNCTIONS ===
 
 def execute_deriv_trade(symbol, contract_type, lot_size):
@@ -40,6 +43,7 @@ def execute_deriv_trade(symbol, contract_type, lot_size):
         if auth_response.get("error"):
             st.error(f"Authorization failed: {auth_response['error']['message']}")
             return
+
         trade_data = {
             "buy": 1,
             "price": lot_size,
@@ -61,10 +65,40 @@ def execute_deriv_trade(symbol, contract_type, lot_size):
             st.error(f"Trade failed: {buy_response['error']['message']}")
         else:
             st.success(f"🚀 Trade placed successfully on {symbol}!")
+            contract_id = buy_response['buy']['contract_id']
+            st.session_state.active_contracts.append({
+                "contract_id": contract_id,
+                "symbol": symbol,
+                "lot_size": lot_size,
+                "contract_type": contract_type,
+                "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
 
         ws.close()
     except Exception as e:
         st.error(f"❌ Error during trade execution: {str(e)}")
+
+def check_contract_status(contract_id):
+    try:
+        ws = websocket.create_connection(DERIV_API_URL)
+        auth_data = {"authorize": API_TOKEN}
+        ws.send(json.dumps(auth_data))
+        auth_response = json.loads(ws.recv())
+        if auth_response.get("error"):
+            st.error(f"Authorization failed: {auth_response['error']['message']}")
+            return None
+
+        status_request = {
+            "proposal_open_contract": 1,
+            "contract_id": contract_id
+        }
+        ws.send(json.dumps(status_request))
+        status_response = json.loads(ws.recv())
+        ws.close()
+        return status_response
+    except Exception as e:
+        st.error(f"❌ Error checking contract status: {str(e)}")
+        return None
 
 # === SIGNAL PARSING FUNCTION ===
 def parse_signals(raw_text):
@@ -90,7 +124,7 @@ menu = st.sidebar.radio("Menu", ["📈 Dashboard", "📜 History", "⚙️ Setti
 if menu == "📈 Dashboard":
     st.header("📈 Trading Dashboard")
 
-    st.subheader("📅 Paste Signal Text")
+    st.subheader("📥 Paste Signal Text")
     raw_text = st.text_area("Paste full signal text here:")
 
     if st.button("🔍 Parse Signals"):
@@ -102,7 +136,7 @@ if menu == "📈 Dashboard":
             st.warning("No valid signals found in text.")
 
     if len(st.session_state.manual_signals) > 0:
-        st.subheader("📊 Parsed Manual Trades:")
+        st.subheader("📋 Parsed Manual Trades:")
 
         for idx, signal in enumerate(st.session_state.manual_signals):
             with st.expander(f"{signal['symbol']} | {signal['signal_type']} - Entry: {signal['entry']}"):
@@ -123,17 +157,26 @@ if menu == "📈 Dashboard":
                         lot_size=lot_size
                     )
 
-                    trade_record = {
-                        "symbol": signal['symbol'],
-                        "entry": signal['entry'],
-                        "sl": signal['sl'],
-                        "tp": selected_tp,
-                        "lot": lot_size,
-                        "contract_type": contract_type,
-                        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    st.session_state.executed_trades.append(trade_record)
-                    st.success("✅ Manual Trade Executed Successfully!")
+    if len(st.session_state.active_contracts) > 0:
+        st.subheader("🧾 My Active Trades")
+
+        for idx, active_trade in enumerate(st.session_state.active_contracts):
+            with st.expander(f"{active_trade['symbol']} | {active_trade['contract_type']} | {active_trade['time']}"):
+                st.write(f"Contract ID: {active_trade['contract_id']}")
+
+                if st.button("🚦 Check Status", key=f"check_status_{idx}"):
+                    status = check_contract_status(active_trade['contract_id'])
+                    if status:
+                        if status.get("proposal_open_contract", {}).get("is_sold", False):
+                            result = status["proposal_open_contract"]["status"]
+                            st.success(f"Trade {result.upper()}!")
+                            finished_trade = active_trade.copy()
+                            finished_trade["result"] = result
+                            st.session_state.executed_trades.append(finished_trade)
+                            st.session_state.active_contracts.pop(idx)
+                            st.experimental_rerun()
+                        else:
+                            st.info("Trade still open.")
 
 # === HISTORY ===
 elif menu == "📜 History":
@@ -143,7 +186,7 @@ elif menu == "📜 History":
         st.info("No trades executed yet.")
     else:
         for trade in st.session_state.executed_trades:
-            st.write(f"Symbol: {trade['symbol']}, Entry: {trade['entry']}, SL: {trade['sl']}, TP: {trade['tp']}, Lot: {trade['lot']}, Type: {trade['contract_type']}, Time: {trade['time']}")
+            st.write(f"Symbol: {trade['symbol']}, Result: {trade.get('result', 'Pending')}, Lot: {trade['lot_size']}, Type: {trade['contract_type']}, Time: {trade['time']}")
 
 # === SETTINGS ===
 elif menu == "⚙️ Settings":
