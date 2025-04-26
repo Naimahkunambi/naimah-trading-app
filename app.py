@@ -1,47 +1,42 @@
-# 🚀 Boss Babe 5.0 - SmartTrader Boss System
+# === Boss Babe 6.5 Lite Final ===
 import streamlit as st
 import pandas as pd
 import numpy as np
 import datetime
-import time
 import websocket
 import json
 import threading
 import plotly.graph_objs as go
+import random
+import time
 
 # === PAGE SETTINGS ===
-st.set_page_config(page_title="🚀 Boss Babe 5.0", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🎀 Boss Babe 6.5 Trading Intelligence", layout="wide", initial_sidebar_state="expanded")
 
-# === STYLING ===
+# === STYLE ===
 st.markdown("""
-<style>
-body { background-color: #d6336c; }
-.stApp { background-color: #d6336c; }
-.css-18e3th9, .css-1d391kg { background-color: #6c4f3d; }
-button { background-color: #6f42c1 !important; color: white !important; font-weight: bold; border-radius: 10px; }
-</style>
+    <style>
+    body { background-color: #ffe6f2; }
+    .stApp { background-color: #ffe6f2; }
+    .css-18e3th9, .css-1d391kg { background-color: #ffe6f2; }
+    .css-10trblm, .css-1v0mbdj { color: #400040; }
+    </style>
 """, unsafe_allow_html=True)
 
-# === DERIV CONNECTION SETTINGS ===
+# === GLOBALS ===
 API_TOKEN = "kabW2n8VL3raHpF"
 APP_ID = "70487"
-DERIV_API_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}"
+DERIV_API_URL = "wss://ws.binaryws.com/websockets/v3?app_id=" + str(APP_ID)
 
-# === STATE INITIALIZATION ===
 if "candles" not in st.session_state:
     st.session_state.candles = []
-if "symbol" not in st.session_state:
-    st.session_state.symbol = "R_50"
-if "contract_type" not in st.session_state:
-    st.session_state.contract_type = "rise_fall"
-if "duration" not in st.session_state:
-    st.session_state.duration = 1
-if "stake" not in st.session_state:
-    st.session_state.stake = 1.00
-if "demo_balance" not in st.session_state:
-    st.session_state.demo_balance = 1000.0
-if "demo_history" not in st.session_state:
-    st.session_state.demo_history = []
+
+if "balance" not in st.session_state:
+    st.session_state.balance = 1000
+
+if "trade_history" not in st.session_state:
+    st.session_state.trade_history = []
+
 if "streaming" not in st.session_state:
     st.session_state.streaming = False
 
@@ -69,122 +64,111 @@ def update_candles(tick):
     if len(st.session_state.candles) > 200:
         st.session_state.candles.pop(0)
 
-def stream_ticks(symbol, on_new_tick):
+def stream_ticks(symbol):
     ws = websocket.create_connection(DERIV_API_URL)
-    ws.send(json.dumps({"authorize": API_TOKEN}))
+    auth_data = {"authorize": API_TOKEN}
+    ws.send(json.dumps(auth_data))
     ws.recv()
-    ws.send(json.dumps({"ticks": symbol, "subscribe": 1}))
+
+    tick_request = {"ticks": symbol, "subscribe": 1}
+    ws.send(json.dumps(tick_request))
+
     while True:
         data = json.loads(ws.recv())
         if "tick" in data:
-            tick = data["tick"]
-            on_new_tick(tick)
+            update_candles(data["tick"])
 
-def simulate_demo_trade(direction):
-    result = np.random.choice(["Win", "Loss"], p=[0.55, 0.45])
-    profit = (st.session_state.stake * 0.95) if result == "Win" else -st.session_state.stake
-    st.session_state.demo_balance += profit
-    st.session_state.demo_history.append({
-        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": st.session_state.symbol,
-        "direction": direction,
-        "stake": st.session_state.stake,
-        "duration": st.session_state.duration,
-        "contract_type": st.session_state.contract_type,
-        "result": result,
-        "profit": profit,
-        "balance_after": st.session_state.demo_balance
-    })
-    return result, profit
+def simple_analyze(symbol, contract_type):
+    # Very basic random "analysis" to simulate
+    chance = random.randint(1, 100)
+    if contract_type in ["Rise", "Up", "Higher"]:
+        return "Buy" if chance > 45 else "Don't Buy"
+    elif contract_type in ["Fall", "Down", "Lower"]:
+        return "Sell" if chance > 45 else "Don't Sell"
+    elif contract_type in ["Touch"]:
+        return "Touch likely" if chance > 50 else "No Touch likely"
+    elif contract_type in ["No Touch"]:
+        return "No Touch likely" if chance > 50 else "Touch likely"
+    elif contract_type in ["In"]:
+        return "Stay In" if chance > 50 else "Go Out"
+    elif contract_type in ["Out"]:
+        return "Go Out" if chance > 50 else "Stay In"
+    else:
+        return "50/50 - Watch Chart Carefully"
 
-# === STREAMING ===
+# === START STREAM ===
 if not st.session_state.streaming:
-    threading.Thread(target=stream_ticks, args=(st.session_state.symbol, update_candles), daemon=True).start()
+    threading.Thread(target=stream_ticks, args=("R_50",), daemon=True).start()
     st.session_state.streaming = True
 
 # === MENU ===
-menu = st.sidebar.radio("Boss Babe Menu", ["📈 Chart", "🛍️ Contract Form", "🎮 Demo Play", "📊 Statistics", "⚙️ Settings"])
+st.title("🎀 Boss Babe 6.5 Lite - Demo Trading")
 
-# === CHART PAGE ===
-if menu == "📈 Chart":
-    st.header("📈 Boss Babe Chart View")
-    df = pd.DataFrame(st.session_state.candles)
-    if not df.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=pd.to_datetime(df['epoch'], unit='s'),
-            open=df['open'],
-            high=df['high'],
-            low=df['low'],
-            close=df['close'],
-            increasing_line_color='lightgreen',
-            decreasing_line_color='red',
-            name="Candles"
-        ))
-        fig.update_layout(xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
+symbol = st.selectbox("Select Symbol", ["R_50", "R_75", "R_100", "Volatility 10", "Volatility 75", "Volatility 100", "Jump 10", "Jump 25", "Bear Market", "Bull Market"])
+contract_type = st.selectbox("Select Contract Type", ["Rise", "Fall", "Up", "Down", "Higher", "Lower", "Touch", "No Touch", "In", "Out", "Even", "Odd", "Digit Match", "Digit Differs"])
+
+stake = st.number_input("Stake Amount ($)", value=1.00, min_value=0.35)
+duration = st.selectbox("Duration", ["1 tick", "5 ticks", "10 ticks", "1 minute", "5 minutes"])
+
+indicator = st.selectbox("Choose Indicator", ["Spike Zone", "Trend Breakout", "Digit Analyzer", "Volatility Strength"])
+
+if st.button("🔍 Analyze & Suggest Trade"):
+    suggestion = simple_analyze(symbol, contract_type)
+    st.success(f"📈 Suggestion: {suggestion}")
+
+if st.button("🚀 Place Demo Trade"):
+    # Simulate outcome
+    result = random.choice(["Win", "Loss"])
+    if result == "Win":
+        profit = stake * 0.9
+        st.session_state.balance += profit
+        st.success(f"🎉 You WON! Profit: ${profit:.2f}")
     else:
-        st.info("Loading candles...")
+        loss = stake
+        st.session_state.balance -= loss
+        st.error(f"😢 You LOST! Loss: ${loss:.2f}")
 
-# === CONTRACT FORM PAGE ===
-elif menu == "🛍️ Contract Form":
-    st.header("🛍️ Boss Babe Contract Builder")
+    # Log trade
+    st.session_state.trade_history.append({
+        "symbol": symbol,
+        "contract": contract_type,
+        "stake": stake,
+        "duration": duration,
+        "indicator": indicator,
+        "result": result,
+        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
 
-    symbols = ["R_10", "R_25", "R_50", "R_75", "R_100", "Boom 1000 Index", "Crash 1000 Index", "Crash 500 Index", "Boom 500 Index"]
-    st.session_state.symbol = st.selectbox("Select Symbol:", symbols).replace(" ", "_").upper()
+# === LIVE CHART ===
+st.subheader("📈 Live Chart")
+df = pd.DataFrame(st.session_state.candles)
+if not df.empty:
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=pd.to_datetime(df['epoch'], unit='s'),
+        open=df['open'],
+        high=df['high'],
+        low=df['low'],
+        close=df['close']
+    ))
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Waiting for live chart...")
 
-    contract_options = {"Rise/Fall": "rise_fall", "Higher/Lower": "higher_lower"}
-    st.session_state.contract_type = contract_options[st.selectbox("Select Contract Type:", list(contract_options.keys()))]
+# === BALANCE AND HISTORY ===
+st.metric("💰 Demo Balance", f"${st.session_state.balance:.2f}")
 
-    st.session_state.stake = st.number_input("Stake Amount ($)", min_value=0.35, value=1.00, step=0.01)
-    st.session_state.duration = st.number_input("Duration (ticks or minutes)", min_value=1, value=1)
+st.subheader("📜 Trade History")
+if st.session_state.trade_history:
+    st.dataframe(pd.DataFrame(st.session_state.trade_history))
+else:
+    st.info("No trades yet.")
 
-# === DEMO PLAY PAGE ===
-elif menu == "🎮 Demo Play":
-    st.header("🎮 Boss Babe Demo Play")
-
-    st.metric("💰 Demo Balance", f"${st.session_state.demo_balance:.2f}")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🚀 Buy Rise"):
-            result, profit = simulate_demo_trade("Rise")
-            if result == "Win":
-                st.success(f"Rise Contract WON! Profit: ${profit:.2f}")
-            else:
-                st.error(f"Rise Contract LOST! Loss: ${profit:.2f}")
-
-    with col2:
-        if st.button("⬇️ Buy Fall"):
-            result, profit = simulate_demo_trade("Fall")
-            if result == "Win":
-                st.success(f"Fall Contract WON! Profit: ${profit:.2f}")
-            else:
-                st.error(f"Fall Contract LOST! Loss: ${profit:.2f}")
-
-    st.subheader("📝 Demo Trade History")
-    if st.session_state.demo_history:
-        st.dataframe(pd.DataFrame(st.session_state.demo_history))
-    else:
-        st.info("No trades yet.")
-
-# === STATISTICS PAGE ===
-elif menu == "📊 Statistics":
-    st.header("📊 Boss Babe Trading Statistics")
-
-    if st.session_state.demo_history:
-        total = len(st.session_state.demo_history)
-        wins = sum(1 for x in st.session_state.demo_history if x["result"] == "Win")
-        losses = total - wins
-        win_rate = (wins / total) * 100
-        st.metric("Total Trades", total)
-        st.metric("Wins", wins)
-        st.metric("Losses", losses)
-        st.metric("Win Rate", f"{win_rate:.2f}%")
-    else:
-        st.info("No trades yet.")
-
-# === SETTINGS PAGE ===
-elif menu == "⚙️ Settings":
-    st.header("⚙️ Boss Babe Settings")
-    st.info("Settings to customize your experience (coming soon!)")
+# === TIPS ===
+st.sidebar.subheader("🎀 Boss Babe Tips")
+st.sidebar.info("""
+- Rise/Fall = Best during trends
+- Touch/No Touch = Best during spikes
+- Digits = Only for tick trades
+- Stay calm, smart and stylish! 💅
+""")
