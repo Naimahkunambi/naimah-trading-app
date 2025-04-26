@@ -30,14 +30,54 @@ if "demo_results" not in st.session_state:
     st.session_state.demo_results = []
 
 # === FUNCTIONS ===
-# (all previous functions remain unchanged...)
+def update_candles(tick):
+    ts = int(tick["epoch"])
+    price = float(tick["quote"])
+    timeframe = 60  # 1 minute
+    candle_time = ts - (ts % timeframe)
+
+    if len(st.session_state.candles) == 0 or st.session_state.candles[-1]["epoch"] < candle_time:
+        st.session_state.candles.append({
+            "epoch": candle_time,
+            "open": price,
+            "high": price,
+            "low": price,
+            "close": price
+        })
+    else:
+        candle = st.session_state.candles[-1]
+        candle["high"] = max(candle["high"], price)
+        candle["low"] = min(candle["low"], price)
+        candle["close"] = price
+
+    if len(st.session_state.candles) > 100:
+        st.session_state.candles.pop(0)
+
+
+def stream_ticks(symbol, on_new_tick):
+    ws = websocket.create_connection(DERIV_API_URL)
+    auth_data = {"authorize": API_TOKEN}
+    ws.send(json.dumps(auth_data))
+    ws.recv()
+
+    tick_request = {
+        "ticks": symbol,
+        "subscribe": 1
+    }
+    ws.send(json.dumps(tick_request))
+
+    while True:
+        data = json.loads(ws.recv())
+        if "tick" in data:
+            tick = data["tick"]
+            on_new_tick(tick)
 
 # === UI ===
 menu = st.sidebar.radio("Menu", ["📈 Chart Playground", "📜 Signal Generator", "🎉 Demo Play", "🔢 Real Trades", "📊 Statistics", "⚙️ Settings"])
 
 if menu == "📈 Chart Playground":
-    # (chart playground code remains unchanged...)
-    pass
+    st.header("📈 Your Trading Playground")
+    st.info("Chart and indicators coming soon!")
 
 if "streaming" not in st.session_state:
     threading.Thread(target=stream_ticks, args=(st.session_state.symbol, update_candles), daemon=True).start()
