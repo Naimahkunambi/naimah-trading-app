@@ -26,6 +26,9 @@ if "candles" not in st.session_state:
 if "symbol" not in st.session_state:
     st.session_state.symbol = "R_50"
 
+if "demo_results" not in st.session_state:
+    st.session_state.demo_results = []
+
 # === FUNCTIONS ===
 
 def fetch_initial_candles(symbol, granularity=60, count=100):
@@ -83,7 +86,6 @@ def update_candles(tick):
         candle["low"] = min(candle["low"], price)
         candle["close"] = price
 
-    # Limit to 100 candles
     if len(st.session_state.candles) > 100:
         st.session_state.candles.pop(0)
 
@@ -97,7 +99,6 @@ def plot_candles():
 
     fig = go.Figure()
 
-    # Draw bullish/bearish zones
     for idx in range(len(df)):
         open_price = df.loc[idx, "open"]
         close_price = df.loc[idx, "close"]
@@ -110,7 +111,7 @@ def plot_candles():
                 x1=timestamp,
                 y0=df.loc[idx, "low"],
                 y1=df.loc[idx, "high"],
-                fillcolor="rgba(144,238,144,0.3)",  # pastel green
+                fillcolor="rgba(144,238,144,0.3)",
                 line_width=0
             )
         elif close_price < open_price:
@@ -120,7 +121,7 @@ def plot_candles():
                 x1=timestamp,
                 y0=df.loc[idx, "low"],
                 y1=df.loc[idx, "high"],
-                fillcolor="rgba(255,182,193,0.3)",  # pastel pink
+                fillcolor="rgba(255,182,193,0.3)",
                 line_width=0
             )
 
@@ -134,7 +135,6 @@ def plot_candles():
         decreasing_line_color='lightblue'
     ))
 
-    # Add latest emoji marker
     last_candle = df.iloc[-1]
     if last_candle["close"] > last_candle["open"]:
         emoji = "📈"
@@ -159,7 +159,6 @@ def plot_candles():
     st.plotly_chart(fig, use_container_width=True)
 
 
-# === BOSS BABE SMART INDICATORS ===
 def boss_babe_indicator():
     if len(st.session_state.candles) == 0:
         return None
@@ -169,8 +168,28 @@ def boss_babe_indicator():
 
     if last_close > last_open:
         st.success("✨ Bullish Push Detected - Consider CALL contracts!")
+        if st.button("🚀 Demo CALL Trade"):
+            simulate_demo_trade("CALL")
     else:
         st.error("💔 Bearish Push Detected - Consider PUT contracts!")
+        if st.button("🚀 Demo PUT Trade"):
+            simulate_demo_trade("PUT")
+
+
+def simulate_demo_trade(direction):
+    if len(st.session_state.candles) < 2:
+        st.warning("Not enough data for simulation.")
+        return
+
+    entry = st.session_state.candles[-2]["close"]
+    exit_price = st.session_state.candles[-1]["close"]
+
+    if (direction == "CALL" and exit_price > entry) or (direction == "PUT" and exit_price < entry):
+        st.session_state.demo_results.append("Win")
+        st.success("✅ Demo Trade WON!")
+    else:
+        st.session_state.demo_results.append("Loss")
+        st.error("❌ Demo Trade LOST!")
 
 
 # === UI ===
@@ -191,12 +210,10 @@ if menu == "📈 Chart Playground":
     plot_candles()
     boss_babe_indicator()
 
-# === TICKS STREAM ===
 if "streaming" not in st.session_state:
     threading.Thread(target=stream_ticks, args=(st.session_state.symbol, update_candles), daemon=True).start()
     st.session_state.streaming = True
 
-# === OTHER MENUS PLACEHOLDER ===
 if menu == "📜 Signal Generator":
     st.header("📜 Boss Babe Signal Generator (Coming Soon)")
 
