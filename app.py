@@ -2,7 +2,7 @@
 import streamlit as st
 st.set_page_config(page_title="🚀 Private Trading Web App", layout="wide")
 
-# === OTHER IMPORTS ===
+# === OTHER IMPORTS (AFTER set_page_config) ===
 import requests
 import json
 import datetime
@@ -13,6 +13,10 @@ import time
 API_TOKEN = "kabW2n8VL3raHpF"
 APP_ID = "70487"
 DERIV_API_URL = "wss://ws.binaryws.com/websockets/v3?app_id=" + str(APP_ID)
+
+# === PAGE TITLE ===
+st.title("🚀 Private Trading Web App")
+st.subheader("Auto Signal Reception + Manual Execute + History")
 
 # === STATE MEMORY ===
 if "signals" not in st.session_state:
@@ -31,10 +35,6 @@ if "signal" in query_params:
         st.success("✅ New signal received!")
     except Exception as e:
         st.error(f"Failed to receive signal: {e}")
-
-# === PAGE TITLE ===
-st.title("🚀 Private Trading Web App")
-st.subheader("Auto Signal Reception + Manual Execute + History")
 
 # === SIDEBAR MENU ===
 menu = st.sidebar.radio("Menu", ["📈 Dashboard", "📜 History", "⚙️ Settings"])
