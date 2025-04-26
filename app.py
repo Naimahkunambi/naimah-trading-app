@@ -94,7 +94,37 @@ def plot_candles():
         return
 
     df = pd.DataFrame(st.session_state.candles)
-    fig = go.Figure(data=[go.Candlestick(
+
+    fig = go.Figure()
+
+    # Draw bullish/bearish zones
+    for idx in range(len(df)):
+        open_price = df.loc[idx, "open"]
+        close_price = df.loc[idx, "close"]
+        timestamp = pd.to_datetime(df.loc[idx, "epoch"], unit='s')
+
+        if close_price > open_price:
+            fig.add_shape(
+                type="rect",
+                x0=timestamp,
+                x1=timestamp,
+                y0=df.loc[idx, "low"],
+                y1=df.loc[idx, "high"],
+                fillcolor="rgba(144,238,144,0.3)",  # pastel green
+                line_width=0
+            )
+        elif close_price < open_price:
+            fig.add_shape(
+                type="rect",
+                x0=timestamp,
+                x1=timestamp,
+                y0=df.loc[idx, "low"],
+                y1=df.loc[idx, "high"],
+                fillcolor="rgba(255,182,193,0.3)",  # pastel pink
+                line_width=0
+            )
+
+    fig.add_trace(go.Candlestick(
         x=pd.to_datetime(df["epoch"], unit='s'),
         open=df["open"],
         high=df["high"],
@@ -102,7 +132,22 @@ def plot_candles():
         close=df["close"],
         increasing_line_color='pink',
         decreasing_line_color='lightblue'
-    )])
+    ))
+
+    # Add latest emoji marker
+    last_candle = df.iloc[-1]
+    if last_candle["close"] > last_candle["open"]:
+        emoji = "📈"
+    else:
+        emoji = "📉"
+
+    fig.add_annotation(
+        x=pd.to_datetime(last_candle["epoch"], unit='s'),
+        y=last_candle["close"],
+        text=emoji,
+        showarrow=True,
+        arrowhead=1
+    )
 
     fig.update_layout(
         xaxis_rangeslider_visible=False,
