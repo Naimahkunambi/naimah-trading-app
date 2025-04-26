@@ -20,6 +20,16 @@ if "signals" not in st.session_state:
 if "executed_trades" not in st.session_state:
     st.session_state.executed_trades = []
 
+# === Handle Incoming Signals (NEW CODE)
+query_params = st.experimental_get_query_params()
+if "signal" in query_params:
+    try:
+        signal_data = json.loads(query_params["signal"][0])
+        st.session_state.signals.append(signal_data)
+        st.success("✅ New signal received!")
+    except Exception as e:
+        st.error(f"Failed to receive signal: {e}")
+
 # === Title
 st.set_page_config(page_title="🚀 Private Trading Web App", layout="wide")
 st.title("🚀 Private Trading Web App")
@@ -75,7 +85,7 @@ def execute_deriv_trade(symbol, contract_type, lot_size):
         st.error(f"❌ Error during trade execution: {str(e)}")
 
 def add_dummy_signal():
-    """Simulate a dummy signal (for testing now)."""
+    """Simulate a dummy signal (for testing only)."""
     st.session_state.signals.append({
         "symbol": "R_75",
         "entry": 126929.81,
