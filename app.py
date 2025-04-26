@@ -2,12 +2,13 @@
 import streamlit as st
 st.set_page_config(page_title="🚀 Private Trading Web App", layout="wide")
 
-# === OTHER IMPORTS (AFTER set_page_config) ===
+# === OTHER IMPORTS ===
 import requests
 import json
 import datetime
 import websocket
 import time
+import re
 
 # === SETTINGS ===
 API_TOKEN = "kabW2n8VL3raHpF"
@@ -22,49 +23,30 @@ st.subheader("Auto Signal Reception + Manual Execute + History")
 if "signals" not in st.session_state:
     st.session_state.signals = []
 
+if "manual_signals" not in st.session_state:
+    st.session_state.manual_signals = []
+
 if "executed_trades" not in st.session_state:
     st.session_state.executed_trades = []
-
-# === LISTEN FOR INCOMING SIGNAL ===
-query_params = st.query_params
-
-if "signal" in query_params:
-    try:
-        signal_data = json.loads(query_params["signal"][0])
-        st.session_state.signals.append(signal_data)
-        st.success("✅ New signal received!")
-    except Exception as e:
-        st.error(f"Failed to receive signal: {e}")
-
-# === SIDEBAR MENU ===
-menu = st.sidebar.radio("Menu", ["📈 Dashboard", "📜 History", "⚙️ Settings"])
 
 # === FUNCTIONS ===
 
 def execute_deriv_trade(symbol, contract_type, lot_size):
-    """Connect to Deriv API and place a trade."""
     try:
         ws = websocket.create_connection(DERIV_API_URL)
-
-        # 1. Authorize
-        auth_data = {
-            "authorize": API_TOKEN
-        }
+        auth_data = {"authorize": API_TOKEN}
         ws.send(json.dumps(auth_data))
         auth_response = json.loads(ws.recv())
         if auth_response.get("error"):
             st.error(f"Authorization failed: {auth_response['error']['message']}")
             return
-        st.success("✅ Authorized successfully!")
-
-        # 2. Buy contract
         trade_data = {
             "buy": 1,
             "price": lot_size,
             "parameters": {
                 "contract_type": contract_type,
                 "symbol": symbol,
-                "duration": 1,
+                "duration": 5,
                 "duration_unit": "m",
                 "basis": "stake",
                 "amount": lot_size,
@@ -81,47 +63,59 @@ def execute_deriv_trade(symbol, contract_type, lot_size):
             st.success(f"🚀 Trade placed successfully on {symbol}!")
 
         ws.close()
-
     except Exception as e:
         st.error(f"❌ Error during trade execution: {str(e)}")
 
-def add_dummy_signal():
-    """Simulate a dummy signal (for testing only)."""
-    st.session_state.signals.append({
-        "symbol": "R_75",
-        "entry": 126929.81,
-        "sl": 127199.18,
-        "tp1": 126587.44,
-        "tp2": 126151.92,
-        "signal_type": "Sell Stop"
-    })
+# === SIGNAL PARSING FUNCTION ===
+def parse_signals(raw_text):
+    pattern = re.compile(r"Symbol: (.*?)\n.*?Signal: (.*?)\nEntry: (.*?)\nStop Loss.*?: (.*?)\nTP1.*?: (.*?)\nTP2.*?: (.*?)\n", re.DOTALL)
+    matches = pattern.findall(raw_text)
+    parsed = []
+    for match in matches:
+        symbol, signal_type, entry, sl, tp1, tp2 = match
+        parsed.append({
+            "symbol": symbol.strip(),
+            "entry": float(entry.strip()),
+            "sl": float(sl.strip()),
+            "tp1": float(tp1.strip()),
+            "tp2": float(tp2.strip()),
+            "signal_type": signal_type.strip()
+        })
+    return parsed
 
-# === PAGE CONTENT ===
+# === SIDEBAR MENU ===
+menu = st.sidebar.radio("Menu", ["📈 Dashboard", "📜 History", "⚙️ Settings"])
 
-# === Dashboard Page ===
+# === DASHBOARD ===
 if menu == "📈 Dashboard":
     st.header("📈 Trading Dashboard")
 
-    if st.button("➕ Add Dummy Signal"):
-        add_dummy_signal()
+    st.subheader("📅 Paste Signal Text")
+    raw_text = st.text_area("Paste full signal text here:")
 
-    if len(st.session_state.signals) == 0:
-        st.info("Waiting for trading signals...")
-    else:
-        for idx, signal in enumerate(st.session_state.signals):
-            with st.expander(f"Signal {idx+1}: {signal['symbol']} | {signal['signal_type']}"):
-                st.write(f"**Entry:** {signal['entry']}")
+    if st.button("🔍 Parse Signals"):
+        parsed_signals = parse_signals(raw_text)
+        if parsed_signals:
+            st.session_state.manual_signals.extend(parsed_signals)
+            st.success(f"Parsed {len(parsed_signals)} signals successfully!")
+        else:
+            st.warning("No valid signals found in text.")
+
+    if len(st.session_state.manual_signals) > 0:
+        st.subheader("📊 Parsed Manual Trades:")
+
+        for idx, signal in enumerate(st.session_state.manual_signals):
+            with st.expander(f"{signal['symbol']} | {signal['signal_type']} - Entry: {signal['entry']}"):
                 st.write(f"**Stop Loss:** {signal['sl']}")
                 st.write(f"**TP1:** {signal['tp1']}")
                 st.write(f"**TP2:** {signal['tp2']}")
-                st.write(f"**Signal Type:** {signal['signal_type']}")
 
-                lot_size = st.number_input("💵 Lot Size (Stake $)", value=0.35, key=f"lot_{idx}")
-                tp_choice = st.selectbox("🎯 Choose Take Profit", ("TP1", "TP2"), key=f"tp_choice_{idx}")
+                lot_size = st.number_input("💵 Lot Size (Stake $)", value=0.35, key=f"manual_lot_{idx}")
+                tp_choice = st.selectbox("🎯 Choose Take Profit", ("TP1", "TP2"), key=f"manual_tp_choice_{idx}")
 
-                if st.button("🚀 Execute Trade", key=f"execute_{idx}"):
+                if st.button("🚀 Execute Trade", key=f"manual_execute_{idx}"):
                     selected_tp = signal['tp1'] if tp_choice == "TP1" else signal['tp2']
-                    contract_type = "PUT" if "Sell" in signal['signal_type'] else "CALL"
+                    contract_type = "CALL" if "Buy" in signal['signal_type'] else "PUT"
 
                     execute_deriv_trade(
                         symbol=signal['symbol'],
@@ -139,9 +133,9 @@ if menu == "📈 Dashboard":
                         "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
                     st.session_state.executed_trades.append(trade_record)
-                    st.success("✅ Trade recorded successfully!")
+                    st.success("✅ Manual Trade Executed Successfully!")
 
-# === History Page ===
+# === HISTORY ===
 elif menu == "📜 History":
     st.header("📜 Executed Trade History")
 
@@ -151,7 +145,7 @@ elif menu == "📜 History":
         for trade in st.session_state.executed_trades:
             st.write(f"Symbol: {trade['symbol']}, Entry: {trade['entry']}, SL: {trade['sl']}, TP: {trade['tp']}, Lot: {trade['lot']}, Type: {trade['contract_type']}, Time: {trade['time']}")
 
-# === Settings Page ===
+# === SETTINGS ===
 elif menu == "⚙️ Settings":
     st.header("⚙️ API Settings")
     st.write(f"**Current API Token:** {API_TOKEN[:5]}...{API_TOKEN[-5:]}")
