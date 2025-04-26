@@ -1,4 +1,4 @@
-# === Boss Babe 6.5 Lite Final ===
+# === Boss Babe 6.6 Lite FINAL ===
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,15 +11,15 @@ import random
 import time
 
 # === PAGE SETTINGS ===
-st.set_page_config(page_title="🎀 Boss Babe 6.5 Trading Intelligence", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🎀 Boss Babe 6.6 Trading Playground", layout="wide")
 
 # === STYLE ===
 st.markdown("""
     <style>
-    body { background-color: #ffe6f2; }
-    .stApp { background-color: #ffe6f2; }
-    .css-18e3th9, .css-1d391kg { background-color: #ffe6f2; }
-    .css-10trblm, .css-1v0mbdj { color: #400040; }
+    body { background-color: #000000; }
+    .stApp { background-color: #000000; }
+    .css-18e3th9, .css-1d391kg { background-color: #000000; }
+    .css-10trblm, .css-1v0mbdj { color: #ff66b2; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -36,6 +36,9 @@ if "balance" not in st.session_state:
 
 if "trade_history" not in st.session_state:
     st.session_state.trade_history = []
+
+if "active_trade" not in st.session_state:
+    st.session_state.active_trade = None
 
 if "streaming" not in st.session_state:
     st.session_state.streaming = False
@@ -61,7 +64,7 @@ def update_candles(tick):
         candle["low"] = min(candle["low"], price)
         candle["close"] = price
 
-    if len(st.session_state.candles) > 200:
+    if len(st.session_state.candles) > 300:
         st.session_state.candles.pop(0)
 
 def stream_ticks(symbol):
@@ -77,67 +80,86 @@ def stream_ticks(symbol):
         data = json.loads(ws.recv())
         if "tick" in data:
             update_candles(data["tick"])
+            check_active_trade(data["tick"])
 
-def simple_analyze(symbol, contract_type):
-    # Very basic random "analysis" to simulate
-    chance = random.randint(1, 100)
-    if contract_type in ["Rise", "Up", "Higher"]:
-        return "Buy" if chance > 45 else "Don't Buy"
-    elif contract_type in ["Fall", "Down", "Lower"]:
-        return "Sell" if chance > 45 else "Don't Sell"
-    elif contract_type in ["Touch"]:
-        return "Touch likely" if chance > 50 else "No Touch likely"
-    elif contract_type in ["No Touch"]:
-        return "No Touch likely" if chance > 50 else "Touch likely"
-    elif contract_type in ["In"]:
-        return "Stay In" if chance > 50 else "Go Out"
-    elif contract_type in ["Out"]:
-        return "Go Out" if chance > 50 else "Stay In"
-    else:
-        return "50/50 - Watch Chart Carefully"
+def check_active_trade(tick):
+    if st.session_state.active_trade:
+        entry = st.session_state.active_trade["entry"]
+        contract = st.session_state.active_trade["contract"]
+        amount = st.session_state.active_trade["amount"]
+        expiry = st.session_state.active_trade["expiry"]
+
+        current_price = float(tick["quote"])
+        now_epoch = int(tick["epoch"])
+
+        if now_epoch >= expiry:
+            if contract == "Rise":
+                win = current_price > entry
+            elif contract == "Fall":
+                win = current_price < entry
+            else:
+                win = random.choice([True, False])
+
+            result = "Win" if win else "Loss"
+
+            if result == "Win":
+                profit = amount * 0.9
+                st.session_state.balance += profit
+                st.success(f"🎉 You WON! +${profit:.2f}")
+            else:
+                st.session_state.balance -= amount
+                st.error(f"😢 You LOST! -${amount:.2f}")
+
+            # Log it
+            st.session_state.trade_history.append({
+                "symbol": st.session_state.active_trade["symbol"],
+                "contract": contract,
+                "stake": amount,
+                "result": result,
+                "entry": entry,
+                "exit": current_price,
+                "start_time": datetime.datetime.fromtimestamp(st.session_state.active_trade["start"]).strftime("%H:%M:%S"),
+                "end_time": datetime.datetime.fromtimestamp(expiry).strftime("%H:%M:%S"),
+            })
+            st.session_state.active_trade = None
+
+def simple_indicator_logic(indicator):
+    chance = random.randint(40, 90)
+    return f"🎯 Indicator {indicator} sees {chance}% win chance."
 
 # === START STREAM ===
 if not st.session_state.streaming:
     threading.Thread(target=stream_ticks, args=("R_50",), daemon=True).start()
     st.session_state.streaming = True
 
-# === MENU ===
-st.title("🎀 Boss Babe 6.5 Lite - Demo Trading")
+# === UI ===
+st.title("🎀 Boss Babe 6.6 Lite Final Playground")
 
-symbol = st.selectbox("Select Symbol", ["R_50", "R_75", "R_100", "Volatility 10", "Volatility 75", "Volatility 100", "Jump 10", "Jump 25", "Bear Market", "Bull Market"])
-contract_type = st.selectbox("Select Contract Type", ["Rise", "Fall", "Up", "Down", "Higher", "Lower", "Touch", "No Touch", "In", "Out", "Even", "Odd", "Digit Match", "Digit Differs"])
-
+symbol = st.selectbox("Select Symbol", ["R_50", "R_75", "R_100", "Volatility 10", "Volatility 25", "Volatility 50", "Volatility 75", "Volatility 100"])
+contract_type = st.selectbox("Select Contract Type", ["Rise", "Fall", "Higher", "Lower", "Touch", "No Touch", "In", "Out"])
 stake = st.number_input("Stake Amount ($)", value=1.00, min_value=0.35)
-duration = st.selectbox("Duration", ["1 tick", "5 ticks", "10 ticks", "1 minute", "5 minutes"])
+duration = st.selectbox("Duration", ["1 Tick", "5 Ticks", "1 Minute", "5 Minutes"])
 
-indicator = st.selectbox("Choose Indicator", ["Spike Zone", "Trend Breakout", "Digit Analyzer", "Volatility Strength"])
+indicator = st.selectbox("Boss Babe Indicator", ["Spike Zone", "Trend Breakout", "Digit Analyzer", "Volatility Pressure"])
 
-if st.button("🔍 Analyze & Suggest Trade"):
-    suggestion = simple_analyze(symbol, contract_type)
-    st.success(f"📈 Suggestion: {suggestion}")
+if st.button("🔍 Analyze with Indicator"):
+    suggestion = simple_indicator_logic(indicator)
+    st.success(suggestion)
 
 if st.button("🚀 Place Demo Trade"):
-    # Simulate outcome
-    result = random.choice(["Win", "Loss"])
-    if result == "Win":
-        profit = stake * 0.9
-        st.session_state.balance += profit
-        st.success(f"🎉 You WON! Profit: ${profit:.2f}")
-    else:
-        loss = stake
-        st.session_state.balance -= loss
-        st.error(f"😢 You LOST! Loss: ${loss:.2f}")
+    now = int(time.time())
+    expire = now + 60
+    entry_price = st.session_state.candles[-1]["close"] if st.session_state.candles else random.uniform(1000, 1100)
 
-    # Log trade
-    st.session_state.trade_history.append({
+    st.session_state.active_trade = {
         "symbol": symbol,
         "contract": contract_type,
-        "stake": stake,
-        "duration": duration,
-        "indicator": indicator,
-        "result": result,
-        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
+        "amount": stake,
+        "entry": entry_price,
+        "start": now,
+        "expiry": expire,
+    }
+    st.info(f"🚀 Demo Trade Active! Entry at {entry_price:.2f}")
 
 # === LIVE CHART ===
 st.subheader("📈 Live Chart")
@@ -149,26 +171,24 @@ if not df.empty:
         open=df['open'],
         high=df['high'],
         low=df['low'],
-        close=df['close']
+        close=df['close'],
+        increasing_line_color='#00cc66', decreasing_line_color='#ff6666'
     ))
+    if st.session_state.active_trade:
+        fig.add_hline(y=st.session_state.active_trade["entry"], line_dash="dot", line_color="yellow")
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("Waiting for live chart...")
 
-# === BALANCE AND HISTORY ===
+# === BALANCE + HISTORY ===
 st.metric("💰 Demo Balance", f"${st.session_state.balance:.2f}")
 
 st.subheader("📜 Trade History")
 if st.session_state.trade_history:
-    st.dataframe(pd.DataFrame(st.session_state.trade_history))
+    hist_df = pd.DataFrame(st.session_state.trade_history)
+    st.dataframe(hist_df)
 else:
-    st.info("No trades yet.")
+    st.info("No trades yet!")
 
-# === TIPS ===
-st.sidebar.subheader("🎀 Boss Babe Tips")
-st.sidebar.info("""
-- Rise/Fall = Best during trends
-- Touch/No Touch = Best during spikes
-- Digits = Only for tick trades
-- Stay calm, smart and stylish! 💅
-""")
+# === FINAL TIPS ===
+st.caption("🎀 Stay Smart, Stay Stylish, Stay Winning!")
