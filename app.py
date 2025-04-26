@@ -166,14 +166,25 @@ def boss_babe_indicator():
     last_close = st.session_state.candles[-1]["close"]
     last_open = st.session_state.candles[-1]["open"]
 
+    options = []
+
     if last_close > last_open:
         st.success("✨ Bullish Push Detected - Consider CALL contracts!")
-        if st.button("🚀 Demo CALL Trade"):
-            simulate_demo_trade("CALL")
+        options.append("CALL")
     else:
         st.error("💔 Bearish Push Detected - Consider PUT contracts!")
-        if st.button("🚀 Demo PUT Trade"):
-            simulate_demo_trade("PUT")
+        options.append("PUT")
+
+    if abs(last_close - last_open) > 0.2 * last_open / 100:
+        options.append("Touch/No Touch")
+
+    if abs(last_close - last_open) < 0.1 * last_open / 100:
+        options.append("In/Out")
+
+    st.write("### 🚀 Suggested Contracts:")
+    for option in options:
+        if st.button(f"🚀 Demo {option} Trade"):
+            simulate_demo_trade(option)
 
 
 def simulate_demo_trade(direction):
@@ -184,9 +195,18 @@ def simulate_demo_trade(direction):
     entry = st.session_state.candles[-2]["close"]
     exit_price = st.session_state.candles[-1]["close"]
 
-    if (direction == "CALL" and exit_price > entry) or (direction == "PUT" and exit_price < entry):
+    if direction == "CALL" and exit_price > entry:
         st.session_state.demo_results.append("Win")
         st.success("✅ Demo Trade WON!")
+    elif direction == "PUT" and exit_price < entry:
+        st.session_state.demo_results.append("Win")
+        st.success("✅ Demo Trade WON!")
+    elif direction == "Touch/No Touch" and abs(exit_price - entry) > 0.1 * entry / 100:
+        st.session_state.demo_results.append("Win")
+        st.success("✅ Demo Touch WON!")
+    elif direction == "In/Out" and abs(exit_price - entry) < 0.1 * entry / 100:
+        st.session_state.demo_results.append("Win")
+        st.success("✅ Demo In WON!")
     else:
         st.session_state.demo_results.append("Loss")
         st.error("❌ Demo Trade LOST!")
