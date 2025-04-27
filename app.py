@@ -1,169 +1,101 @@
-# 🚀 Boss Babe 6.7 Lite Trading Web App
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objs as go
-import random
+import websocket
+import json
+import threading
 import time
 
-# === PAGE CONFIG ===
-st.set_page_config(page_title="🎀 Boss Babe Trading Intelligence 6.7 Lite", layout="wide")
+# === CONFIGURATION ===
+st.set_page_config(page_title="🎀 Boss Babe Digit Analyzer", layout="wide", initial_sidebar_state="expanded")
 
-# === CUSTOM CSS THEME ===
-st.markdown("""
-    <style>
-    body, .stApp {
-        background-color: #2c003e;
-        color: #ffc0cb;
-    }
-    .stButton>button {
-        background-color: #800080;
-        color: white;
-    }
-    .stMetric {
-        color: #ffc0cb;
-    }
-    </style>
-""", unsafe_allow_html=True)
+# === DERIV API CONNECTION ===
+API_TOKEN = "YOUR_API_TOKEN"
+APP_ID = "YOUR_APP_ID"
+DERIV_API_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}"
 
-# === SESSION VARIABLES ===
-if "candles" not in st.session_state:
-    st.session_state.candles = []
-if "wallet" not in st.session_state:
-    st.session_state.wallet = 1000.00
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "current_trade" not in st.session_state:
-    st.session_state.current_trade = None
-if "tick_count" not in st.session_state:
-    st.session_state.tick_count = 0
-if "indicator" not in st.session_state:
-    st.session_state.indicator = "Spike Zone"
+# === STREAMLIT MEMORY ===
+if "ticks" not in st.session_state:
+    st.session_state.ticks = []
 
-# === FUNCTION TO CREATE CANDLES ===
-def generate_candle(last_price):
-    direction = random.choice(["up", "down"])
-    if direction == "up":
-        close = last_price + random.uniform(0.5, 1.5)
-    else:
-        close = last_price - random.uniform(0.5, 1.5)
-    high = max(last_price, close) + random.uniform(0.1, 0.5)
-    low = min(last_price, close) - random.uniform(0.1, 0.5)
-    return {"open": last_price, "high": high, "low": low, "close": close}
+if "analyzing" not in st.session_state:
+    st.session_state.analyzing = False
 
-# === FUNCTION TO PLACE DEMO TRADE ===
-def place_demo_trade(symbol, contract, stake, duration, indicator):
-    entry_price = st.session_state.candles[-1]["close"]
-    expiry_tick = st.session_state.tick_count + duration
-    st.session_state.current_trade = {
-        "symbol": symbol,
-        "contract": contract,
-        "stake": stake,
-        "duration": duration,
-        "indicator": indicator,
-        "entry_price": entry_price,
-        "expiry_tick": expiry_tick
-    }
+# === FUNCTION TO STREAM TICKS ===
+def stream_ticks(symbol):
+    try:
+        ws = websocket.create_connection(DERIV_API_URL)
+        ws.send(json.dumps({"authorize": API_TOKEN}))
+        ws.recv()
 
-# === FUNCTION TO MONITOR TRADE ===
-def check_trade_outcome():
-    trade = st.session_state.current_trade
-    if trade and st.session_state.tick_count >= trade["expiry_tick"]:
-        final_price = st.session_state.candles[-1]["close"]
-        win = False
-        if trade["contract"] == "Rise/Fall":
-            if final_price > trade["entry_price"]:
-                win = True
-        if win:
-            profit = trade["stake"] * 0.95
-            st.session_state.wallet += trade["stake"] + profit
-            result = "WIN"
-        else:
-            st.session_state.wallet -= trade["stake"]
-            result = "LOSS"
-        st.success(f"🎉 You {result}! {'+' if result=='WIN' else '-'}${trade['stake']:.2f}")
-        st.session_state.history.append({
-            "Symbol": trade["symbol"],
-            "Contract": trade["contract"],
-            "Indicator": trade["indicator"],
-            "Result": result,
-            "Profit/Loss": (profit if win else -trade["stake"])
-        })
-        st.session_state.current_trade = None
+        request = {"ticks": symbol, "subscribe": 1}
+        ws.send(json.dumps(request))
 
-# === MENU ===
-menu = st.sidebar.radio("🎀 Boss Babe Menu 💎", ["📈 Chart", "🎯 Start Demo", "📊 Stats", "⚙️ Settings", "🎀 Tips"])
+        while st.session_state.analyzing:
+            data = json.loads(ws.recv())
+            if "tick" in data:
+                tick = data["tick"]
+                epoch = tick["epoch"]
+                quote = float(tick["quote"])
+                last_digit = int(str(quote)[-1])
 
-# === CHART PAGE ===
-if menu == "📈 Chart":
-    st.title("📈 Boss Babe Chart Playground")
-    st.info("Loading live candles... enjoy!")
-    # Create random candles
-    if not st.session_state.candles:
-        price = 100.0
-        for _ in range(30):
-            candle = generate_candle(price)
-            st.session_state.candles.append(candle)
-            price = candle["close"]
-    else:
-        last = st.session_state.candles[-1]["close"]
-        st.session_state.candles.append(generate_candle(last))
-        if len(st.session_state.candles) > 50:
-            st.session_state.candles.pop(0)
-        st.session_state.tick_count += 1
-        check_trade_outcome()
+                st.session_state.ticks.append({
+                    "time": time.strftime('%H:%M:%S', time.gmtime(epoch)),
+                    "price": quote,
+                    "last_digit": last_digit
+                })
 
-    df = pd.DataFrame(st.session_state.candles)
-    fig = go.Figure(data=[go.Candlestick(
-        open=df['open'], high=df['high'],
-        low=df['low'], close=df['close']
-    )])
-    fig.update_layout(height=500)
-    st.plotly_chart(fig, use_container_width=True)
+                if len(st.session_state.ticks) > 100:
+                    st.session_state.ticks.pop(0)
 
-# === DEMO TRADE PAGE ===
-elif menu == "🎯 Start Demo":
-    st.title("🎯 Start Your Boss Babe Demo Trade!")
-    symbol = st.selectbox("Select Symbol 🎯", ["R_10", "R_25", "R_50", "R_75", "R_100"], index=2)
-    contract = st.selectbox("Contract Type 💬", ["Rise/Fall", "Touch/No Touch", "Digits"])
-    stake = st.number_input("Stake Amount ($)", 1.0, 1000.0, 1.0)
-    duration = st.slider("Duration (Ticks)", 1, 10, 5)
-    indicator = st.selectbox("Choose Indicator ✨", ["Spike Zone", "Trend Zone", "Volatility Spike"])
+    except Exception as e:
+        st.error(f"Tick Stream Error: {str(e)}")
 
-    if st.button("🚀 Place Demo Trade"):
-        place_demo_trade(symbol, contract, stake, duration, indicator)
-        st.success("🚀 Trade Started!")
+# === MAIN PAGE ===
+st.title("🎀 Boss Babe Digit Analyzer")
+st.caption("Smart. Stylish. Unstoppable. Let's predict digits like a queen 👑!")
 
-# === STATISTICS PAGE ===
-elif menu == "📊 Stats":
-    st.title("📊 Boss Babe Statistics")
-    st.metric("💰 Wallet Balance", f"${st.session_state.wallet:.2f}")
-    if st.session_state.history:
-        df = pd.DataFrame(st.session_state.history)
-        st.dataframe(df)
-        wins = sum(1 for h in st.session_state.history if h["Result"] == "WIN")
-        losses = sum(1 for h in st.session_state.history if h["Result"] == "LOSS")
-        st.metric("✅ Total Wins", wins)
-        st.metric("❌ Total Losses", losses)
-        win_rate = (wins / (wins + losses)) * 100 if (wins + losses) > 0 else 0
-        st.metric("🎯 Win Rate", f"{win_rate:.2f}%")
-    else:
-        st.info("No trades yet.")
+symbol = st.text_input("Enter Symbol (example: R_50)", value="R_50")
 
-# === SETTINGS PAGE ===
-elif menu == "⚙️ Settings":
-    st.title("⚙️ Settings")
-    if st.button("💎 Reset Demo Wallet"):
-        st.session_state.wallet = 1000.00
-        st.success("Wallet Reset Successfully!")
-    theme_choice = st.selectbox("🎨 Choose Theme", ["Dark Pink", "Boss Babe Purple", "Classic White"])
-    st.info(f"Selected Theme: {theme_choice} (Themes feature coming in full Boss Babe 7.0!)")
+col1, col2 = st.columns(2)
 
-# === TIPS PAGE ===
-elif menu == "🎀 Tips":
-    st.title("🎀 Boss Babe Tips Zone")
-    st.info("Rise/Fall = Best during trends 📈")
-    st.info("Touch/No Touch = Best during spikes ⚡")
-    st.info("Digits = Only for tick-based scalps 🎯")
-    st.success("Stay calm, smart, and stylish, Queen! 💅")
+with col1:
+    if st.button("🚀 Start Analyzing"):
+        st.session_state.analyzing = True
+        threading.Thread(target=stream_ticks, args=(symbol,), daemon=True).start()
+
+with col2:
+    if st.button("🛑 Stop"):
+        st.session_state.analyzing = False
+
+# === DISPLAY TICK DATA ===
+if st.session_state.ticks:
+    df = pd.DataFrame(st.session_state.ticks)
+    st.subheader("📈 Live Tick Stream")
+    st.dataframe(df.tail(20), use_container_width=True)
+
+    # === DIGIT ANALYSIS ===
+    st.subheader("🎯 Digit Analysis")
+    digit_counts = df['last_digit'].value_counts().sort_index()
+
+    chart_data = pd.DataFrame({
+        "Digit": range(10),
+        "Count": [digit_counts.get(i, 0) for i in range(10)]
+    })
+
+    st.bar_chart(chart_data.set_index("Digit"))
+
+    # Suggest Strongest Digits
+    most_common_digit = chart_data.sort_values(by="Count", ascending=False).iloc[0]["Digit"]
+    st.success(f"👑 Most Frequent Digit: {int(most_common_digit)}")
+
+    win_chance = (chart_data["Count"].max() / chart_data["Count"].sum()) * 100
+    st.metric("📈 Current Digit Win Probability", f"{win_chance:.2f}%")
+
+    if win_chance > 20:
+        st.balloons()
+        st.info("💖 TIP: Good condition for Digit Matches trading!")
+
+else:
+    st.warning("Waiting for live ticks...")
 
