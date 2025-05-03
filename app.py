@@ -10,8 +10,8 @@ import time
 st.set_page_config(page_title="🎀 Boss Babe Digit Analyzer", layout="wide", initial_sidebar_state="expanded")
 
 # === DERIV API CONNECTION ===
-API_TOKEN = "YOUR_API_TOKEN"
-APP_ID = "YOUR_APP_ID"
+API_TOKEN = "kabW2n8VL3raHpF"
+APP_ID = "70487"
 DERIV_API_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}"
 
 # === STREAMLIT MEMORY ===
