@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://GITHUB_USERNAME.github.io/justanotherkunambi-site/sitemap.xml
