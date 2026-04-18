@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; margin: 0; background: #f7f8fa; color: #1f2937; }
+      .wrap { padding: 12px; }
+      h1 { font-size: 16px; margin: 0 0 8px; }
+      h2 { font-size: 13px; margin: 14px 0 8px; }
+      .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+      input, select, textarea, button { font-size: 12px; }
+      input, select, textarea { width: 100%; padding: 6px; border-radius: 6px; border: 1px solid #cbd5e1; box-sizing: border-box; }
+      textarea { min-height: 62px; resize: vertical; }
+      button { border: 0; border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+      .btn-primary { background: #0f766e; color: #fff; }
+      .btn-secondary { background: #334155; color: #fff; }
+      .btn-light { background: #e2e8f0; color: #0f172a; }
+      .muted { color: #475569; font-size: 11px; }
+      .pill { display: inline-block; background: #ecfeff; border: 1px solid #99f6e4; color: #115e59; font-size: 10px; padding: 2px 6px; border-radius: 999px; }
+      .list-item { border: 1px solid #e2e8f0; background: #fcfcfd; border-radius: 6px; padding: 8px; margin-bottom: 6px; }
+      .small { width: 80px; }
+      .hidden { display: none; }
+      .footer { position: sticky; bottom: 0; background: #fff; border-top: 1px solid #e5e7eb; padding: 10px; display: flex; gap: 8px; }
+      .ok { color: #166534; }
+      .err { color: #b91c1c; white-space: pre-line; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Eliphace Weekly FM Report</h1>
+      <div id="license" class="muted"></div>
+
+      <div class="row">
+        <button class="btn-light" onclick="setMode('quick')">Quick Mode</button>
+        <button class="btn-light" onclick="setMode('full')">Full Mode</button>
+        <span id="modeBadge" class="pill">Mode: quick</span>
+      </div>
+
+      <div id="quickPanel"></div>
+
+      <div id="fullPanel" class="hidden card">
+        <h2>Full Mode (Raw JSON editor for all sections)</h2>
+        <div class="muted">Use this to edit all detailed row-level data. Quick Mode changes only exposed fields; Full Mode can edit everything.</div>
+        <textarea id="fullJson"></textarea>
+      </div>
+
+      <div id="result" class="muted"></div>
+    </div>
+
+    <div class="footer">
+      <button class="btn-secondary" onclick="saveDraft()">Save Draft</button>
+      <button class="btn-primary" onclick="fillReport()">Fill Slides</button>
+    </div>
+
+    <script>
+      let sidebarData = null;
+      let mode = 'quick';
+
+      function init() {
+        google.script.run.withSuccessHandler(onData).getSidebarData();
+      }
+
+      function onData(data) {
+        sidebarData = data || {};
+        mode = sidebarData.mode || 'quick';
+        document.getElementById('modeBadge').textContent = 'Mode: ' + mode;
+        document.getElementById('license').textContent =
+          `License: ${data.license.license_user} | Month: ${data.license.current_month} | Active: ${data.license.is_active ? 'Yes' : 'No'}`;
+        renderQuick(data);
+        document.getElementById('fullJson').value = JSON.stringify(data.prefill, null, 2);
+        if (mode === 'full') setMode('full');
+      }
+
+      function setMode(m) {
+        mode = m;
+        document.getElementById('modeBadge').textContent = 'Mode: ' + mode;
+        document.getElementById('fullPanel').classList.toggle('hidden', mode !== 'full');
+      }
+
+      function renderQuick(data) {
+        const p = data.prefill || {};
+        const host = document.getElementById('quickPanel');
+        host.innerHTML = '';
+
+        host.appendChild(card('Report Date & Presenter', `
+          <div class="grid">
+            <label>Report Date<input id="report_date" value="${esc(p.report_date || '')}"></label>
+            <div></div>
+            <label>Name<input id="presenter_name" value="${esc((p.presenter||{}).name || '')}"></label>
+            <label>Title<input id="presenter_title" value="${esc((p.presenter||{}).title || '')}"></label>
+            <label>Email<input id="presenter_email" value="${esc((p.presenter||{}).email || '')}"></label>
+            <label>Phone<input id="presenter_phone" value="${esc((p.presenter||{}).phone || '')}"></label>
+          </div>
+        `));
+
+        const es = p.executive_summary || {};
+        host.appendChild(card('Executive Summary', `
+          <div class="grid">
+            <label>Facilities Managed<input id="es_facilities" value="${esc(es.facilities_managed || '')}"></label>
+            <label>Total Arrears<input id="es_arrears" value="${esc(es.total_arrears || '')}"></label>
+            <label>Collection Rate %<input id="es_rate" value="${esc(es.collection_rate || '')}"></label>
+            <label>Title Transfers C/T<input id="es_titles" value="${esc(es.title_transfers || '')}"></label>
+            <label>New Prospects<input id="es_prospects" value="${esc(es.new_prospects || '')}"></label>
+          </div>
+        `));
+
+        host.appendChild(arrayCard('Key Highlights This Week', 'quick_highlights', data.quick_highlights || []));
+        host.appendChild(arrayCard('Items Requiring CEO Attention', 'quick_ceo_attention', data.quick_ceo_attention || []));
+
+        host.appendChild(card('Kilima Quick Update', facilityQuick('kilima', data.quick_kilima_update || {})));
+        host.appendChild(card('Emerald Quick Update', facilityQuick('emerald', data.quick_emerald_update || {})));
+
+        const hb = data.quick_hoa_balances || {};
+        host.appendChild(card('HOA Balances Quick Inputs', `
+          <div class="grid">
+            <label>Kilima Opening<input id="hoa_k_opening" value="${esc(hb.kilima_opening || '')}"></label>
+            <label>Kilima Deposits<input id="hoa_k_deposits" value="${esc(hb.kilima_deposits || '')}"></label>
+            <label>Kilima Withdrawals<input id="hoa_k_withdrawals" value="${esc(hb.kilima_withdrawals || '')}"></label>
+            <label>Kilima Closing<input id="hoa_k_closing" value="${esc(hb.kilima_closing || '')}"></label>
+            <label>Kilima Status${statusSelect('hoa_k_status', hb.kilima_status || 'Critical')}</label>
+            <label>Emerald Opening<input id="hoa_e_opening" value="${esc(hb.emerald_opening || '')}"></label>
+            <label>Emerald Deposits<input id="hoa_e_deposits" value="${esc(hb.emerald_deposits || '')}"></label>
+            <label>Emerald Withdrawals<input id="hoa_e_withdrawals" value="${esc(hb.emerald_withdrawals || '')}"></label>
+            <label>Emerald Closing<input id="hoa_e_closing" value="${esc(hb.emerald_closing || '')}"></label>
+            <label>Emerald Status${statusSelect('hoa_e_status', hb.emerald_status || 'Healthy')}</label>
+          </div>
+        `));
+
+        host.appendChild(meetingCard('Upcoming Meetings', 'quick_meetings', data.quick_meetings || []));
+        host.appendChild(openMattersCard('Open Matters Carry-Forward', data.quick_open_matters || []));
+        host.appendChild(previousActionQuick('Previous Week Action Review', data.quick_previous_actions || []));
+        host.appendChild(newActionQuick('New Action Items', data.quick_new_actions || []));
+
+        const aob = data.quick_aob || {};
+        host.appendChild(card('AOB Summary Blocks Only', `
+          <label>Other Updates<textarea id="aob_updates">${esc((aob.other_updates || []).join('\n'))}</textarea></label>
+          <label>Discussion Points<textarea id="aob_discussion">${esc((aob.discussion_points || []).join('\n'))}</textarea></label>
+          <label>Questions / Decisions Required From CEO<textarea id="aob_questions">${esc((aob.questions_for_ceo || []).join('\n'))}</textarea></label>
+        `));
+      }
+
+      function facilityQuick(prefix, row) {
+        return `
+          <div class="grid">
+            <label>Occupancy<input id="${prefix}_occupancy" value="${esc(row.occupancy || '')}"></label>
+            <label>Status${statusSelect(prefix + '_status', row.status || '')}</label>
+            <label>Main Challenge<input id="${prefix}_challenge" value="${esc(row.main_challenge || row.challenge || '')}"></label>
+            <label>Pending Payment<input id="${prefix}_payment" value="${esc(row.pending_payment || '')}"></label>
+          </div>
+        `;
+      }
+
+      function statusSelect(id, selected) {
+        const opts = ['Critical','High','Attention','On Track','Healthy','Good','Needs Improvement','Overdue','Complete','In Progress','Low','Urgent'];
+        return `<select id="${id}">${opts.map(o => `<option ${o===selected?'selected':''}>${o}</option>`).join('')}</select>`;
+      }
+
+      function card(title, inner) {
+        const d = document.createElement('div');
+        d.className = 'card';
+        d.innerHTML = `<h2>${title}</h2>${inner}`;
+        return d;
+      }
+
+      function arrayCard(title, key, items) {
+        const rows = (items.length ? items : ['']).map((x, i) =>
+          `<div class="row list-item"><span class="small">${i+1}</span><input data-arr="${key}" value="${esc(x)}"><button class="btn-light" type="button" onclick="this.parentElement.remove()">Remove</button></div>`
+        ).join('');
+        return card(title, `${rows}<button class="btn-light" type="button" onclick="addSimpleRow('${key}')">+ Add</button>`);
+      }
+
+      function meetingCard(title, key, items) {
+        const rows = (items.length ? items : [{date:'',time:'',title:'',type:'',location:'',key_attendees:'',preparation_required:'',owner:''}]).map(m => `
+          <div class="list-item" data-arr="${key}">
+            <div class="grid">
+              <label>Date<input data-k="date" value="${esc(m.date||'')}"></label>
+              <label>Time<input data-k="time" value="${esc(m.time||'')}"></label>
+              <label>Title<input data-k="title" value="${esc(m.title||'')}"></label>
+              <label>Type<input data-k="type" value="${esc(m.type||'')}"></label>
+              <label>Location<input data-k="location" value="${esc(m.location||'')}"></label>
+              <label>Owner<input data-k="owner" value="${esc(m.owner||'')}"></label>
+            </div>
+            <label>Attendees<input data-k="key_attendees" value="${esc(m.key_attendees||'')}"></label>
+            <label>Preparation<input data-k="preparation_required" value="${esc(m.preparation_required||'')}"></label>
+            <button class="btn-light" type="button" onclick="this.parentElement.remove()">Remove</button>
+          </div>
+        `).join('');
+        return card(title, `${rows}<button class="btn-light" type="button" onclick="addMeetingRow('${key}')">+ Add Meeting</button>`);
+      }
+
+      function openMattersCard(title, items) {
+        const rows = (items.length ? items : []).map(m => `
+          <div class="list-item" data-open-id="${esc(m.matter_id||'')}">
+            <div><strong>${esc(m.matter_id || '')}</strong> | ${esc(m.short_title || '')}</div>
+            <div class="muted">${esc(m.facility || '')} | ${esc(m.severity || '')}</div>
+            <label>Latest Status<input data-k="latest_status" value="${esc(m.latest_status||'Open')}"></label>
+            <label>Carry Action
+              <select data-k="carry_action">
+                ${['Still Open','Updated','Resolved','Remove'].map(o => `<option ${o===(m.carry_action||'Still Open')?'selected':''}>${o}</option>`).join('')}
+              </select>
+            </label>
+          </div>
+        `).join('');
+        return card(title, rows || '<div class="muted">No active open matters.</div>');
+      }
+
+      function previousActionQuick(title, items) {
+        const rows = (items.length ? items : []).map((a, i) => `
+          <div class="list-item" data-prev="1">
+            <div><strong>${i+1}. ${esc(a.action_item || '')}</strong></div>
+            <div class="muted">Assigned: ${esc(a.assigned_to || '')} | Deadline: ${esc(a.deadline || '')}</div>
+            <label>Status
+              <select data-k="status">
+                ${['Complete','In Progress','Overdue'].map(o => `<option ${o===(a.status||'In Progress')?'selected':''}>${o}</option>`).join('')}
+              </select>
+            </label>
+            <input data-k="action_item" value="${esc(a.action_item||'')}" class="hidden">
+            <input data-k="assigned_to" value="${esc(a.assigned_to||'')}" class="hidden">
+            <input data-k="deadline" value="${esc(a.deadline||'')}" class="hidden">
+            <input data-k="completion_date" value="${esc(a.completion_date||'')}" class="hidden">
+            <input data-k="notes" value="${esc(a.notes||'')}" class="hidden">
+          </div>
+        `).join('');
+        return card(title, rows || '<div class="muted">No previous actions.</div>');
+      }
+
+      function newActionQuick(title, items) {
+        const rows = (items.length ? items : [{action_item:'',assigned_to:'',priority:'High',deadline:'',dependencies:'',notes:'',status:'In Progress'}]).map(a => `
+          <div class="list-item" data-new="1">
+            <label>Action Item<input data-k="action_item" value="${esc(a.action_item||'')}"></label>
+            <div class="grid">
+              <label>Assigned To<input data-k="assigned_to" value="${esc(a.assigned_to||'')}"></label>
+              <label>Priority
+                <select data-k="priority">${['Urgent','High','Medium','Low'].map(o => `<option ${o===(a.priority||'High')?'selected':''}>${o}</option>`).join('')}</select>
+              </label>
+              <label>Deadline<input data-k="deadline" value="${esc(a.deadline||'')}"></label>
+              <label>Status
+                <select data-k="status">${['In Progress','Complete','Overdue'].map(o => `<option ${o===(a.status||'In Progress')?'selected':''}>${o}</option>`).join('')}</select>
+              </label>
+            </div>
+            <label>Dependencies<input data-k="dependencies" value="${esc(a.dependencies||'')}"></label>
+            <label>Notes<input data-k="notes" value="${esc(a.notes||'')}"></label>
+            <button class="btn-light" type="button" onclick="this.parentElement.remove()">Remove</button>
+          </div>
+        `).join('');
+        return card(title, `${rows}<button class="btn-light" type="button" onclick="addNewActionRow()">+ Add New Action</button>`);
+      }
+
+      function addSimpleRow(key) {
+        const btn = event.target;
+        const div = document.createElement('div');
+        div.className = 'row list-item';
+        div.innerHTML = `<span class="small">+</span><input data-arr="${key}"><button class="btn-light" type="button" onclick="this.parentElement.remove()">Remove</button>`;
+        btn.parentElement.insertBefore(div, btn);
+      }
+
+      function addMeetingRow(key) {
+        const btn = event.target;
+        const div = document.createElement('div');
+        div.className = 'list-item';
+        div.setAttribute('data-arr', key);
+        div.innerHTML = `<div class="grid">
+          <label>Date<input data-k="date"></label><label>Time<input data-k="time"></label>
+          <label>Title<input data-k="title"></label><label>Type<input data-k="type"></label>
+          <label>Location<input data-k="location"></label><label>Owner<input data-k="owner"></label>
+        </div><label>Attendees<input data-k="key_attendees"></label><label>Preparation<input data-k="preparation_required"></label>
+        <button class="btn-light" type="button" onclick="this.parentElement.remove()">Remove</button>`;
+        btn.parentElement.insertBefore(div, btn);
+      }
+
+      function addNewActionRow() {
+        const btn = event.target;
+        const d = document.createElement('div');
+        d.className = 'list-item';
+        d.setAttribute('data-new', '1');
+        d.innerHTML = `<label>Action Item<input data-k="action_item"></label>
+          <div class="grid">
+            <label>Assigned To<input data-k="assigned_to"></label>
+            <label>Priority<select data-k="priority"><option>Urgent</option><option selected>High</option><option>Medium</option><option>Low</option></select></label>
+            <label>Deadline<input data-k="deadline"></label>
+            <label>Status<select data-k="status"><option selected>In Progress</option><option>Complete</option><option>Overdue</option></select></label>
+          </div>
+          <label>Dependencies<input data-k="dependencies"></label>
+          <label>Notes<input data-k="notes"></label>
+          <button class="btn-light" type="button" onclick="this.parentElement.remove()">Remove</button>`;
+        btn.parentElement.insertBefore(d, btn);
+      }
+
+      function collectPayload() {
+        if (mode === 'full') {
+          return JSON.parse(document.getElementById('fullJson').value || '{}');
+        }
+        const p = JSON.parse(JSON.stringify(sidebarData.prefill || {}));
+        p.mode = mode;
+        p.report_date = val('report_date');
+        p.presenter = {
+          name: val('presenter_name'), title: val('presenter_title'), email: val('presenter_email'), phone: val('presenter_phone')
+        };
+        p.executive_summary = {
+          facilities_managed: val('es_facilities'), total_arrears: val('es_arrears'), collection_rate: val('es_rate'),
+          title_transfers: val('es_titles'), new_prospects: val('es_prospects')
+        };
+        p.key_highlights = getSimpleArray('quick_highlights');
+        p.ceo_attention = getSimpleArray('quick_ceo_attention');
+
+        p.facility_updates = p.facility_updates || [];
+        upsertFacility('Kilima Villas', {
+          occupancy: val('kilima_occupancy'), status: val('kilima_status'), main_challenge: val('kilima_challenge'), pending_payment: val('kilima_payment')
+        }, p.facility_updates);
+        upsertFacility('Emerald Paje', {
+          occupancy: val('emerald_occupancy'), status: val('emerald_status'), main_challenge: val('emerald_challenge'), pending_payment: val('emerald_payment')
+        }, p.facility_updates);
+
+        p.bank_balances = {
+          kilima_opening: val('hoa_k_opening'), kilima_deposits: val('hoa_k_deposits'), kilima_withdrawals: val('hoa_k_withdrawals'), kilima_closing: val('hoa_k_closing'), kilima_status: val('hoa_k_status'),
+          emerald_opening: val('hoa_e_opening'), emerald_deposits: val('hoa_e_deposits'), emerald_withdrawals: val('hoa_e_withdrawals'), emerald_closing: val('hoa_e_closing'), emerald_status: val('hoa_e_status')
+        };
+
+        p.meetings = collectByContainer('quick_meetings');
+        p.open_matters = collectOpenMatters();
+        p.previous_actions = collectByFlag('prev');
+        p.new_actions = collectByFlag('new');
+
+        p.aob = {
+          other_updates: lines('aob_updates'),
+          discussion_points: lines('aob_discussion'),
+          questions_for_ceo: lines('aob_questions')
+        };
+        return p;
+      }
+
+      function saveDraft() {
+        let payload;
+        try { payload = collectPayload(); } catch (e) { showErr(e.message); return; }
+        google.script.run.withSuccessHandler(res => showOk(res.message)).withFailureHandler(e => showErr(e.message)).saveDraftData(payload);
+      }
+
+      function fillReport() {
+        let payload;
+        try { payload = collectPayload(); } catch (e) { showErr(e.message); return; }
+        google.script.run.withSuccessHandler(res => {
+          if (!res.ok) showErr(res.message);
+          else showOk(res.message + (res.deck_url ? `\n${res.deck_url}` : ''));
+        }).withFailureHandler(e => showErr(e.message)).fillCurrentReport(payload);
+      }
+
+      function getSimpleArray(key) {
+        return Array.from(document.querySelectorAll(`[data-arr="${key}"]`)).map(el => (el.value || '').trim()).filter(Boolean);
+      }
+
+      function collectByContainer(key) {
+        return Array.from(document.querySelectorAll(`[data-arr="${key}"]`)).map(card => {
+          const o = {};
+          card.querySelectorAll('[data-k]').forEach(i => o[i.dataset.k] = (i.value || '').trim());
+          return o;
+        }).filter(o => Object.values(o).some(Boolean));
+      }
+
+      function collectByFlag(flag) {
+        return Array.from(document.querySelectorAll(`[data-${flag}]`)).map(card => {
+          const o = {};
+          card.querySelectorAll('[data-k]').forEach(i => o[i.dataset.k] = (i.value || '').trim());
+          return o;
+        }).filter(o => Object.values(o).some(Boolean));
+      }
+
+      function collectOpenMatters() {
+        return Array.from(document.querySelectorAll('[data-open-id]')).map(card => {
+          const o = { matter_id: card.dataset.openId };
+          card.querySelectorAll('[data-k]').forEach(i => o[i.dataset.k] = (i.value || '').trim());
+          return o;
+        });
+      }
+
+      function upsertFacility(name, patch, arr) {
+        const idx = arr.findIndex(x => (x.facility || '').toLowerCase() === name.toLowerCase());
+        if (idx >= 0) arr[idx] = Object.assign({}, arr[idx], patch);
+        else arr.push(Object.assign({ facility: name }, patch));
+      }
+
+      function val(id) { return (document.getElementById(id) || {}).value || ''; }
+      function lines(id) { return val(id).split('\n').map(s => s.trim()).filter(Boolean); }
+      function esc(s) { return String(s || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+      function showOk(msg) { const e = document.getElementById('result'); e.className = 'ok'; e.textContent = msg; }
+      function showErr(msg) { const e = document.getElementById('result'); e.className = 'err'; e.textContent = msg; }
+
+      init();
+    </script>
+  </body>
+</html>
