@@ -3,10 +3,11 @@ export class ShadowTimingLab {
 
   setHorizons(horizons) {
     const clean = [...new Set(horizons.map(Number).filter(h => Number.isInteger(h) && h >= 1))].sort((a, b) => a - b);
+    // Timing Lab v2 always measures the four true one-tick execution windows.
     this.maxHorizon = Math.max(...clean, 4);
     this.tickIndex = -1;
     this.pending = [];
-    this.windows = Array.from({ length: this.maxHorizon }, (_, i) => this.makeWindow(i, i + 1));
+    this.windows = Array.from({ length: 4 }, (_, i) => this.makeWindow(i, i + 1));
   }
 
   makeSide() { return { wins: 0, losses: 0, ties: 0 }; }
@@ -15,7 +16,7 @@ export class ShadowTimingLab {
     return {
       from,
       to,
-      label: `T${from}→T${to}`,
+      label: `${from}→${to}`,
       wins: 0,
       losses: 0,
       ties: 0,
@@ -40,7 +41,7 @@ export class ShadowTimingLab {
 
     for (const item of this.pending) {
       const delta = this.tickIndex - item.index;
-      if (delta < 1 || delta > this.maxHorizon) continue;
+      if (delta < 1 || delta > 4) continue;
 
       item.prices[delta] = q;
       const start = item.prices[delta - 1];
@@ -66,18 +67,41 @@ export class ShadowTimingLab {
       }
     }
 
-    this.pending = this.pending.filter(item => this.tickIndex - item.index < this.maxHorizon);
+    this.pending = this.pending.filter(item => this.tickIndex - item.index < 4);
     this.refresh();
   }
 
+  // Keep the existing dashboard renderer untouched. It already knows how to render
+  // horizon/wins/losses/pending cards, so v2 exposes overall + CALL + PUT cards using
+  // that stable shape. Example labels render as T+0→1, T+1→2 CALL, etc.
   snapshot() {
-    return this.windows.map(w => ({
-      ...w,
-      byDirection: {
-        CALL: { ...w.byDirection.CALL },
-        PUT: { ...w.byDirection.PUT }
+    const rows = [];
+    for (const w of this.windows) {
+      rows.push({
+        horizon: w.label,
+        wins: w.wins,
+        losses: w.losses,
+        ties: w.ties,
+        pending: w.pending,
+        scope: 'ALL',
+        from: w.from,
+        to: w.to
+      });
+      for (const direction of ['CALL', 'PUT']) {
+        const s = w.byDirection[direction];
+        rows.push({
+          horizon: `${w.label} ${direction}`,
+          wins: s.wins,
+          losses: s.losses,
+          ties: s.ties,
+          pending: w.pending,
+          scope: direction,
+          from: w.from,
+          to: w.to
+        });
       }
-    }));
+    }
+    return rows;
   }
 
   refresh() {
