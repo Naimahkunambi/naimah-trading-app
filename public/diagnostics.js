@@ -7,6 +7,7 @@ const completed = new Map();
 const recentTicks = [];
 let tickSeq = 0;
 let lastProposalTrace;
+let renderQueued = false;
 
 function currentTick() { return recentTicks.at(-1); }
 
@@ -53,6 +54,17 @@ function onTick(tick) {
   for (const trace of tracesByContract.values()) advanceTrace(trace, row);
 }
 
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  const run = () => {
+    renderQueued = false;
+    renderMatches();
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 0);
+}
+
 function settle(contract) {
   const id = Number(contract.contract_id);
   const trace = tracesByContract.get(id);
@@ -68,9 +80,8 @@ function settle(contract) {
   const match = matchTraceToTrade(trace, trade);
   completed.set(id, { trace, trade, match });
   tracesByContract.delete(id);
-  queueMicrotask(renderMatches);
-  setTimeout(renderMatches, 50);
-  setTimeout(renderMatches, 300);
+  scheduleRender();
+  setTimeout(scheduleRender, 80);
 }
 
 function inspectIncoming(raw) {
@@ -125,9 +136,15 @@ function labelFor(match) {
   return `<span class="${cls}"><b>T+${match.matchedWindow}</b> ${quality} ${agreement}</span>`;
 }
 
+function setHtmlIfChanged(node, html) {
+  if (node.innerHTML !== html) node.innerHTML = html;
+}
+
 function renderMatches() {
-  const table = document.querySelector('#tradeRows')?.closest('table');
-  if (!table) return;
+  const body = document.getElementById('tradeRows');
+  const table = body?.closest('table');
+  if (!body || !table) return;
+
   const head = table.querySelector('thead tr');
   if (head && !head.querySelector('[data-window-match-head]')) {
     const th = document.createElement('th');
@@ -136,12 +153,12 @@ function renderMatches() {
     head.appendChild(th);
   }
 
-  const rows = document.querySelectorAll('#tradeRows tr');
+  const rows = body.querySelectorAll(':scope > tr');
   for (const row of rows) {
     const first = row.querySelector('td');
     if (!first) continue;
     if (first.classList.contains('empty')) {
-      first.colSpan = 8;
+      if (first.colSpan !== 8) first.colSpan = 8;
       continue;
     }
     const id = Number(first.textContent.replace(/\D/g, ''));
@@ -151,7 +168,8 @@ function renderMatches() {
       cell.dataset.windowMatch = '1';
       row.appendChild(cell);
     }
-    cell.innerHTML = completed.has(id) ? labelFor(completed.get(id).match) : '<span class="diag-muted">waiting…</span>';
+    const html = completed.has(id) ? labelFor(completed.get(id).match) : '<span class="diag-muted">waiting…</span>';
+    setHtmlIfChanged(cell, html);
   }
 
   let note = document.getElementById('windowMatchNote');
@@ -164,9 +182,11 @@ function renderMatches() {
   }
 }
 
-const observer = new MutationObserver(renderMatches);
+const observer = new MutationObserver(() => scheduleRender());
 window.addEventListener('DOMContentLoaded', () => {
   renderMatches();
   const rows = document.getElementById('tradeRows');
-  if (rows) observer.observe(rows, { childList: true, subtree: true });
+  // Observe only direct row replacement by app.js. Diagnostic TD edits happen
+  // inside each row and therefore cannot recursively trigger this observer.
+  if (rows) observer.observe(rows, { childList: true, subtree: false });
 });
