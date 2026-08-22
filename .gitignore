@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+data/*.json
+data/*.jsonl
+.DS_Store
+.vercel
