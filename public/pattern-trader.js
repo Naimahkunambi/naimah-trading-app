@@ -3,19 +3,20 @@ import { SaniEngine, DEFAULT_CONFIG } from './core/engine.mjs';
 const $ = id => document.getElementById(id);
 const nowPerf = () => globalThis.performance?.now?.() ?? Date.now();
 
-const LEDGER_KEY = 'sani.masterTrader.signalLedger.v6.7';
-const VISUAL_KEY = 'sani.masterTrader.visualSetups.v6.7';
+const LEDGER_KEY = 'sani.masterTrader.signalLedger.v6.8';
+const VISUAL_KEY = 'sani.masterTrader.visualSetups.v6.8';
 const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
 const LONG = 200;
 const AUTH = 80;
 const FAST = 20;
 const WAVE = 56;
-const DURATION = 3;
 const HARD_DAMAGE = 0.786;
 const CORE_MIN = 0.382;
 const CORE_MAX = 0.618;
 const FIRE_MIN = 0.32;
 const FIRE_MAX = 0.68;
+const SLOPE80_TOL = 0.015;
+const MACRO_CONFLICT = 0.09;
 
 let accounts = [];
 let selectedAccount = null;
@@ -27,14 +28,13 @@ let ledger = loadArray(LEDGER_KEY);
 let visualHistory = loadArray(VISUAL_KEY);
 const contractToLedger = new Map();
 const waveMemory = new Map();
-
 const strategy = { session: 'NEUTRAL', neutralTicks: 0, sessionId: 0 };
 
 const engine = new SaniEngine({
   ...DEFAULT_CONFIG,
   symbol: '1HZ25V',
   stake: 1,
-  duration: DURATION,
+  duration: 3,
   durationUnit: 't',
   executionMethod: 'direct',
   oneOpenContract: true,
@@ -47,7 +47,7 @@ const engine = new SaniEngine({
   reconnect: true,
   maxReconnectAttempts: 8
 });
-engine.onTick = function abTick(tick) {
+engine.onTick = function masterTick(tick) {
   this.lastTick = tick;
   this.ticksSeen += 1;
   this.emit();
@@ -190,7 +190,6 @@ function updateSession(active80, fast, isChop, volState) {
     strategy.sessionId += 1;
   }
 }
-
 function waveFrom(rows, direction, start, end, step) {
   const p = rows.map(x => x.quote);
   const range = direction === 'BULL' ? end.quote - start.quote : start.quote - end.quote;
@@ -225,11 +224,12 @@ function liveWave(rows, direction) {
 function fibPrice(w, ratio) { return w.direction === 'BULL' ? w.end.quote - w.range * ratio : w.end.quote + w.range * ratio; }
 function waveKey(w, rows) { return w ? `${strategy.sessionId}:${w.direction}:${rows[w.start.i]?.epoch}` : ''; }
 function alreadyTraded(key) { return ledger.some(r => r.waveKey === key && Number.isFinite(+r.contractId)); }
-function modeFor(key) {
+function hashKey(key) {
   let h = 2166136261;
   for (let i = 0; i < key.length; i += 1) { h ^= key.charCodeAt(i); h = Math.imul(h, 16777619); }
-  return (h >>> 0) % 2 === 0 ? 'A_FIRST_TURN' : 'B_PRE_TURN';
+  return h >>> 0;
 }
+function durationFor(key) { return hashKey(key) % 2 === 0 ? 3 : 5; }
 function firstTurn(rows, direction, step) {
   const p = rows.map(x => x.quote), n = p.length;
   if (n < 3) return { ok: false, strength: 0, kind: 'NONE' };
@@ -244,27 +244,20 @@ function firstTurn(rows, direction, step) {
   }
   return { ok: false, strength: 0, kind: 'NONE' };
 }
-function preTurn(rows, direction, step) {
-  const p = rows.map(x => x.quote), n = p.length;
-  if (n < 4) return { ok: false, strength: 0, kind: 'NONE', previousAdverse: 0, latestAdverse: 0 };
-  const unit = step || 1;
-  let previousAdverse = 0, latestAdverse = 0;
-  if (direction === 'BULL') {
-    previousAdverse = p[n - 3] - p[n - 2];
-    latestAdverse = p[n - 2] - p[n - 1];
-  } else if (direction === 'BEAR') {
-    previousAdverse = p[n - 2] - p[n - 3];
-    latestAdverse = p[n - 1] - p[n - 2];
-  }
-  const twoAdverse = previousAdverse >= unit * .08 && latestAdverse >= 0;
-  const decelerating = latestAdverse <= previousAdverse * .72 && latestAdverse <= unit * .70;
-  const ok = twoAdverse && decelerating;
-  return {
-    ok,
-    strength: ok ? clamp((previousAdverse - latestAdverse) / unit, 0, 3) : 0,
-    kind: ok ? (direction === 'BULL' ? 'PRE_UP' : 'PRE_DOWN') : 'NONE',
-    previousAdverse, latestAdverse
-  };
+function directionLock(session, regime200, active80, fast, m200, m80) {
+  if (session !== 'BULL' && session !== 'BEAR') return { ok: false, reason: 'No active direction' };
+  const bull = session === 'BULL';
+  const slope80Ok = bull ? m80.slopeNorm >= -SLOPE80_TOL : m80.slopeNorm <= SLOPE80_TOL;
+  const macroConflict = bull
+    ? regime200 === 'BEAR' || m200.slopeNorm <= -MACRO_CONFLICT
+    : regime200 === 'BULL' || m200.slopeNorm >= MACRO_CONFLICT;
+  const activeConflict = bull ? active80 === 'BEAR' : active80 === 'BULL';
+  const liveAuthority = active80 === session || (active80 === 'NEUTRAL' && fast === session);
+  if (!slope80Ok) return { ok: false, reason: `80 slope ${m80.slopeNorm.toFixed(3)} opposes ${session}` };
+  if (activeConflict) return { ok: false, reason: `80 trend is ${active80}` };
+  if (macroConflict) return { ok: false, reason: `200 macro conflicts · slope ${m200.slopeNorm.toFixed(3)} · regime ${regime200}` };
+  if (!liveAuthority) return { ok: false, reason: `No live authority · 80 ${active80} · FAST ${fast}` };
+  return { ok: true, reason: `LOCKED ${session}` };
 }
 function reanchor(all, direction) {
   for (const width of [48, 38, 30, 24, 20]) {
@@ -293,28 +286,32 @@ function pushVisual(d, state, reason) {
   visualHistory.unshift({
     unique, at: Date.now(), epoch: d.epoch, quote: d.quote, direction: d.session,
     state, reason, waveKey: d.waveKey, retrace: d.wave?.currentRetrace, quality: d.quality,
-    entryMode: d.entryMode
+    duration: d.duration
   });
   saveVisuals();
 }
 function rememberVisual(d) {
   if (!d?.wave || !d.waveKey) return;
-  const memory = waveMemory.get(d.waveKey) || { armed: false, terminal: false, signaled: false };
+  const memory = waveMemory.get(d.waveKey) || { armed: false, terminal: false, signaled: false, dirBlocked: false };
   if (d.inFire && !memory.armed) {
     memory.armed = true;
-    pushVisual(d, 'ARMED', `${d.entryMode} entered 32–68% pocket`);
+    pushVisual(d, 'ARMED', `${d.duration}t entered 32–68% pocket`);
   }
   if (memory.armed && !memory.terminal && d.phase === 'WAIT_POCKET') {
     memory.terminal = true;
-    pushVisual(d, 'MISSED', `${d.entryMode} left pocket before trigger`);
+    pushVisual(d, 'MISSED', 'Left pocket before first-turn trigger');
   }
   if (memory.armed && !memory.terminal && (d.phase === 'DEEP' || d.phase === 'INVALID')) {
     memory.terminal = true;
     pushVisual(d, 'INVALID', d.phase === 'INVALID' ? 'Past 78.6%' : 'Beyond fire pocket');
   }
+  if (d.trigger?.ok && d.inFire && !d.dirLock?.ok && !memory.dirBlocked) {
+    memory.dirBlocked = true;
+    pushVisual(d, 'BLOCKED', `DIR LOCK: ${d.dirLock.reason}`);
+  }
   if (d.ready && !memory.signaled) {
     memory.signaled = true;
-    pushVisual(d, 'SIGNAL', `${d.entryMode} ${d.trigger.kind}`);
+    pushVisual(d, 'SIGNAL', `FIRST TURN · ${d.duration}t`);
   }
   waveMemory.set(d.waveKey, memory);
 }
@@ -334,41 +331,39 @@ function evaluate(snapshot) {
     if (fresh) { waveRows = fresh.rows; wave = fresh.wave; }
   }
   const key = waveKey(wave, waveRows);
-  const entryMode = key ? modeFor(key) : '—';
-  const a = firstTurn(r20, session, wave?.step || m20.avgStep || 1);
-  const b = preTurn(r20, session, wave?.step || m20.avgStep || 1);
-  const trigger = entryMode === 'B_PRE_TURN' ? b : a;
+  const duration = key ? durationFor(key) : 3;
+  const trigger = firstTurn(r20, session, wave?.step || m20.avgStep || 1);
+  const dirLock = directionLock(session, regime200, active80, fast, m200, m80);
   const inFire = Boolean(wave && wave.currentRetrace >= FIRE_MIN && wave.currentRetrace <= FIRE_MAX);
   let phase = 'SEARCHING';
   if (wave) {
     if (wave.maxRetrace > HARD_DAMAGE || wave.currentRetrace > HARD_DAMAGE) phase = 'INVALID';
     else if (wave.currentRetrace < 0) phase = 'EXTENDING';
     else if (wave.currentRetrace < FIRE_MIN) phase = 'WAIT_POCKET';
-    else if (wave.currentRetrace <= FIRE_MAX) phase = trigger.ok ? (entryMode === 'B_PRE_TURN' ? 'PRE_SNIPER' : 'TURN_SNIPER') : 'ARMED';
+    else if (wave.currentRetrace <= FIRE_MAX) phase = trigger.ok ? (dirLock.ok ? 'TURN_SNIPER' : 'DIR_BLOCK') : 'ARMED';
     else phase = 'DEEP';
   }
-  const permission = session !== 'NEUTRAL' && !c.isChop && volState === 'HEALTHY' && (active80 === session || active80 === 'NEUTRAL' || fast === session);
+  const permission = session !== 'NEUTRAL' && !c.isChop && volState === 'HEALTHY' && dirLock.ok;
   const duplicate = alreadyTraded(key);
-  const ready = Boolean(permission && wave && inFire && trigger.ok && !duplicate && (phase === 'PRE_SNIPER' || phase === 'TURN_SNIPER'));
+  const ready = Boolean(permission && wave && inFire && trigger.ok && !duplicate && phase === 'TURN_SNIPER');
   const d = {
     ready, rows: all, waveRows, epoch: all.at(-1).epoch, quote: all.at(-1).quote,
     regime200, active80, fast, session, phase, chop: c.isChop, chopScore: c.score,
-    volatility: volState, m200, m80, m20, wave, firstTurn: a, preTurn: b, trigger,
-    waveKey: key, entryMode, inFire
+    volatility: volState, m200, m80, m20, wave, trigger, dirLock, waveKey: key,
+    duration, durationCohort: `${duration}T`, inFire
   };
   d.quality = quality(d);
   if (c.isChop) d.reason = `CHOP veto ${(c.score * 100).toFixed(0)}%`;
   else if (volState !== 'HEALTHY') d.reason = `Volatility ${volState}`;
   else if (session === 'NEUTRAL') d.reason = `No direction · 80 ${active80} · FAST ${fast}`;
+  else if (!dirLock.ok) d.reason = `DIRECTION BLOCK · ${dirLock.reason}`;
   else if (!wave) d.reason = 'Building fresh impulse';
   else if (phase === 'INVALID') d.reason = `INVALID ${(wave.currentRetrace * 100).toFixed(1)}% > 78.6%`;
-  else if (phase === 'WAIT_POCKET') d.reason = `Waiting pocket · NOW ${(wave.currentRetrace * 100).toFixed(1)}% · next=${entryMode}`;
+  else if (phase === 'WAIT_POCKET') d.reason = `Waiting pocket · NOW ${(wave.currentRetrace * 100).toFixed(1)}% · next=${duration}t`;
   else if (phase === 'DEEP') d.reason = `Deep retrace ${(wave.currentRetrace * 100).toFixed(1)}%`;
-  else if (phase === 'ARMED') d.reason = entryMode === 'B_PRE_TURN'
-    ? `B armed ${(wave.currentRetrace * 100).toFixed(1)}% · waiting adverse momentum to decelerate`
-    : `A armed ${(wave.currentRetrace * 100).toFixed(1)}% · waiting first reversal tick`;
+  else if (phase === 'ARMED') d.reason = `ARMED ${(wave.currentRetrace * 100).toFixed(1)}% · waiting first reversal tick · ${duration}t cohort`;
   else if (duplicate) d.reason = 'Wave already traded';
-  else if (ready) d.reason = `${entryMode} ${trigger.kind} · FIRE`;
+  else if (ready) d.reason = `FIRST TURN · ${duration}t · FIRE`;
   else d.reason = 'Scanning';
   rememberVisual(d);
   return d;
@@ -401,11 +396,12 @@ function makeSignal(snapshot, d) {
     symbol: symbol(), epoch: +(snapshot?.epoch ?? d.epoch), quote: +(snapshot?.quote ?? d.quote),
     signalEpoch: +(snapshot?.epoch ?? d.epoch), signalQuote: +(snapshot?.quote ?? d.quote),
     direction: d.session === 'BULL' ? 'CALL' : 'PUT', session: d.session, phase: d.phase,
-    entryMode: d.entryMode, waveKey: d.waveKey, fibEntryRetrace: d.wave.currentRetrace,
+    entryMode: 'FIRST_TURN_LOCKED', duration: d.duration, durationCohort: d.durationCohort,
+    waveKey: d.waveKey, fibEntryRetrace: d.wave.currentRetrace,
     quality: d.quality, triggerKind: d.trigger.kind, triggerStrength: d.trigger.strength,
     regime200: d.regime200, active80: d.active80, fast: d.fast,
     slope200: d.m200.slopeNorm, slope80: d.m80.slopeNorm, efficiency80: d.m80.efficiency,
-    chopScore: d.chopScore, volatility: d.volatility,
+    chopScore: d.chopScore, volatility: d.volatility, directionLockReason: d.dirLock.reason,
     waveStart: d.wave.start.quote, waveEnd: d.wave.end.quote, waveStep: d.wave.step,
     targetPrice: d.wave.end.quote, invalidationPrice: fibPrice(d.wave, HARD_DAMAGE),
     executionOffset: off
@@ -416,9 +412,9 @@ function ensureRow(s) {
   let row = ledger.find(x => x.signalKey === key);
   if (row) return row;
   row = {
-    id: `mt67-${s.epoch}-${Date.now()}`, cohort: 'v6.7-ab-entry-timing', signalKey: key,
+    id: `mt68-${s.epoch}-${Date.now()}`, cohort: 'v6.8-direction-lock-duration', signalKey: key,
     observedAt: Date.now(), ...s,
-    expectedWindow: `T+${s.executionOffset}→T+${s.executionOffset + DURATION}`,
+    expectedWindow: `T+${s.executionOffset}→T+${s.executionOffset + s.duration}`,
     status: 'QUALIFIED'
   };
   ledger.unshift(row);
@@ -432,7 +428,7 @@ function patchRow(id, patch) {
 function recordBlocked(s, state) {
   const unique = `${s.waveKey}:BLOCKED:${s.epoch}:${state}`;
   if (visualHistory.some(v => v.unique === unique)) return;
-  visualHistory.unshift({ unique, at: Date.now(), epoch: s.epoch, quote: s.quote, direction: s.session, state: 'BLOCKED', reason: state, waveKey: s.waveKey, retrace: s.fibEntryRetrace, quality: s.quality, entryMode: s.entryMode });
+  visualHistory.unshift({ unique, at: Date.now(), epoch: s.epoch, quote: s.quote, direction: s.session, state: 'BLOCKED', reason: state, waveKey: s.waveKey, retrace: s.fibEntryRetrace, quality: s.quality, duration: s.duration });
   saveVisuals();
 }
 function bought() { return ledger.filter(r => Number.isFinite(+r.contractId)).length; }
@@ -441,13 +437,13 @@ function cohort() {
   const wins = settled.filter(r => r.status === 'WON').length;
   const losses = settled.filter(r => r.status === 'LOST').length;
   const pnl = settled.reduce((s, r) => s + (+r.profit || 0), 0);
-  const a = settled.filter(r => r.entryMode === 'A_FIRST_TURN');
-  const b = settled.filter(r => r.entryMode === 'B_PRE_TURN');
+  const d3 = settled.filter(r => +r.duration === 3);
+  const d5 = settled.filter(r => +r.duration === 5);
   return {
     wins, losses, pnl,
-    aW: a.filter(r => r.status === 'WON').length, aL: a.filter(r => r.status === 'LOST').length,
-    bW: b.filter(r => r.status === 'WON').length, bL: b.filter(r => r.status === 'LOST').length,
-    aPnl: a.reduce((s, r) => s + (+r.profit || 0), 0), bPnl: b.reduce((s, r) => s + (+r.profit || 0), 0)
+    d3W: d3.filter(r => r.status === 'WON').length, d3L: d3.filter(r => r.status === 'LOST').length,
+    d5W: d5.filter(r => r.status === 'WON').length, d5L: d5.filter(r => r.status === 'LOST').length,
+    d3Pnl: d3.reduce((s, r) => s + (+r.profit || 0), 0), d5Pnl: d5.reduce((s, r) => s + (+r.profit || 0), 0)
   };
 }
 function pathStats(meta, trade) {
@@ -462,12 +458,11 @@ function pathStats(meta, trade) {
   const targetTouched = Number.isFinite(target) ? (call ? max >= target : min <= target) : false;
   return { mfe, mae, targetTouched, pathTicks: path.length, pathHigh: max, pathLow: min };
 }
-
 function traderConfig() {
   const c = {
     ...engine.config, symbol: symbol(), stake: +$('ptStake').value,
     takeProfit: +$('ptTakeProfit').value, stopLoss: +$('ptStopLoss').value,
-    maxTrades: +$('ptMaxTrades').value, duration: DURATION, durationUnit: 't',
+    maxTrades: +$('ptMaxTrades').value, duration: 3, durationUnit: 't',
     executionMethod: 'direct', oneOpenContract: true, maxSignalToSendMs: 250,
     currency: selectedAccount?.currency || 'USD', reconnect: true, maxReconnectAttempts: 8
   };
@@ -480,7 +475,7 @@ function auth() {
   selectedAccount = accounts.find(a => a.account_id === accountId) || null;
   if (!appId || !token) throw new Error('App ID and trade token are required.');
   if (!selectedAccount) throw new Error('Load and select a Deriv Options account.');
-  if (String(selectedAccount.account_type).toLowerCase() === 'real') throw new Error('Master v6.7 is Demo-only.');
+  if (String(selectedAccount.account_type).toLowerCase() === 'real') throw new Error('Master v6.8 is Demo-only.');
   return { appId, token, accountId };
 }
 async function api(path, body) {
@@ -521,7 +516,6 @@ function renderGate() {
   $('ptAccountPill').textContent = selectedAccount ? String(selectedAccount.account_type).toUpperCase() : 'NO ACCOUNT';
   $('ptConnect').disabled = !selectedAccount || real;
 }
-
 function maybeTrade(snapshot) {
   const d = evaluate(snapshot);
   lastDiagnostics = d;
@@ -541,16 +535,18 @@ function maybeTrade(snapshot) {
   if (state.pendingTrade || state.openContracts > 0) { patchRow(row.id, { status: 'SKIP OPEN' }); recordBlocked(s, 'OPEN CONTRACT'); return; }
   try {
     traderConfig();
+    engine.config.duration = s.duration;
+    engine.config.durationUnit = 't';
     lastSignalEpoch = s.epoch;
     cooldownUntil = s.epoch + cd;
     patchRow(row.id, { status: 'ORDER SENT' });
     engine.execute({
       direction: s.direction,
-      structure: `master-v6.7-${s.entryMode.toLowerCase()}`,
+      structure: `master-v6.8-direction-lock-${s.duration}t`,
       epoch: s.epoch, quote: s.quote, detectedPerf: nowPerf(), detectedWallMs: Date.now(),
       patternMeta: { ...s, ledgerId: row.id, expectedWindow: row.expectedWindow }
     });
-    engine.log('success', `MASTER v6.7 ${s.entryMode} FIRE ${s.session} ${s.direction} · ${(s.fibEntryRetrace * 100).toFixed(1)}% · ${s.triggerKind} · Q${s.quality}`);
+    engine.log('success', `MASTER v6.8 LOCKED ${s.session} ${s.direction} · FIRST TURN ${(s.fibEntryRetrace * 100).toFixed(1)}% · ${s.duration}t · 80 ${s.slope80.toFixed(3)} · 200 ${s.slope200.toFixed(3)}`);
   } catch (e) {
     patchRow(row.id, { status: 'ERROR', error: e.message });
     recordBlocked(s, `ERROR ${e.message}`);
@@ -567,8 +563,9 @@ function renderState(d) {
   set('mtSession', d?.session && d.session !== 'NEUTRAL' ? `${d.session} · ${d.phase}` : 'NEUTRAL');
   if (!d?.wave) set('mtEntry20', 'SEARCH');
   else if (d.phase === 'INVALID') set('mtEntry20', 'INVALID');
-  else if (d.ready) set('mtEntry20', `FIRE ${d.entryMode === 'B_PRE_TURN' ? 'B' : 'A'} ${(d.wave.currentRetrace * 100).toFixed(0)}%`);
-  else if (d.phase === 'ARMED') set('mtEntry20', `ARMED ${d.entryMode === 'B_PRE_TURN' ? 'B' : 'A'} ${(d.wave.currentRetrace * 100).toFixed(0)}%`);
+  else if (d.phase === 'DIR_BLOCK') set('mtEntry20', 'BLOCK DIR');
+  else if (d.ready) set('mtEntry20', `FIRE ${d.duration}T ${(d.wave.currentRetrace * 100).toFixed(0)}%`);
+  else if (d.phase === 'ARMED') set('mtEntry20', `ARMED ${d.duration}T ${(d.wave.currentRetrace * 100).toFixed(0)}%`);
   else set('mtEntry20', 'WAIT');
   set('mtChop', d ? `${d.chop ? 'VETO' : 'CLEAR'} · ${(d.chopScore * 100).toFixed(0)}%` : '—');
   set('mtVolatility', d?.volatility || '—');
@@ -576,7 +573,7 @@ function renderState(d) {
     const retrace = d?.wave ? ` · NOW ${(d.wave.currentRetrace * 100).toFixed(1)}%` : '';
     $('ptSignal').innerHTML = `<b>WAIT · ${esc(d?.phase || 'SEARCHING')}</b><span>${esc(d?.reason || 'Scanning')}${retrace}</span>`;
   } else {
-    $('ptSignal').innerHTML = `<b class="${d.session === 'BULL' ? 'positive' : 'negative'}">${d.entryMode} · ${d.session === 'BULL' ? 'CALL' : 'PUT'}</b><span>SIGNAL NOW ${(d.wave.currentRetrace * 100).toFixed(1)}% · ${d.trigger.kind} · expected entry T+${offsetEstimate()}</span>`;
+    $('ptSignal').innerHTML = `<b class="${d.session === 'BULL' ? 'positive' : 'negative'}">LOCKED ${d.session === 'BULL' ? 'CALL' : 'PUT'} · ${d.duration}T</b><span>SIGNAL NOW ${(d.wave.currentRetrace * 100).toFixed(1)}% · FIRST TURN · expected entry T+${offsetEstimate()}</span>`;
   }
 }
 function renderLedger() {
@@ -588,22 +585,22 @@ function renderLedger() {
   $('ptCohortN').textContent = String(s.wins + s.losses);
   $('ptCohortWL').textContent = `${s.wins} / ${s.losses}`;
   $('ptCohortPnl').textContent = `${s.pnl >= 0 ? '+' : ''}$${s.pnl.toFixed(2)}`;
-  $('ptBullWL').textContent = `${s.aW} / ${s.aL} · ${s.aPnl >= 0 ? '+' : ''}$${s.aPnl.toFixed(2)}`;
-  $('ptBearWL').textContent = `${s.bW} / ${s.bL} · ${s.bPnl >= 0 ? '+' : ''}$${s.bPnl.toFixed(2)}`;
+  $('ptBullWL').textContent = `${s.d3W} / ${s.d3L} · ${s.d3Pnl >= 0 ? '+' : ''}$${s.d3Pnl.toFixed(2)}`;
+  $('ptBearWL').textContent = `${s.d5W} / ${s.d5L} · ${s.d5Pnl >= 0 ? '+' : ''}$${s.d5Pnl.toFixed(2)}`;
   $('ptLedgerRows').innerHTML = ledger.length ? ledger.slice(0, 100).map(r => {
     const tm = new Date(r.observedAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
     const window = r.actualWindow ? `${r.expectedWindow} → ${r.actualWindow}` : r.expectedWindow;
-    const entry = `${r.entryMode || '—'} · ${r.triggerKind || '—'} · Q${r.quality ?? '—'} · ${(Number(r.fibEntryRetrace || 0) * 100).toFixed(0)}%`;
+    const entry = `${r.duration || '—'}T · ${r.triggerKind || '—'} · Q${r.quality ?? '—'} · ${(Number(r.fibEntryRetrace || 0) * 100).toFixed(0)}%`;
     return `<tr><td>${tm}</td><td>${esc(`${r.session || '—'} · ${r.phase || '—'}`)}</td><td>${r.direction || '—'}</td><td>${esc(entry)}</td><td>${Number.isFinite(+r.slope200) ? (+r.slope200).toFixed(3) : '—'}</td><td>${Number.isFinite(+r.slope80) ? (+r.slope80).toFixed(3) : '—'}</td><td>${Number.isFinite(+r.chopScore) ? (+r.chopScore * 100).toFixed(0) + '%' : '—'}</td><td>${r.volatility || '—'}</td><td>${window || '—'}</td><td>${r.latencyClass || '—'}</td><td>${r.status || '—'}${Number.isFinite(+r.mfe) ? ` · MFE ${(+r.mfe).toFixed(1)} / MAE ${(+r.mae).toFixed(1)}` : ''}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="12" class="empty">No v6.7 A/B setups yet.</td></tr>';
+  }).join('') : '<tr><td colspan="12" class="empty">No v6.8 direction-lock setups yet.</td></tr>';
 }
 function exportCsv() {
-  const headers = ['cohort','entry_mode','observed_at','symbol','signal_epoch','signal_quote','session','phase','direction','wave_key','fib_entry_retrace','quality','trigger_kind','trigger_strength','regime_200','active_80','fast','slope_200','slope_80','efficiency_80','chop_score','volatility','target_price','invalidation_price','expected_window','status','contract_id','profit','actual_window','latency_class','entry_spot','exit_spot','mfe','mae','target_touched','path_ticks','path_high','path_low'];
-  const rows = ledger.map(r => [r.cohort,r.entryMode,new Date(r.observedAt).toISOString(),r.symbol,r.signalEpoch ?? r.epoch,r.signalQuote ?? r.quote,r.session,r.phase,r.direction,r.waveKey,r.fibEntryRetrace,r.quality,r.triggerKind,r.triggerStrength,r.regime200,r.active80,r.fast,r.slope200,r.slope80,r.efficiency80,r.chopScore,r.volatility,r.targetPrice,r.invalidationPrice,r.expectedWindow,r.status,r.contractId??'',r.profit??'',r.actualWindow??'',r.latencyClass??'',r.entrySpot??'',r.exitSpot??'',r.mfe??'',r.mae??'',r.targetTouched??'',r.pathTicks??'',r.pathHigh??'',r.pathLow??'']);
+  const headers = ['cohort','duration','observed_at','symbol','signal_epoch','signal_quote','session','phase','direction','wave_key','fib_entry_retrace','quality','trigger_kind','trigger_strength','regime_200','active_80','fast','slope_200','slope_80','efficiency_80','direction_lock_reason','chop_score','volatility','target_price','invalidation_price','expected_window','status','contract_id','profit','actual_window','latency_class','entry_spot','exit_spot','mfe','mae','target_touched','path_ticks','path_high','path_low'];
+  const rows = ledger.map(r => [r.cohort,r.duration,new Date(r.observedAt).toISOString(),r.symbol,r.signalEpoch ?? r.epoch,r.signalQuote ?? r.quote,r.session,r.phase,r.direction,r.waveKey,r.fibEntryRetrace,r.quality,r.triggerKind,r.triggerStrength,r.regime200,r.active80,r.fast,r.slope200,r.slope80,r.efficiency80,r.directionLockReason,r.chopScore,r.volatility,r.targetPrice,r.invalidationPrice,r.expectedWindow,r.status,r.contractId??'',r.profit??'',r.actualWindow??'',r.latencyClass??'',r.entrySpot??'',r.exitSpot??'',r.mfe??'',r.mae??'',r.targetTouched??'',r.pathTicks??'',r.pathHigh??'',r.pathLow??'']);
   const csv = [headers, ...rows].map(a => a.map(v => `"${String(v ?? '').replaceAll('"','""')}"`).join(',')).join('\n');
   const url = URL.createObjectURL(new Blob([csv], { type:'text/csv' })), a = document.createElement('a');
   a.href = url;
-  a.download = `master-v6.7-ab-entry-${new Date().toISOString().replaceAll(':','-')}.csv`;
+  a.download = `master-v6.8-direction-duration-${new Date().toISOString().replaceAll(':','-')}.csv`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
@@ -622,11 +619,11 @@ function drawMarker(ctx, v, x, y) {
     ctx.strokeStyle = v.state === 'INVALID' ? '#ff7474' : 'rgba(200,206,216,.75)'; ctx.lineWidth = 1.7;
     ctx.beginPath(); ctx.moveTo(x-4,y-4); ctx.lineTo(x+4,y+4); ctx.moveTo(x+4,y-4); ctx.lineTo(x-4,y+4); ctx.stroke();
   } else if (v.state === 'BLOCKED') {
-    ctx.strokeStyle = '#f3c567'; ctx.lineWidth = 1.5; ctx.strokeRect(x-4,y-4,8,8);
+    ctx.strokeStyle = '#ff9c6e'; ctx.lineWidth = 1.5; ctx.strokeRect(x-4,y-4,8,8);
   } else if (v.state === 'SIGNAL') {
     ctx.fillStyle = v.direction === 'BULL' ? '#67d99a' : '#ff7474';
     ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill();
-    ctx.font = '10px system-ui'; ctx.fillText(`S${v.entryMode === 'B_PRE_TURN' ? 'B' : 'A'}`, x + 6, y - 6);
+    ctx.font = '10px system-ui'; ctx.fillText(`S${v.duration || '?'}`, x + 6, y - 6);
   }
 }
 function draw() {
@@ -650,7 +647,7 @@ function draw() {
 
   const nowRetrace = d?.wave ? d.wave.currentRetrace * 100 : null;
   ctx.fillStyle = 'rgba(245,247,250,.88)'; ctx.font = '12px system-ui';
-  ctx.fillText(`200 ${d?.regime200 || '—'}   80 ${d?.active80 || '—'}   FAST ${d?.fast || '—'}   ${session}   ${d?.entryMode || '—'}   ${d?.phase || '—'}   ${Number.isFinite(nowRetrace) ? 'NOW '+nowRetrace.toFixed(1)+'%' : ''}`, 16, 22);
+  ctx.fillText(`200 ${d?.regime200 || '—'}   80 ${d?.active80 || '—'} ${Number.isFinite(d?.m80?.slopeNorm) ? '('+d.m80.slopeNorm.toFixed(3)+')' : ''}   FAST ${d?.fast || '—'}   ${session}   ${d?.duration || '—'}T   ${d?.phase || '—'}   ${Number.isFinite(nowRetrace) ? 'NOW '+nowRetrace.toFixed(1)+'%' : ''}`, 16, 22);
 
   if (d?.wave && d?.waveRows) {
     const se = d.waveRows[d.wave.start.i]?.epoch, ee = d.waveRows[d.wave.end.i]?.epoch;
@@ -690,7 +687,7 @@ function draw() {
 
   for (const r of ledger.filter(r => Number.isFinite(+r.contractId) && Number(r.entryTickTime ?? r.epoch) >= visibleStart && Number(r.entryTickTime ?? r.epoch) <= visibleEnd)) {
     const sx = xFor(Number(r.signalEpoch ?? r.epoch)), sy = yFor(Number(r.signalQuote ?? r.quote));
-    ctx.fillStyle = r.direction === 'CALL' ? '#67d99a' : '#ff7474'; ctx.font = '10px system-ui'; ctx.fillText(`S${r.entryMode === 'B_PRE_TURN' ? 'B' : 'A'}`, sx + 5, sy - 7);
+    ctx.fillStyle = r.direction === 'CALL' ? '#67d99a' : '#ff7474'; ctx.font = '10px system-ui'; ctx.fillText(`S${r.duration || '?'}`, sx + 5, sy - 7);
     const ep = Number(r.entryTickTime ?? r.epoch), price = Number(r.entrySpot ?? r.quote), x = xFor(ep), y = yFor(price), call = r.direction === 'CALL';
     ctx.fillStyle = call ? '#67d99a' : '#ff7474'; ctx.beginPath();
     if (call) { ctx.moveTo(x,y-10); ctx.lineTo(x-6,y+5); ctx.lineTo(x+6,y+5); }
@@ -701,14 +698,14 @@ function draw() {
       const ex = xFor(ee), ey = yFor(xp);
       ctx.strokeStyle = r.status === 'WON' ? '#67d99a' : '#ff7474'; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(ex,ey); ctx.stroke();
       ctx.beginPath(); ctx.arc(ex,ey,5,0,Math.PI*2); ctx.stroke(); ctx.fillStyle = r.status === 'WON' ? '#67d99a' : '#ff7474';
-      ctx.fillText(`X ${Number(r.profit || 0) >= 0 ? '+' : ''}${Number(r.profit || 0).toFixed(2)}`, ex + 7, ey - 7);
+      ctx.fillText(`X${r.duration || '?'} ${Number(r.profit || 0) >= 0 ? '+' : ''}${Number(r.profit || 0).toFixed(2)}`, ex + 7, ey - 7);
     }
   }
-  $('masterCanvasCaption').textContent = `${session} · ${d?.entryMode || '—'} · ${d?.phase || 'SEARCHING'} · S=signal · E=Deriv entry · X=expiry · A=first-turn · B=pre-turn deceleration · ${rows.length} ticks`;
+  $('masterCanvasCaption').textContent = `${session} · ${d?.dirLock?.ok ? 'DIR LOCKED' : 'DIR BLOCK'} · ${d?.duration || '—'}T · ${d?.phase || 'SEARCHING'} · S=signal · E=Deriv entry · X=expiry · square=blocked · ${rows.length} ticks`;
 }
 
 const baseBuy = engine.onBuy.bind(engine);
-engine.onBuy = function onABBuy(message) {
+engine.onBuy = function onMasterBuy(message) {
   const pending = this.pending.get(Number(message.req_id));
   const meta = pending?.signal?.patternMeta ? { ...pending.signal.patternMeta } : null;
   baseBuy(message);
@@ -716,18 +713,19 @@ engine.onBuy = function onABBuy(message) {
   if (!trade || !meta) return;
   trade.patternMeta = meta; trade.ledgerId = meta.ledgerId; trade.expectedWindow = meta.expectedWindow;
   contractToLedger.set(id, meta.ledgerId);
-  patchRow(meta.ledgerId, { status:'BOUGHT', contractId:id, buyAckMs:trade.sendToAckMs });
+  patchRow(meta.ledgerId, { status:'BOUGHT', contractId:id, buyAckMs:trade.sendToAckMs, duration: trade.duration });
   this.emit();
 };
 const baseContract = engine.onContract.bind(engine);
-engine.onContract = function onABContract(contract) {
+engine.onContract = function onMasterContract(contract) {
   const id = Number(contract?.contract_id);
   baseContract(contract);
   const trade = this.trades.find(x => Number(x.contractId) === id);
   if (!trade?.patternMeta || !(contract?.is_sold || contract?.is_expired)) return;
   const o = actualOffset(trade);
   if (!trade.offsetRecorded && Number.isFinite(o)) { trade.offsetRecorded = true; recordOffset(o); }
-  trade.actualWindow = Number.isFinite(o) ? `T+${o}→T+${o + DURATION}` : 'unknown';
+  const dur = Number(trade.duration || trade.patternMeta.duration || 3);
+  trade.actualWindow = Number.isFinite(o) ? `T+${o}→T+${o + dur}` : 'unknown';
   trade.latencyClass = latency(o);
   const path = pathStats(trade.patternMeta, trade);
   patchRow(trade.ledgerId || contractToLedger.get(id), {
@@ -735,7 +733,7 @@ engine.onContract = function onABContract(contract) {
     actualWindow: trade.actualWindow, latencyClass: trade.latencyClass,
     entrySpot: trade.entrySpot, exitSpot: trade.exitSpot,
     entryTickTime: trade.entryTickTime, exitTickTime: trade.exitTickTime,
-    ...path
+    duration: dur, ...path
   });
   draw(); this.emit();
 };
@@ -764,16 +762,16 @@ $('ptStart').onclick = () => {
   clearError();
   try {
     auth(); traderConfig();
-    if (bought() >= +($('ptMaxTrades').value || 100)) throw new Error('v6.7 cohort cap reached.');
+    if (bought() >= +($('ptMaxTrades').value || 100)) throw new Error('v6.8 cohort cap reached.');
     engine.start();
-    engine.log('info', 'Master v6.7 armed: deterministic A/B by wave. A waits first reversal tick; B fires on adverse-momentum deceleration before the turn.');
+    engine.log('info', 'Master v6.8 armed: first-turn entry + hard direction coherence + deterministic 3t/5t duration split.');
   } catch (e) { showError(e.message); }
 };
 $('ptPause').onclick = () => engine.pause();
 $('ptStop').onclick = () => engine.stop();
 $('ptReset').onclick = () => { try { engine.resetSession(); lastSignalEpoch = 0; cooldownUntil = 0; } catch (e) { showError(e.message); } };
 $('ptClearLedger').onclick = () => {
-  if (confirm('Clear fresh v6.7 A/B cohort and visual trail?')) {
+  if (confirm('Clear fresh v6.8 direction/duration cohort and visual trail?')) {
     ledger = []; visualHistory = []; waveMemory.clear();
     localStorage.removeItem(LEDGER_KEY); localStorage.removeItem(VISUAL_KEY);
     strategy.session = 'NEUTRAL'; strategy.neutralTicks = 0; renderLedger(); draw();
@@ -800,27 +798,29 @@ engine.subscribe(state => {
   $('ptTradeRows').innerHTML = state.trades.length ? state.trades.map(t => {
     const m = t.patternMeta || {}, expected = t.expectedWindow || m.expectedWindow || '—', actual = t.actualWindow || '—';
     const row = ledger.find(r => Number(r.contractId) === Number(t.contractId));
-    return `<tr><td>#${t.contractId}</td><td>${esc(`${m.session || '—'} · ${m.entryMode || '—'}`)}</td><td>${t.direction}</td><td>${esc(`${m.triggerKind || '—'} · ${(Number(m.fibEntryRetrace || 0) * 100).toFixed(0)}% · Q${m.quality ?? '—'}`)}</td><td><span class="result ${t.status}">${t.status}</span></td><td>${t.duration}t</td><td>${expected}</td><td>${actual}</td><td>${t.latencyClass || '—'}</td><td class="${(t.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${t.profit === undefined ? '—' : `${t.profit >= 0 ? '+' : ''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs === undefined ? '—' : Number(t.sendToAckMs).toFixed(0) + 'ms'}</td><td>S ${m.signalQuote ?? m.quote ?? '—'} → E ${t.entrySpot ?? '—'} → X ${t.exitSpot ?? '—'}${row && Number.isFinite(+row.mfe) ? ` · MFE ${(+row.mfe).toFixed(1)}/MAE ${(+row.mae).toFixed(1)}` : ''}</td></tr>`;
-  }).join('') : '<tr><td colspan="12" class="empty">No v6.7 trades yet.</td></tr>';
-  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 70).map(l => `<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${esc(l.message === 'Engine armed. Waiting for fresh BOS.' ? 'Master v6.7 execution engine armed.' : l.message)}</span></div>`).join('');
+    return `<tr><td>#${t.contractId}</td><td>${esc(`${m.session || '—'} · DIR LOCK`)}</td><td>${t.direction}</td><td>${esc(`${t.duration || m.duration || '—'}T · ${m.triggerKind || '—'} · ${(Number(m.fibEntryRetrace || 0) * 100).toFixed(0)}% · Q${m.quality ?? '—'}`)}</td><td><span class="result ${t.status}">${t.status}</span></td><td>${t.duration}t</td><td>${expected}</td><td>${actual}</td><td>${t.latencyClass || '—'}</td><td class="${(t.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${t.profit === undefined ? '—' : `${t.profit >= 0 ? '+' : ''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs === undefined ? '—' : Number(t.sendToAckMs).toFixed(0) + 'ms'}</td><td>S ${m.signalQuote ?? m.quote ?? '—'} → E ${t.entrySpot ?? '—'} → X ${t.exitSpot ?? '—'}${row && Number.isFinite(+row.mfe) ? ` · MFE ${(+row.mfe).toFixed(1)}/MAE ${(+row.mae).toFixed(1)}` : ''}</td></tr>`;
+  }).join('') : '<tr><td colspan="12" class="empty">No v6.8 trades yet.</td></tr>';
+  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 70).map(l => `<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${esc(l.message === 'Engine armed. Waiting for fresh BOS.' ? 'Master v6.8 execution engine armed.' : l.message)}</span></div>`).join('');
   renderLedger(); draw();
 });
 
 window.addEventListener('DOMContentLoaded', () => {
-  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('Master Regime Trader v6.7'));
+  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('Master Regime Trader v6.8'));
   const title = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Master Trader v6'));
-  if (title) title.textContent = 'Master Trader v6.7 · A/B Timing Lab';
+  if (title) title.textContent = 'Master Trader v6.8 · Direction-Lock + Duration Lab';
   const rules = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Frozen v6'));
-  if (rules) rules.textContent = 'Frozen v6.7 A/B entry rules';
-  if ($('ptStart')) $('ptStart').textContent = 'Start Master Trader v6.7';
+  if (rules) rules.textContent = 'Frozen v6.8 direction-lock / 3t–5t rules';
+  if ($('ptStart')) $('ptStart').textContent = 'Start Master Trader v6.8';
   if ($('ptCooldown')) $('ptCooldown').value = '0';
   const labels = [...document.querySelectorAll('.label, .statLabel, .metricLabel, small')];
-  const bullLabel = labels.find(x => x.textContent.trim() === 'BULL W/L'); if (bullLabel) bullLabel.textContent = 'A FIRST-TURN W/L · P/L';
-  const bearLabel = labels.find(x => x.textContent.trim() === 'BEAR W/L'); if (bearLabel) bearLabel.textContent = 'B PRE-TURN W/L · P/L';
-  const fixedText = [...document.querySelectorAll('.muted')].find(x => x.textContent.includes('v6.6:') || x.textContent.includes('Fixed internals:'));
-  if (fixedText) fixedText.textContent = 'v6.7 controlled A/B: each live wave is deterministically assigned A or B. A = first reversal tick inside 32–68%. B = pre-turn deceleration while the retracement is still adverse. Same direction engine, same 3-tick Demo contract, zero default cooldown, one-open lock. Visual S=signal, E=Deriv entry, X=expiry.';
+  const bullLabel = labels.find(x => x.textContent.trim() === 'BULL W/L' || x.textContent.includes('A FIRST-TURN'));
+  if (bullLabel) bullLabel.textContent = '3T W/L · P/L';
+  const bearLabel = labels.find(x => x.textContent.trim() === 'BEAR W/L' || x.textContent.includes('B PRE-TURN'));
+  if (bearLabel) bearLabel.textContent = '5T W/L · P/L';
+  const fixedText = [...document.querySelectorAll('.muted')].find(x => x.textContent.includes('v6.7') || x.textContent.includes('v6.6:') || x.textContent.includes('Fixed internals:'));
+  if (fixedText) fixedText.textContent = 'v6.8: first-turn entry only. Hard direction lock blocks CALL when 80-tick slope materially points down and PUT when it materially points up; strong 200-tick conflict also vetoes. Qualified waves are deterministically split 3t vs 5t so duration becomes the controlled exit test. Same Demo stake, zero default cooldown, one-open lock.';
   const stateTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('v6') && x.textContent.includes('state machine'));
-  if (stateTitle) stateTitle.textContent = 'v6.7 A/B timing state machine';
+  if (stateTitle) stateTitle.textContent = 'v6.8 direction-lock / duration state machine';
   $('ptAppId').value = localStorage.getItem('sani.deriv.appId') || '';
   $('ptToken').value = sessionStorage.getItem('sani.deriv.token') || '';
   renderLedger(); draw();
