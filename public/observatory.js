@@ -6,6 +6,7 @@ let ticks = [];
 let matches = [];
 let analysisQueued = false;
 let subscriptionId;
+let lastSnapshot;
 
 const stateKey = symbol => `sani.observatory.ticks.${symbol}`;
 
@@ -21,21 +22,11 @@ function clearError() {
   $('obsError').textContent = '';
   $('obsError').classList.add('hidden');
 }
-function currentSymbol() {
-  return $('obsSymbol').value.trim() || '1HZ25V';
-}
-function archiveLimit() {
-  return Number($('archiveLimit').value || 5000);
-}
-function patternLength() {
-  return Number($('patternLength').value || 20);
-}
-function similarityFloor() {
-  return Number($('similarityFloor').value || 0.82);
-}
-function maxMatches() {
-  return Number($('maxMatches').value || 80);
-}
+function currentSymbol() { return $('obsSymbol').value.trim() || '1HZ25V'; }
+function archiveLimit() { return Number($('archiveLimit').value || 5000); }
+function patternLength() { return Number($('patternLength').value || 20); }
+function similarityFloor() { return Number($('similarityFloor').value || 0.82); }
+function maxMatches() { return Number($('maxMatches').value || 80); }
 function persistTicks() {
   try { localStorage.setItem(stateKey(currentSymbol()), JSON.stringify(ticks.slice(-archiveLimit()))); } catch {}
 }
@@ -86,6 +77,36 @@ function outcomeAt(endIndex, horizon) {
   if (future < base) return 'DOWN';
   return 'FLAT';
 }
+
+function horizonStats(h) {
+  const up = matches.filter(m => m.outcomes[h] === 'UP').length;
+  const down = matches.filter(m => m.outcomes[h] === 'DOWN').length;
+  const flat = matches.length - up - down;
+  const decided = up + down;
+  const upPct = decided ? up / decided * 100 : 0;
+  const downPct = decided ? down / decided * 100 : 0;
+  const bias = !decided ? 'NONE' : upPct > downPct ? 'UP' : downPct > upPct ? 'DOWN' : 'EVEN';
+  return { horizon: h, up, down, flat, decided, upPct, downPct, bias, strength: decided ? Math.max(upPct, downPct) : 0 };
+}
+function buildSnapshot() {
+  const last = ticks.at(-1);
+  return {
+    at: Date.now(),
+    symbol: currentSymbol(),
+    epoch: Number(last?.epoch),
+    quote: Number(last?.quote),
+    archiveCount: ticks.length,
+    patternLength: patternLength(),
+    matchCount: matches.length,
+    avgSimilarity: matches.length ? matches.reduce((s, m) => s + m.similarity, 0) / matches.length * 100 : 0,
+    horizons: HORIZONS.map(horizonStats)
+  };
+}
+function publishSnapshot() {
+  lastSnapshot = buildSnapshot();
+  window.dispatchEvent(new CustomEvent('sani-observatory-analysis', { detail: lastSnapshot }));
+}
+window.SaniObservatory = { getSnapshot: () => lastSnapshot ? structuredClone(lastSnapshot) : buildSnapshot() };
 
 function analyze() {
   analysisQueued = false;
@@ -149,6 +170,7 @@ function renderAnalysis(currentShape) {
   drawPatternCanvas(currentShape || (ticks.length >= patternLength() ? normalizeShape(ticks.slice(-patternLength()).map(t => t.quote)) : []));
   renderHorizons();
   renderMatches();
+  publishSnapshot();
 }
 function renderHorizons() {
   if (!matches.length) {
@@ -156,14 +178,9 @@ function renderHorizons() {
     return;
   }
   $('horizonGrid').innerHTML = HORIZONS.map(h => {
-    const up = matches.filter(m => m.outcomes[h] === 'UP').length;
-    const down = matches.filter(m => m.outcomes[h] === 'DOWN').length;
-    const flat = matches.length - up - down;
-    const decided = up + down;
-    const upPct = decided ? up / decided * 100 : 0;
-    const bias = !decided ? 'NO DATA' : upPct > 50 ? 'UP' : upPct < 50 ? 'DOWN' : 'EVEN';
-    const strength = decided ? Math.max(upPct, 100 - upPct) : 0;
-    return `<div class="horizonBox"><span>+${h} ticks</span><strong>${decided ? strength.toFixed(1) + '%' : '—'}</strong><b class="${bias === 'UP' ? 'positive' : bias === 'DOWN' ? 'negative' : ''}">${bias}</b><small>${up} up · ${down} down${flat ? ` · ${flat} flat` : ''}</small></div>`;
+    const s = horizonStats(h);
+    const bias = s.bias === 'NONE' ? 'NO DATA' : s.bias;
+    return `<div class="horizonBox"><span>+${h} ticks</span><strong>${s.decided ? s.strength.toFixed(1) + '%' : '—'}</strong><b class="${bias === 'UP' ? 'positive' : bias === 'DOWN' ? 'negative' : ''}">${bias}</b><small>${s.up} up · ${s.down} down${s.flat ? ` · ${s.flat} flat` : ''}</small></div>`;
   }).join('');
 }
 function renderMatches() {
@@ -256,11 +273,11 @@ function connect() {
       if (message.msg_type === 'history' && message.history) {
         const prices = message.history.prices || []; const times = message.history.times || [];
         const history = prices.map((quote, i) => ({ quote: Number(quote), epoch: Number(times[i]) }));
-        ticks = dedupeTicks([...ticks, ...history]).slice(-archiveLimit()); persistTicks(); queueAnalysis(); setStatus('Live · read only', true);
+        ticks = dedupeTicks([...ticks, ...history]).slice(-archiveLimit()); persistTicks(); queueAnalysis(); setStatus('Live', true);
       }
       if (message.msg_type === 'tick' && message.tick) {
         subscriptionId = message.subscription?.id || subscriptionId;
-        addTick(message.tick.epoch, message.tick.quote); setStatus('Live · read only', true);
+        addTick(message.tick.epoch, message.tick.quote); setStatus('Live', true);
       }
     };
     ws.onerror = () => showError('Market-data WebSocket error.');
