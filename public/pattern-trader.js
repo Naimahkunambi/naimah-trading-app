@@ -2,10 +2,9 @@ import { SaniEngine, DEFAULT_CONFIG } from './core/engine.mjs';
 
 const $ = id => document.getElementById(id);
 const perfNow = () => globalThis.performance?.now?.() ?? Date.now();
-const LEDGER_KEY = 'sani.patternTrader.signalLedger.v4';
+const LEDGER_KEY = 'sani.patternTrader.signalLedger.v5';
 const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
-const NEXT_ARM_KEY = 'sani.patternTrader.v4.nextArm';
-const MAX_LEDGER = 2000;
+const MAX_LEDGER = 3000;
 const FIXED_HORIZON = 3;
 
 let accounts = [];
@@ -27,7 +26,7 @@ const config = {
   oneOpenContract: true,
   takeProfit: 0,
   stopLoss: 0,
-  maxTrades: 40,
+  maxTrades: 100,
   maxConsecutiveLosses: 0,
   cooldownTicks: 0,
   maxSignalToSendMs: 500,
@@ -52,17 +51,13 @@ function saveLedger() {
   signalLedger = signalLedger.slice(0, MAX_LEDGER);
   try { localStorage.setItem(LEDGER_KEY, JSON.stringify(signalLedger)); } catch {}
 }
-function nextArm() {
-  const saved = localStorage.getItem(NEXT_ARM_KEY);
-  return saved === 'INVERSE' ? 'INVERSE' : 'NORMAL';
-}
-function setNextArm(arm) {
-  const safe = arm === 'INVERSE' ? 'INVERSE' : 'NORMAL';
-  try { localStorage.setItem(NEXT_ARM_KEY, safe); } catch {}
-  renderArmStats();
-}
-function oppositeArm(arm) { return arm === 'NORMAL' ? 'INVERSE' : 'NORMAL'; }
 function invertDirection(direction) { return direction === 'CALL' ? 'PUT' : 'CALL'; }
+function shadowOutcome(actualStatus) {
+  const status = String(actualStatus || '').toUpperCase();
+  if (status === 'WON') return 'LOST';
+  if (status === 'LOST') return 'WON';
+  return 'UNKNOWN';
+}
 function entryOffsets() {
   return loadArray(OFFSET_KEY).map(Number).filter(Number.isFinite).slice(-50);
 }
@@ -102,14 +97,16 @@ function ensureLedgerRow(signal) {
   let row = signalLedger.find(r => r.signalKey === key);
   if (row) return row;
   row = {
-    id: `pt4-${signal.epoch}-${Date.now()}`,
-    cohort: 'v4-normal-inverse-3t-ab',
+    id: `pt5-${signal.epoch}-${Date.now()}`,
+    cohort: 'v5-normal-only-3t-shadow-inverse',
     signalKey: key,
     observedAt: Date.now(),
     symbol: signal.symbol || '1HZ25V',
     epoch: signal.epoch,
     quote: signal.quote,
     baseDirection: signal.baseDirection,
+    tradeDirection: signal.baseDirection,
+    shadowInverseDirection: invertDirection(signal.baseDirection),
     horizon: FIXED_HORIZON,
     strength: signal.strength,
     matchCount: signal.matchCount,
@@ -180,7 +177,7 @@ function getAuthContext() {
   if (!appId || !token) throw new Error('App ID and trade token are required.');
   if (!selectedAccount) throw new Error('Load and select a Deriv Options account.');
   const real = String(selectedAccount.account_type).toLowerCase() === 'real';
-  if (real) throw new Error('Pattern Trader v4 A/B is Demo-only. Select a DEMO account.');
+  if (real) throw new Error('Pattern Trader v5 is Demo-only. Select a DEMO account.');
   return { appId, token, accountId };
 }
 async function freshWsUrl() {
@@ -268,29 +265,28 @@ function maybeTrade(snapshot) {
     readTraderConfig();
     engine.config.duration = FIXED_HORIZON;
     const t = thresholds();
-    const arm = nextArm();
-    const tradeDirection = arm === 'NORMAL' ? signal.baseDirection : invertDirection(signal.baseDirection);
+    const tradeDirection = signal.baseDirection;
     lastTradeSignalEpoch = signal.epoch;
     cooldownUntilEpoch = signal.epoch + t.cooldownTicks;
     const now = perfNow();
-    updateLedger(row.id, { arm, tradeDirection, status: 'ORDER SENT' });
+    updateLedger(row.id, { tradeDirection, status: 'ORDER SENT' });
     engine.execute({
       direction: tradeDirection,
-      structure: 'pattern-observatory-v4-ab-3t',
+      structure: 'pattern-observatory-v5-normal-3t',
       epoch: signal.epoch,
       quote: signal.quote,
       detectedPerf: now,
       detectedWallMs: Date.now(),
       patternMeta: {
         ...signal,
-        arm,
         tradeDirection,
+        shadowInverseDirection: invertDirection(tradeDirection),
         horizon: FIXED_HORIZON,
         ledgerId: row.id,
         expectedWindow: row.expectedWindow
       }
     });
-    engine.log('success', `PATTERN v4 ${arm} · base ${signal.baseDirection} → trade ${tradeDirection} · fixed 3t · ${signal.strength.toFixed(1)}% execution-aware bias · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% similarity.`);
+    engine.log('success', `PATTERN v5 BASE ${tradeDirection} · fixed 3t · ${signal.strength.toFixed(1)}% execution-aware bias · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% similarity.`);
   } catch (error) {
     updateLedger(row.id, { status: 'ERROR', error: error.message });
     showTraderError(error.message);
@@ -304,9 +300,8 @@ function renderPatternSignal(snapshot, existingSignal) {
     $('ptSignal').innerHTML = '<b>WAIT</b><span>The execution-aware 3-tick signal does not meet the current thresholds.</span>';
     return;
   }
-  const arm = nextArm();
-  const tradeDirection = arm === 'NORMAL' ? signal.baseDirection : invertDirection(signal.baseDirection);
-  $('ptSignal').innerHTML = `<b class="${tradeDirection === 'CALL' ? 'positive' : 'negative'}">NEXT ${arm} · ${tradeDirection} · 3 ticks</b><span>Base model says ${signal.baseDirection} at ${signal.strength.toFixed(1)}% · ${arm === 'INVERSE' ? 'direction flipped for A/B test' : 'direction kept'} · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% similarity</span>`;
+  const inverse = invertDirection(signal.baseDirection);
+  $('ptSignal').innerHTML = `<b class="${signal.baseDirection === 'CALL' ? 'positive' : 'negative'}">BASE ${signal.baseDirection} · 3 ticks</b><span>${signal.strength.toFixed(1)}% execution-aware bias · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% similarity · shadow will score ${inverse} on the same settled window</span>`;
 }
 
 const baseOnBuy = engine.onBuy.bind(engine);
@@ -320,18 +315,14 @@ engine.onBuy = function patternOnBuy(message) {
   trade.patternMeta = meta;
   trade.ledgerId = meta.ledgerId;
   trade.expectedWindow = meta.expectedWindow;
-  trade.abArm = meta.arm;
   trade.baseDirection = meta.baseDirection;
+  trade.shadowInverseDirection = meta.shadowInverseDirection;
   contractToLedger.set(contractId, meta.ledgerId);
-  if (!trade.abArmConfirmed) {
-    trade.abArmConfirmed = true;
-    setNextArm(oppositeArm(meta.arm));
-  }
   updateLedger(meta.ledgerId, {
     status: 'BOUGHT',
-    arm: meta.arm,
     baseDirection: meta.baseDirection,
     tradeDirection: meta.tradeDirection,
+    shadowInverseDirection: meta.shadowInverseDirection,
     contractId,
     buyAckMs: trade.sendToAckMs,
     serverStartDelayMs: trade.serverStartDelayMs
@@ -354,11 +345,16 @@ engine.onContract = function patternOnContract(contract) {
   trade.actualEntryOffset = offset;
   trade.latencyClass = latencyClass(offset);
   trade.actualWindow = Number.isFinite(offset) ? `T+${offset}→T+${offset + FIXED_HORIZON}` : 'unknown';
+  const actualStatus = String(trade.status || 'sold').toUpperCase();
+  const inverseStatus = shadowOutcome(actualStatus);
+  trade.shadowInverseStatus = inverseStatus;
   const ledgerId = trade.ledgerId || contractToLedger.get(contractId) || trade.patternMeta.ledgerId;
   updateLedger(ledgerId, {
-    status: String(trade.status || 'sold').toUpperCase(),
+    status: actualStatus,
     contractId,
     profit: trade.profit,
+    shadowInverseDirection: trade.patternMeta.shadowInverseDirection,
+    shadowInverseStatus: inverseStatus,
     actualEntryOffset: offset,
     actualWindow: trade.actualWindow,
     latencyClass: trade.latencyClass,
@@ -367,30 +363,34 @@ engine.onContract = function patternOnContract(contract) {
     entryTickTime: trade.entryTickTime,
     exitTickTime: trade.exitTickTime
   });
+  if (inverseStatus !== 'UNKNOWN') {
+    this.log('info', `SHADOW INVERSE ${trade.patternMeta.shadowInverseDirection} would be ${inverseStatus} on ${trade.actualWindow}.`);
+  }
   this.emit();
 };
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[c]));
 }
-function settledRows(arm) {
-  return signalLedger.filter(r => r.arm === arm && (r.status === 'WON' || r.status === 'LOST'));
+function settledRows() {
+  return signalLedger.filter(r => r.status === 'WON' || r.status === 'LOST');
 }
-function armStats(arm) {
-  const rows = settledRows(arm);
+function cohortStats() {
+  const rows = settledRows();
   const wins = rows.filter(r => r.status === 'WON').length;
   const losses = rows.filter(r => r.status === 'LOST').length;
-  const pnl = rows.reduce((s, r) => s + Number(r.profit || 0), 0);
-  return { wins, losses, pnl };
+  const shadowWins = rows.filter(r => r.shadowInverseStatus === 'WON').length;
+  const shadowLosses = rows.filter(r => r.shadowInverseStatus === 'LOST').length;
+  const shadowDecided = shadowWins + shadowLosses;
+  const shadowWinRate = shadowDecided ? shadowWins / shadowDecided * 100 : 0;
+  return { wins, losses, shadowWins, shadowLosses, shadowWinRate };
 }
-function renderArmStats() {
-  const normal = armStats('NORMAL');
-  const inverse = armStats('INVERSE');
-  $('ptNextArm').textContent = nextArm();
-  $('ptNormalWL').textContent = `${normal.wins} / ${normal.losses}`;
-  $('ptNormalPnl').textContent = `${normal.pnl >= 0 ? '+' : ''}$${normal.pnl.toFixed(2)}`;
-  $('ptInverseWL').textContent = `${inverse.wins} / ${inverse.losses}`;
-  $('ptInversePnl').textContent = `${inverse.pnl >= 0 ? '+' : ''}$${inverse.pnl.toFixed(2)}`;
+function renderCohortStats() {
+  const s = cohortStats();
+  $('ptBaseWL').textContent = `${s.wins} / ${s.losses}`;
+  $('ptShadowWL').textContent = `${s.shadowWins} / ${s.shadowLosses}`;
+  $('ptShadowRate').textContent = `${s.shadowWinRate.toFixed(1)}%`;
+  $('ptCohortN').textContent = String(s.wins + s.losses);
 }
 function renderLedger() {
   const qualified = signalLedger.length;
@@ -400,24 +400,24 @@ function renderLedger() {
   $('ptBought').textContent = String(bought);
   $('ptSkipped').textContent = String(skipped);
   $('ptEntryOffset').textContent = `T+${entryOffsetEstimate()}`;
-  renderArmStats();
-  $('ptLedgerRows').innerHTML = signalLedger.length ? signalLedger.slice(0, 60).map(r => {
+  renderCohortStats();
+  $('ptLedgerRows').innerHTML = signalLedger.length ? signalLedger.slice(0, 80).map(r => {
     const time = new Date(r.observedAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
     const bias = Number.isFinite(Number(r.strength)) ? `${Number(r.strength).toFixed(1)}%` : '—';
     const sim = Number.isFinite(Number(r.avgSimilarity)) ? `${Number(r.avgSimilarity).toFixed(1)}%` : '—';
     const window = r.actualWindow ? `${r.expectedWindow} → ${r.actualWindow}` : r.expectedWindow;
-    return `<tr><td>${time}</td><td>${escapeHtml(r.arm || '—')}</td><td>${escapeHtml(r.baseDirection || '—')}</td><td>${escapeHtml(r.tradeDirection || '—')}</td><td>${bias}</td><td>${r.matchCount ?? '—'}</td><td>${sim}</td><td>${escapeHtml(window)}</td><td>${escapeHtml(r.latencyClass || '—')}</td><td>${escapeHtml(r.status || '—')}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="11" class="empty">No v4 A/B signals recorded yet.</td></tr>';
+    return `<tr><td>${time}</td><td>${escapeHtml(r.baseDirection || '—')}</td><td>${bias}</td><td>${r.matchCount ?? '—'}</td><td>${sim}</td><td>${escapeHtml(window)}</td><td>${escapeHtml(r.latencyClass || '—')}</td><td>${escapeHtml(r.status || '—')}</td><td>${escapeHtml(r.shadowInverseStatus || '—')}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="10" class="empty">No v5 signals recorded yet.</td></tr>';
 }
 function exportLedgerCsv() {
-  const headers = ['cohort','observed_at','symbol','epoch','quote','arm','base_direction','trade_direction','duration_ticks','three_tick_bias_pct','matches','avg_similarity_pct','expected_entry_offset','expected_window','status','contract_id','profit','actual_entry_offset','actual_window','latency_class','entry_spot','exit_spot'];
-  const rows = signalLedger.map(r => [r.cohort,new Date(r.observedAt).toISOString(),r.symbol,r.epoch,r.quote,r.arm ?? '',r.baseDirection,r.tradeDirection ?? '',FIXED_HORIZON,r.strength,r.matchCount,r.avgSimilarity,r.expectedOffset,r.expectedWindow,r.status,r.contractId ?? '',r.profit ?? '',r.actualEntryOffset ?? '',r.actualWindow ?? '',r.latencyClass ?? '',r.entrySpot ?? '',r.exitSpot ?? '']);
+  const headers = ['cohort','observed_at','symbol','epoch','quote','base_direction','trade_direction','shadow_inverse_direction','duration_ticks','three_tick_bias_pct','matches','avg_similarity_pct','expected_entry_offset','expected_window','status','shadow_inverse_status','contract_id','profit','actual_entry_offset','actual_window','latency_class','entry_spot','exit_spot'];
+  const rows = signalLedger.map(r => [r.cohort,new Date(r.observedAt).toISOString(),r.symbol,r.epoch,r.quote,r.baseDirection,r.tradeDirection,r.shadowInverseDirection,FIXED_HORIZON,r.strength,r.matchCount,r.avgSimilarity,r.expectedOffset,r.expectedWindow,r.status,r.shadowInverseStatus ?? '',r.contractId ?? '',r.profit ?? '',r.actualEntryOffset ?? '',r.actualWindow ?? '',r.latencyClass ?? '',r.entrySpot ?? '',r.exitSpot ?? '']);
   const csv = [headers, ...rows].map(row => row.map(v => `"${String(v ?? '').replaceAll('"','""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = `pattern-v4-normal-inverse-3t-${new Date().toISOString().replaceAll(':','-')}.csv`;
+  anchor.download = `pattern-v5-normal-3t-shadow-inverse-${new Date().toISOString().replaceAll(':','-')}.csv`;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
@@ -459,7 +459,7 @@ $('ptStart').onclick = () => {
     getAuthContext();
     readTraderConfig();
     engine.start();
-    engine.log('info', `Pattern Trader v4 A/B armed. Next accepted trade: ${nextArm()}. Fixed duration: 3 ticks.`);
+    engine.log('info', 'Pattern Trader v5 armed. BASE/NORMAL only, fixed 3 ticks. Shadow inverse will be scored after settlement.');
     if (lastAnalysis) renderPatternSignal(lastAnalysis);
   } catch (error) { showTraderError(error.message); }
 };
@@ -470,10 +470,9 @@ $('ptReset').onclick = () => {
   catch (error) { showTraderError(error.message); }
 };
 $('ptClearLedger').onclick = () => {
-  if (!confirm('Clear the v4 NORMAL vs INVERSE A/B ledger and restart alternation at NORMAL?')) return;
+  if (!confirm('Clear the fresh v5 BASE/NORMAL ledger? Older v4 data is not affected.')) return;
   signalLedger = [];
   localStorage.removeItem(LEDGER_KEY);
-  setNextArm('NORMAL');
   renderLedger();
 };
 $('ptResetCalibration').onclick = () => {
@@ -510,10 +509,11 @@ engine.subscribe(state => {
     const expected = t.expectedWindow || meta.expectedWindow || '—';
     const actual = t.actualWindow || '—';
     const latency = t.latencyClass || latencyClass(actualEntryOffset(t));
-    return `<tr><td>#${t.contractId}</td><td>${escapeHtml(meta.arm || '—')}</td><td>${escapeHtml(meta.baseDirection || '—')}</td><td>${t.direction}</td><td><span class="result ${t.status}">${t.status}</span></td><td>${t.duration}t</td><td>${escapeHtml(expected)}</td><td>${escapeHtml(actual)}</td><td>${escapeHtml(latency)}</td><td class="${(t.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${t.profit === undefined ? '—' : `${t.profit >= 0 ? '+' : ''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs === undefined ? '—' : Number(t.sendToAckMs).toFixed(0)+'ms'}</td><td>${t.entrySpot ?? '—'} → ${t.exitSpot ?? '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="12" class="empty">No v4 A/B trades yet.</td></tr>';
+    const shadow = t.shadowInverseStatus || '—';
+    return `<tr><td>#${t.contractId}</td><td>${t.direction}</td><td><span class="result ${t.status}">${t.status}</span></td><td>${escapeHtml(meta.shadowInverseDirection || '—')}</td><td>${escapeHtml(shadow)}</td><td>${t.duration}t</td><td>${escapeHtml(expected)}</td><td>${escapeHtml(actual)}</td><td>${escapeHtml(latency)}</td><td class="${(t.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${t.profit === undefined ? '—' : `${t.profit >= 0 ? '+' : ''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs === undefined ? '—' : Number(t.sendToAckMs).toFixed(0)+'ms'}</td><td>${t.entrySpot ?? '—'} → ${t.exitSpot ?? '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="12" class="empty">No v5 BASE/NORMAL trades yet.</td></tr>';
 
-  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 50).map(l => {
+  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 60).map(l => {
     const message = l.message === 'Engine armed. Waiting for fresh BOS.' ? 'Pattern Trader execution engine armed.' : l.message;
     return `<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${escapeHtml(message)}</span></div>`;
   }).join('');
@@ -523,7 +523,6 @@ engine.subscribe(state => {
 window.addEventListener('DOMContentLoaded', () => {
   $('ptAppId').value = localStorage.getItem('sani.deriv.appId') || '';
   $('ptToken').value = sessionStorage.getItem('sani.deriv.token') || '';
-  if (!localStorage.getItem(NEXT_ARM_KEY)) setNextArm('NORMAL');
   renderLedger();
   if ($('ptAppId').value && $('ptToken').value) $('ptLoadAccounts').click();
   const snap = window.SaniObservatory?.getSnapshot?.();
