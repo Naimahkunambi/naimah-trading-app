@@ -1,12 +1,17 @@
 const $ = id => document.getElementById(id);
 const HORIZONS = [1, 3, 5, 8, 10];
 const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
+const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
+const MAX_RECONNECT_ATTEMPTS = 8;
 let ws;
 let ticks = [];
 let matches = [];
 let analysisQueued = false;
 let subscriptionId;
 let lastSnapshot;
+let manualDisconnect = true;
+let reconnectAttempts = 0;
+let reconnectTimer;
 
 const stateKey = symbol => `sani.observatory.ticks.${symbol}`;
 
@@ -27,6 +32,21 @@ function archiveLimit() { return Number($('archiveLimit').value || 5000); }
 function patternLength() { return Number($('patternLength').value || 20); }
 function similarityFloor() { return Number($('similarityFloor').value || 0.82); }
 function maxMatches() { return Number($('maxMatches').value || 80); }
+function executionOffsetEstimate() {
+  try {
+    const rows = JSON.parse(localStorage.getItem(OFFSET_KEY) || '[]')
+      .map(Number)
+      .filter(Number.isFinite)
+      .map(v => Math.max(1, Math.min(10, Math.round(v))))
+      .slice(-30)
+      .sort((a, b) => a - b);
+    if (!rows.length) return 1;
+    const mid = Math.floor(rows.length / 2);
+    return rows.length % 2 ? rows[mid] : Math.round((rows[mid - 1] + rows[mid]) / 2);
+  } catch {
+    return 1;
+  }
+}
 function persistTicks() {
   try { localStorage.setItem(stateKey(currentSymbol()), JSON.stringify(ticks.slice(-archiveLimit()))); } catch {}
 }
@@ -69,27 +89,40 @@ function cosine(a, b) {
   if (!aa || !bb) return 0;
   return dot / Math.sqrt(aa * bb);
 }
-function outcomeAt(endIndex, horizon) {
-  const base = ticks[endIndex]?.quote;
-  const future = ticks[endIndex + horizon]?.quote;
-  if (!Number.isFinite(base) || !Number.isFinite(future)) return '—';
-  if (future > base) return 'UP';
-  if (future < base) return 'DOWN';
+function directionBetween(startIndex, endIndex) {
+  const start = ticks[startIndex]?.quote;
+  const end = ticks[endIndex]?.quote;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return '—';
+  if (end > start) return 'UP';
+  if (end < start) return 'DOWN';
   return 'FLAT';
 }
-
-function horizonStats(h) {
-  const up = matches.filter(m => m.outcomes[h] === 'UP').length;
-  const down = matches.filter(m => m.outcomes[h] === 'DOWN').length;
-  const flat = matches.length - up - down;
+function rawOutcome(endIndex, horizon) {
+  return directionBetween(endIndex, endIndex + horizon);
+}
+function executionOutcome(endIndex, startOffset, duration) {
+  return directionBetween(endIndex + startOffset, endIndex + startOffset + duration);
+}
+function statsFromOutcomes(outcomes, horizon, extra = {}) {
+  const up = outcomes.filter(v => v === 'UP').length;
+  const down = outcomes.filter(v => v === 'DOWN').length;
+  const flat = outcomes.filter(v => v === 'FLAT').length;
   const decided = up + down;
   const upPct = decided ? up / decided * 100 : 0;
   const downPct = decided ? down / decided * 100 : 0;
   const bias = !decided ? 'NONE' : upPct > downPct ? 'UP' : downPct > upPct ? 'DOWN' : 'EVEN';
-  return { horizon: h, up, down, flat, decided, upPct, downPct, bias, strength: decided ? Math.max(upPct, downPct) : 0 };
+  return { horizon, up, down, flat, decided, upPct, downPct, bias, strength: decided ? Math.max(upPct, downPct) : 0, ...extra };
+}
+function horizonStats(h) {
+  return statsFromOutcomes(matches.map(m => rawOutcome(m.end, h)), h, { startOffset: 0 });
+}
+function executionHorizonStats(h) {
+  const startOffset = executionOffsetEstimate();
+  return statsFromOutcomes(matches.map(m => executionOutcome(m.end, startOffset, h)), h, { startOffset });
 }
 function buildSnapshot() {
   const last = ticks.at(-1);
+  const executionOffset = executionOffsetEstimate();
   return {
     at: Date.now(),
     symbol: currentSymbol(),
@@ -99,7 +132,9 @@ function buildSnapshot() {
     patternLength: patternLength(),
     matchCount: matches.length,
     avgSimilarity: matches.length ? matches.reduce((s, m) => s + m.similarity, 0) / matches.length * 100 : 0,
-    horizons: HORIZONS.map(horizonStats)
+    executionOffset,
+    horizons: HORIZONS.map(horizonStats),
+    executionHorizons: HORIZONS.map(executionHorizonStats)
   };
 }
 function publishSnapshot() {
@@ -111,8 +146,10 @@ window.SaniObservatory = { getSnapshot: () => lastSnapshot ? structuredClone(las
 function analyze() {
   analysisQueued = false;
   const n = patternLength();
+  const executionOffset = executionOffsetEstimate();
   $('patternSizeStat').textContent = String(n);
   $('archiveCount').textContent = String(ticks.length);
+  $('executionOffsetStat').textContent = `T+${executionOffset}`;
   drawTickCanvas();
   if (ticks.length < n + 30) {
     matches = [];
@@ -123,22 +160,15 @@ function analyze() {
   const currentStart = ticks.length - n;
   const currentShape = normalizeShape(ticks.slice(currentStart).map(t => t.quote));
   const floor = similarityFloor();
-  const maxH = Math.max(...HORIZONS);
+  const maxLookahead = executionOffset + Math.max(...HORIZONS);
   const candidates = [];
 
-  for (let start = 0; start + n - 1 + maxH < currentStart; start += 1) {
+  for (let start = 0; start + n - 1 + maxLookahead < currentStart; start += 1) {
     const end = start + n - 1;
     const shape = normalizeShape(ticks.slice(start, start + n).map(t => t.quote));
     const sim = cosine(currentShape, shape);
     if (sim >= floor) {
-      candidates.push({
-        start,
-        end,
-        similarity: sim,
-        shape,
-        epoch: ticks[end].epoch,
-        outcomes: Object.fromEntries(HORIZONS.map(h => [h, outcomeAt(end, h)]))
-      });
+      candidates.push({ start, end, similarity: sim, shape, epoch: ticks[end].epoch });
     }
   }
 
@@ -158,30 +188,36 @@ function queueAnalysis() {
   requestAnimationFrame(analyze);
 }
 
+function renderGrid(targetId, statsFn, executionAware = false) {
+  const target = $(targetId);
+  if (!matches.length) {
+    target.innerHTML = '<div class="empty">No historical relatives above the current similarity floor yet.</div>';
+    return;
+  }
+  target.innerHTML = HORIZONS.map(h => {
+    const s = statsFn(h);
+    const bias = s.bias === 'NONE' ? 'NO DATA' : s.bias;
+    const windowText = executionAware ? `T+${s.startOffset}→T+${s.startOffset + h}` : `T0→T+${h}`;
+    return `<div class="horizonBox"><span>${windowText}</span><strong>${s.decided ? s.strength.toFixed(1) + '%' : '—'}</strong><b class="${bias === 'UP' ? 'positive' : bias === 'DOWN' ? 'negative' : ''}">${bias}</b><small>${s.up} up · ${s.down} down${s.flat ? ` · ${s.flat} flat` : ''}</small></div>`;
+  }).join('');
+}
 function renderAnalysis(currentShape) {
+  const executionOffset = executionOffsetEstimate();
   $('matchCount').textContent = String(matches.length);
   $('avgSimilarity').textContent = matches.length
     ? `${(matches.reduce((s, m) => s + m.similarity, 0) / matches.length * 100).toFixed(1)}%`
     : '—';
+  $('executionOffsetStat').textContent = `T+${executionOffset}`;
+  $('executionWindowCaption').textContent = `using measured entry offset T+${executionOffset}`;
   $('canvasCaption').textContent = ticks.length
     ? `${currentSymbol()} · ${ticks.at(-1).quote} · ${ticks.length.toLocaleString()} ticks archived`
     : 'waiting for ticks';
 
   drawPatternCanvas(currentShape || (ticks.length >= patternLength() ? normalizeShape(ticks.slice(-patternLength()).map(t => t.quote)) : []));
-  renderHorizons();
+  renderGrid('horizonGrid', horizonStats, false);
+  renderGrid('executionHorizonGrid', executionHorizonStats, true);
   renderMatches();
   publishSnapshot();
-}
-function renderHorizons() {
-  if (!matches.length) {
-    $('horizonGrid').innerHTML = '<div class="empty">No historical relatives above the current similarity floor yet.</div>';
-    return;
-  }
-  $('horizonGrid').innerHTML = HORIZONS.map(h => {
-    const s = horizonStats(h);
-    const bias = s.bias === 'NONE' ? 'NO DATA' : s.bias;
-    return `<div class="horizonBox"><span>+${h} ticks</span><strong>${s.decided ? s.strength.toFixed(1) + '%' : '—'}</strong><b class="${bias === 'UP' ? 'positive' : bias === 'DOWN' ? 'negative' : ''}">${bias}</b><small>${s.up} up · ${s.down} down${s.flat ? ` · ${s.flat} flat` : ''}</small></div>`;
-  }).join('');
 }
 function renderMatches() {
   if (!matches.length) {
@@ -190,7 +226,10 @@ function renderMatches() {
   }
   $('patternRows').innerHTML = matches.slice(0, 25).map((m, i) => {
     const seen = new Date(m.epoch * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const cells = HORIZONS.map(h => `<td class="${m.outcomes[h] === 'UP' ? 'positive' : m.outcomes[h] === 'DOWN' ? 'negative' : ''}">${m.outcomes[h]}</td>`).join('');
+    const cells = HORIZONS.map(h => {
+      const outcome = rawOutcome(m.end, h);
+      return `<td class="${outcome === 'UP' ? 'positive' : outcome === 'DOWN' ? 'negative' : ''}">${outcome}</td>`;
+    }).join('');
     return `<tr><td>#${i + 1}</td><td>${(m.similarity * 100).toFixed(1)}%</td><td>${seen}</td>${cells}</tr>`;
   }).join('');
 }
@@ -256,13 +295,43 @@ function drawPatternCanvas(currentShape) {
   if (currentShape?.length) draw(currentShape, '#f5f7fa', 3, 1);
 }
 
-function connect() {
-  clearError(); disconnect(); loadTicks(); queueAnalysis();
+function closeFeed() {
+  if (!ws) return;
+  try {
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    if (subscriptionId && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ forget: subscriptionId }));
+  } catch {}
+  try { ws.close(); } catch {}
+  ws = undefined;
+  subscriptionId = undefined;
+}
+function scheduleReconnect() {
+  if (manualDisconnect || reconnectTimer || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    if (!manualDisconnect && reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      setStatus('Reconnect limit reached');
+      showError('Observatory feed reconnect limit reached. Press Connect Observatory to retry.');
+    }
+    return;
+  }
+  reconnectAttempts += 1;
+  const delay = Math.min(15000, 750 * (2 ** (reconnectAttempts - 1)));
+  setStatus(`Reconnecting ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}…`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = undefined;
+    openFeed();
+  }, delay);
+}
+function openFeed() {
+  closeFeed();
   const symbol = currentSymbol();
-  setStatus('Connecting…');
+  setStatus(reconnectAttempts ? 'Reconnecting…' : 'Connecting…');
   try {
     ws = new WebSocket(PUBLIC_WS_URL);
     ws.onopen = () => {
+      reconnectAttempts = 0;
+      clearError();
       setStatus('Loading history…', true);
       ws.send(JSON.stringify({ ticks_history: symbol, count: archiveLimit(), end: 'latest', style: 'ticks', req_id: 1 }));
       ws.send(JSON.stringify({ ticks: symbol, subscribe: 1, req_id: 2 }));
@@ -273,23 +342,42 @@ function connect() {
       if (message.msg_type === 'history' && message.history) {
         const prices = message.history.prices || []; const times = message.history.times || [];
         const history = prices.map((quote, i) => ({ quote: Number(quote), epoch: Number(times[i]) }));
-        ticks = dedupeTicks([...ticks, ...history]).slice(-archiveLimit()); persistTicks(); queueAnalysis(); setStatus('Live', true);
+        ticks = dedupeTicks([...ticks, ...history]).slice(-archiveLimit()); persistTicks(); queueAnalysis(); clearError(); setStatus('Live', true);
       }
       if (message.msg_type === 'tick' && message.tick) {
         subscriptionId = message.subscription?.id || subscriptionId;
-        addTick(message.tick.epoch, message.tick.quote); setStatus('Live', true);
+        addTick(message.tick.epoch, message.tick.quote); clearError(); setStatus('Live', true);
       }
     };
-    ws.onerror = () => showError('Market-data WebSocket error.');
-    ws.onclose = () => setStatus('Disconnected');
-  } catch (error) { showError(error.message); setStatus('Disconnected'); }
+    ws.onerror = () => showError('Market-data WebSocket error. Automatic reconnect will retry if the connection closes.');
+    ws.onclose = () => {
+      ws = undefined;
+      subscriptionId = undefined;
+      if (manualDisconnect) setStatus('Disconnected');
+      else scheduleReconnect();
+    };
+  } catch (error) {
+    showError(error.message);
+    scheduleReconnect();
+  }
+}
+function connect() {
+  clearError();
+  manualDisconnect = false;
+  reconnectAttempts = 0;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = undefined;
+  loadTicks();
+  queueAnalysis();
+  openFeed();
 }
 function disconnect() {
-  if (ws) {
-    try { if (subscriptionId && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ forget: subscriptionId })); } catch {}
-    try { ws.close(); } catch {}
-  }
-  ws = undefined; subscriptionId = undefined; setStatus('Disconnected');
+  manualDisconnect = true;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = undefined;
+  reconnectAttempts = 0;
+  closeFeed();
+  setStatus('Disconnected');
 }
 
 $('obsConnect').onclick = connect;
@@ -304,4 +392,6 @@ $('maxMatches').onchange = analyze;
 $('archiveLimit').onchange = () => { ticks = ticks.slice(-archiveLimit()); persistTicks(); analyze(); };
 $('obsSymbol').onchange = () => { disconnect(); loadTicks(); analyze(); };
 window.addEventListener('resize', queueAnalysis);
+window.addEventListener('storage', event => { if (event.key === OFFSET_KEY) analyze(); });
+window.addEventListener('sani-pattern-offset-updated', analyze);
 window.addEventListener('DOMContentLoaded', () => { loadTicks(); analyze(); });
