@@ -2,10 +2,11 @@ import { SaniEngine, DEFAULT_CONFIG } from './core/engine.mjs';
 
 const $ = id => document.getElementById(id);
 const perfNow = () => globalThis.performance?.now?.() ?? Date.now();
-const LEDGER_KEY = 'sani.patternTrader.signalLedger.v3';
+const LEDGER_KEY = 'sani.patternTrader.signalLedger.v4';
 const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
+const NEXT_ARM_KEY = 'sani.patternTrader.v4.nextArm';
 const MAX_LEDGER = 2000;
-const ACTIVE_HORIZONS = [3, 5, 8, 10];
+const FIXED_HORIZON = 3;
 
 let accounts = [];
 let selectedAccount = null;
@@ -20,13 +21,13 @@ const config = {
   ...DEFAULT_CONFIG,
   symbol: '1HZ25V',
   stake: 1,
-  duration: 3,
+  duration: FIXED_HORIZON,
   durationUnit: 't',
   executionMethod: 'direct',
   oneOpenContract: true,
   takeProfit: 0,
   stopLoss: 0,
-  maxTrades: 30,
+  maxTrades: 40,
   maxConsecutiveLosses: 0,
   cooldownTicks: 0,
   maxSignalToSendMs: 500,
@@ -51,6 +52,17 @@ function saveLedger() {
   signalLedger = signalLedger.slice(0, MAX_LEDGER);
   try { localStorage.setItem(LEDGER_KEY, JSON.stringify(signalLedger)); } catch {}
 }
+function nextArm() {
+  const saved = localStorage.getItem(NEXT_ARM_KEY);
+  return saved === 'INVERSE' ? 'INVERSE' : 'NORMAL';
+}
+function setNextArm(arm) {
+  const safe = arm === 'INVERSE' ? 'INVERSE' : 'NORMAL';
+  try { localStorage.setItem(NEXT_ARM_KEY, safe); } catch {}
+  renderArmStats();
+}
+function oppositeArm(arm) { return arm === 'NORMAL' ? 'INVERSE' : 'NORMAL'; }
+function invertDirection(direction) { return direction === 'CALL' ? 'PUT' : 'CALL'; }
 function entryOffsets() {
   return loadArray(OFFSET_KEY).map(Number).filter(Number.isFinite).slice(-50);
 }
@@ -90,23 +102,20 @@ function ensureLedgerRow(signal) {
   let row = signalLedger.find(r => r.signalKey === key);
   if (row) return row;
   row = {
-    id: `pt3-${signal.epoch}-${Date.now()}`,
-    cohort: 'v3-long-horizon-ensemble',
+    id: `pt4-${signal.epoch}-${Date.now()}`,
+    cohort: 'v4-normal-inverse-3t-ab',
     signalKey: key,
     observedAt: Date.now(),
     symbol: signal.symbol || '1HZ25V',
     epoch: signal.epoch,
     quote: signal.quote,
-    direction: signal.direction,
-    horizon: signal.horizon,
+    baseDirection: signal.baseDirection,
+    horizon: FIXED_HORIZON,
     strength: signal.strength,
-    consensusCount: signal.consensusCount,
-    consensusHorizons: signal.consensusHorizons,
-    consensusAvgStrength: signal.consensusAvgStrength,
     matchCount: signal.matchCount,
     avgSimilarity: signal.avgSimilarity,
     expectedOffset: signal.executionOffset,
-    expectedWindow: `T+${signal.executionOffset}→T+${signal.executionOffset + signal.horizon}`,
+    expectedWindow: `T+${signal.executionOffset}→T+${signal.executionOffset + FIXED_HORIZON}`,
     status: 'QUALIFIED'
   };
   signalLedger.unshift(row);
@@ -148,6 +157,7 @@ function readTraderConfig() {
     takeProfit: Number($('ptTakeProfit').value),
     stopLoss: Number($('ptStopLoss').value),
     maxTrades: Number($('ptMaxTrades').value),
+    duration: FIXED_HORIZON,
     oneOpenContract: true,
     executionMethod: 'direct',
     durationUnit: 't',
@@ -170,7 +180,7 @@ function getAuthContext() {
   if (!appId || !token) throw new Error('App ID and trade token are required.');
   if (!selectedAccount) throw new Error('Load and select a Deriv Options account.');
   const real = String(selectedAccount.account_type).toLowerCase() === 'real';
-  if (real && $('ptRealPhrase').value !== 'REAL') throw new Error('Type REAL to unlock the real-money account.');
+  if (real) throw new Error('Pattern Trader v4 A/B is Demo-only. Select a DEMO account.');
   return { appId, token, accountId };
 }
 async function freshWsUrl() {
@@ -191,6 +201,10 @@ function renderAccounts() {
   }
   const saved = localStorage.getItem('sani.deriv.accountId');
   if (saved && accounts.some(a => a.account_id === saved)) select.value = saved;
+  if (!select.value || String(accounts.find(a => a.account_id === select.value)?.account_type).toLowerCase() === 'real') {
+    const demo = accounts.find(a => String(a.account_type).toLowerCase() !== 'real');
+    if (demo) select.value = demo.account_id;
+  }
   selectedAccount = accounts.find(a => a.account_id === select.value) || null;
   renderAccountGate();
 }
@@ -200,7 +214,7 @@ function renderAccountGate() {
   $('ptRealGate').classList.toggle('hidden', !real);
   $('ptAccountPill').textContent = selectedAccount ? String(selectedAccount.account_type).toUpperCase() : 'NO ACCOUNT';
   $('ptAccountPill').classList.toggle('real', real);
-  $('ptConnect').disabled = !selectedAccount || (real && $('ptRealPhrase').value !== 'REAL');
+  $('ptConnect').disabled = !selectedAccount || real;
 }
 
 function thresholds() {
@@ -208,7 +222,6 @@ function thresholds() {
     minMatches: Number($('ptMinMatches').value || 40),
     minSimilarity: Number($('ptMinSimilarity').value || 86),
     minBias: Number($('ptMinBias').value || 55),
-    minAgreement: Number($('ptMinAgreement').value || 2),
     cooldownTicks: Number($('ptCooldown').value || 20)
   };
 }
@@ -217,32 +230,14 @@ function chooseSignal(snapshot) {
   if (!snapshot || !Number.isFinite(snapshot.epoch) || !Number.isFinite(snapshot.quote)) return null;
   const t = thresholds();
   if (snapshot.matchCount < t.minMatches || snapshot.avgSimilarity < t.minSimilarity) return null;
-
-  const scored = (Array.isArray(snapshot.executionHorizons) ? snapshot.executionHorizons : [])
-    .filter(h => ACTIVE_HORIZONS.includes(Number(h.horizon)) && h.decided >= t.minMatches && (h.bias === 'UP' || h.bias === 'DOWN'));
-  if (!scored.length) return null;
-
-  const up = scored.filter(h => h.bias === 'UP' && h.strength >= t.minBias);
-  const down = scored.filter(h => h.bias === 'DOWN' && h.strength >= t.minBias);
-  const winningSide = up.length === down.length
-    ? (up.reduce((s, h) => s + h.strength, 0) >= down.reduce((s, h) => s + h.strength, 0) ? up : down)
-    : (up.length > down.length ? up : down);
-  if (winningSide.length < t.minAgreement) return null;
-
-  const opposite = winningSide === up ? down : up;
-  if (opposite.length >= t.minAgreement) return null;
-
-  const best = [...winningSide].sort((a, b) => b.strength - a.strength || b.horizon - a.horizon)[0];
-  const executionOffset = Number(best.startOffset ?? snapshot.executionOffset ?? entryOffsetEstimate());
-  const consensusAvgStrength = winningSide.reduce((s, h) => s + h.strength, 0) / winningSide.length;
+  const three = (Array.isArray(snapshot.executionHorizons) ? snapshot.executionHorizons : [])
+    .find(h => Number(h.horizon) === FIXED_HORIZON);
+  if (!three || three.decided < t.minMatches || three.strength < t.minBias || !['UP', 'DOWN'].includes(three.bias)) return null;
+  const executionOffset = Number(three.startOffset ?? snapshot.executionOffset ?? entryOffsetEstimate());
   return {
     symbol: snapshot.symbol,
-    direction: best.bias === 'UP' ? 'CALL' : 'PUT',
-    horizon: best.horizon,
-    strength: best.strength,
-    consensusCount: winningSide.length,
-    consensusHorizons: winningSide.map(h => h.horizon),
-    consensusAvgStrength,
+    baseDirection: three.bias === 'UP' ? 'CALL' : 'PUT',
+    strength: three.strength,
     matchCount: snapshot.matchCount,
     avgSimilarity: snapshot.avgSimilarity,
     executionOffset,
@@ -271,22 +266,31 @@ function maybeTrade(snapshot) {
 
   try {
     readTraderConfig();
-    engine.config.duration = signal.horizon;
+    engine.config.duration = FIXED_HORIZON;
     const t = thresholds();
+    const arm = nextArm();
+    const tradeDirection = arm === 'NORMAL' ? signal.baseDirection : invertDirection(signal.baseDirection);
     lastTradeSignalEpoch = signal.epoch;
     cooldownUntilEpoch = signal.epoch + t.cooldownTicks;
     const now = perfNow();
-    updateLedger(row.id, { status: 'ORDER SENT' });
+    updateLedger(row.id, { arm, tradeDirection, status: 'ORDER SENT' });
     engine.execute({
-      direction: signal.direction,
-      structure: 'pattern-observatory-v3-ensemble',
+      direction: tradeDirection,
+      structure: 'pattern-observatory-v4-ab-3t',
       epoch: signal.epoch,
       quote: signal.quote,
       detectedPerf: now,
       detectedWallMs: Date.now(),
-      patternMeta: { ...signal, ledgerId: row.id, expectedWindow: row.expectedWindow }
+      patternMeta: {
+        ...signal,
+        arm,
+        tradeDirection,
+        horizon: FIXED_HORIZON,
+        ledgerId: row.id,
+        expectedWindow: row.expectedWindow
+      }
     });
-    engine.log('success', `PATTERN v3 ${signal.direction} ${row.expectedWindow} · ${signal.consensusCount}/4 horizons agree (${signal.consensusHorizons.join(',')}) · best ${signal.strength.toFixed(1)}% · avg ${signal.consensusAvgStrength.toFixed(1)}%.`);
+    engine.log('success', `PATTERN v4 ${arm} · base ${signal.baseDirection} → trade ${tradeDirection} · fixed 3t · ${signal.strength.toFixed(1)}% execution-aware bias · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% similarity.`);
   } catch (error) {
     updateLedger(row.id, { status: 'ERROR', error: error.message });
     showTraderError(error.message);
@@ -297,10 +301,12 @@ function maybeTrade(snapshot) {
 function renderPatternSignal(snapshot, existingSignal) {
   const signal = existingSignal || chooseSignal(snapshot);
   if (!signal) {
-    $('ptSignal').innerHTML = '<b>WAIT</b><span>No 3/5/8/10-tick directional ensemble meets the trade thresholds.</span>';
+    $('ptSignal').innerHTML = '<b>WAIT</b><span>The execution-aware 3-tick signal does not meet the current thresholds.</span>';
     return;
   }
-  $('ptSignal').innerHTML = `<b class="${signal.direction === 'CALL' ? 'positive' : 'negative'}">${signal.direction} · ${`T+${signal.executionOffset}→T+${signal.executionOffset + signal.horizon}`}</b><span>${signal.consensusCount}/4 horizons agree [${signal.consensusHorizons.join(', ')}] · best ${signal.strength.toFixed(1)}% · consensus avg ${signal.consensusAvgStrength.toFixed(1)}% · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% similarity</span>`;
+  const arm = nextArm();
+  const tradeDirection = arm === 'NORMAL' ? signal.baseDirection : invertDirection(signal.baseDirection);
+  $('ptSignal').innerHTML = `<b class="${tradeDirection === 'CALL' ? 'positive' : 'negative'}">NEXT ${arm} · ${tradeDirection} · 3 ticks</b><span>Base model says ${signal.baseDirection} at ${signal.strength.toFixed(1)}% · ${arm === 'INVERSE' ? 'direction flipped for A/B test' : 'direction kept'} · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% similarity</span>`;
 }
 
 const baseOnBuy = engine.onBuy.bind(engine);
@@ -314,8 +320,22 @@ engine.onBuy = function patternOnBuy(message) {
   trade.patternMeta = meta;
   trade.ledgerId = meta.ledgerId;
   trade.expectedWindow = meta.expectedWindow;
+  trade.abArm = meta.arm;
+  trade.baseDirection = meta.baseDirection;
   contractToLedger.set(contractId, meta.ledgerId);
-  updateLedger(meta.ledgerId, { status: 'BOUGHT', contractId, buyAckMs: trade.sendToAckMs, serverStartDelayMs: trade.serverStartDelayMs });
+  if (!trade.abArmConfirmed) {
+    trade.abArmConfirmed = true;
+    setNextArm(oppositeArm(meta.arm));
+  }
+  updateLedger(meta.ledgerId, {
+    status: 'BOUGHT',
+    arm: meta.arm,
+    baseDirection: meta.baseDirection,
+    tradeDirection: meta.tradeDirection,
+    contractId,
+    buyAckMs: trade.sendToAckMs,
+    serverStartDelayMs: trade.serverStartDelayMs
+  });
   this.emit();
 };
 
@@ -333,7 +353,7 @@ engine.onContract = function patternOnContract(contract) {
   }
   trade.actualEntryOffset = offset;
   trade.latencyClass = latencyClass(offset);
-  trade.actualWindow = Number.isFinite(offset) ? `T+${offset}→T+${offset + Number(trade.duration || trade.patternMeta.horizon)}` : 'unknown';
+  trade.actualWindow = Number.isFinite(offset) ? `T+${offset}→T+${offset + FIXED_HORIZON}` : 'unknown';
   const ledgerId = trade.ledgerId || contractToLedger.get(contractId) || trade.patternMeta.ledgerId;
   updateLedger(ledgerId, {
     status: String(trade.status || 'sold').toUpperCase(),
@@ -353,6 +373,25 @@ engine.onContract = function patternOnContract(contract) {
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[c]));
 }
+function settledRows(arm) {
+  return signalLedger.filter(r => r.arm === arm && (r.status === 'WON' || r.status === 'LOST'));
+}
+function armStats(arm) {
+  const rows = settledRows(arm);
+  const wins = rows.filter(r => r.status === 'WON').length;
+  const losses = rows.filter(r => r.status === 'LOST').length;
+  const pnl = rows.reduce((s, r) => s + Number(r.profit || 0), 0);
+  return { wins, losses, pnl };
+}
+function renderArmStats() {
+  const normal = armStats('NORMAL');
+  const inverse = armStats('INVERSE');
+  $('ptNextArm').textContent = nextArm();
+  $('ptNormalWL').textContent = `${normal.wins} / ${normal.losses}`;
+  $('ptNormalPnl').textContent = `${normal.pnl >= 0 ? '+' : ''}$${normal.pnl.toFixed(2)}`;
+  $('ptInverseWL').textContent = `${inverse.wins} / ${inverse.losses}`;
+  $('ptInversePnl').textContent = `${inverse.pnl >= 0 ? '+' : ''}$${inverse.pnl.toFixed(2)}`;
+}
 function renderLedger() {
   const qualified = signalLedger.length;
   const bought = signalLedger.filter(r => Number.isFinite(Number(r.contractId))).length;
@@ -361,25 +400,24 @@ function renderLedger() {
   $('ptBought').textContent = String(bought);
   $('ptSkipped').textContent = String(skipped);
   $('ptEntryOffset').textContent = `T+${entryOffsetEstimate()}`;
-  $('ptLedgerRows').innerHTML = signalLedger.length ? signalLedger.slice(0, 50).map(r => {
+  renderArmStats();
+  $('ptLedgerRows').innerHTML = signalLedger.length ? signalLedger.slice(0, 60).map(r => {
     const time = new Date(r.observedAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
-    const signal = `${r.direction} ${r.horizon}t`;
     const bias = Number.isFinite(Number(r.strength)) ? `${Number(r.strength).toFixed(1)}%` : '—';
     const sim = Number.isFinite(Number(r.avgSimilarity)) ? `${Number(r.avgSimilarity).toFixed(1)}%` : '—';
-    const agreement = `${r.consensusCount ?? '—'}/4 ${Array.isArray(r.consensusHorizons) ? '[' + r.consensusHorizons.join(',') + ']' : ''}`;
     const window = r.actualWindow ? `${r.expectedWindow} → ${r.actualWindow}` : r.expectedWindow;
-    return `<tr><td>${time}</td><td>${escapeHtml(signal)}</td><td>${bias}</td><td>${escapeHtml(agreement)}</td><td>${r.matchCount ?? '—'}</td><td>${sim}</td><td>${escapeHtml(window)}</td><td>${escapeHtml(r.latencyClass || '—')}</td><td>${escapeHtml(r.status || '—')}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="10" class="empty">No v3 long-horizon ensemble signals recorded yet.</td></tr>';
+    return `<tr><td>${time}</td><td>${escapeHtml(r.arm || '—')}</td><td>${escapeHtml(r.baseDirection || '—')}</td><td>${escapeHtml(r.tradeDirection || '—')}</td><td>${bias}</td><td>${r.matchCount ?? '—'}</td><td>${sim}</td><td>${escapeHtml(window)}</td><td>${escapeHtml(r.latencyClass || '—')}</td><td>${escapeHtml(r.status || '—')}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="11" class="empty">No v4 A/B signals recorded yet.</td></tr>';
 }
 function exportLedgerCsv() {
-  const headers = ['cohort','observed_at','symbol','epoch','quote','direction','duration_ticks','best_bias_pct','consensus_count','consensus_horizons','consensus_avg_bias_pct','matches','avg_similarity_pct','expected_entry_offset','expected_window','status','contract_id','profit','actual_entry_offset','actual_window','latency_class','entry_spot','exit_spot'];
-  const rows = signalLedger.map(r => [r.cohort,new Date(r.observedAt).toISOString(),r.symbol,r.epoch,r.quote,r.direction,r.horizon,r.strength,r.consensusCount,(r.consensusHorizons||[]).join('|'),r.consensusAvgStrength,r.matchCount,r.avgSimilarity,r.expectedOffset,r.expectedWindow,r.status,r.contractId ?? '',r.profit ?? '',r.actualEntryOffset ?? '',r.actualWindow ?? '',r.latencyClass ?? '',r.entrySpot ?? '',r.exitSpot ?? '']);
+  const headers = ['cohort','observed_at','symbol','epoch','quote','arm','base_direction','trade_direction','duration_ticks','three_tick_bias_pct','matches','avg_similarity_pct','expected_entry_offset','expected_window','status','contract_id','profit','actual_entry_offset','actual_window','latency_class','entry_spot','exit_spot'];
+  const rows = signalLedger.map(r => [r.cohort,new Date(r.observedAt).toISOString(),r.symbol,r.epoch,r.quote,r.arm ?? '',r.baseDirection,r.tradeDirection ?? '',FIXED_HORIZON,r.strength,r.matchCount,r.avgSimilarity,r.expectedOffset,r.expectedWindow,r.status,r.contractId ?? '',r.profit ?? '',r.actualEntryOffset ?? '',r.actualWindow ?? '',r.latencyClass ?? '',r.entrySpot ?? '',r.exitSpot ?? '']);
   const csv = [headers, ...rows].map(row => row.map(v => `"${String(v ?? '').replaceAll('"','""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = `pattern-v3-long-horizon-${new Date().toISOString().replaceAll(':','-')}.csv`;
+  anchor.download = `pattern-v4-normal-inverse-3t-${new Date().toISOString().replaceAll(':','-')}.csv`;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
@@ -401,11 +439,9 @@ $('ptLoadAccounts').onclick = async () => {
 };
 $('ptAccount').onchange = () => {
   localStorage.setItem('sani.deriv.accountId', $('ptAccount').value);
-  $('ptRealPhrase').value = '';
   lastOtpContext = null;
   renderAccountGate();
 };
-$('ptRealPhrase').oninput = renderAccountGate;
 $('ptConnect').onclick = async () => {
   clearTraderError();
   try {
@@ -423,6 +459,7 @@ $('ptStart').onclick = () => {
     getAuthContext();
     readTraderConfig();
     engine.start();
+    engine.log('info', `Pattern Trader v4 A/B armed. Next accepted trade: ${nextArm()}. Fixed duration: 3 ticks.`);
     if (lastAnalysis) renderPatternSignal(lastAnalysis);
   } catch (error) { showTraderError(error.message); }
 };
@@ -433,9 +470,10 @@ $('ptReset').onclick = () => {
   catch (error) { showTraderError(error.message); }
 };
 $('ptClearLedger').onclick = () => {
-  if (!confirm('Clear the v3 long-horizon Pattern Trader ledger?')) return;
+  if (!confirm('Clear the v4 NORMAL vs INVERSE A/B ledger and restart alternation at NORMAL?')) return;
   signalLedger = [];
   localStorage.removeItem(LEDGER_KEY);
+  setNextArm('NORMAL');
   renderLedger();
 };
 $('ptResetCalibration').onclick = () => {
@@ -446,7 +484,7 @@ $('ptResetCalibration').onclick = () => {
 };
 $('ptExportLedger').onclick = exportLedgerCsv;
 
-for (const id of ['ptStake','ptTakeProfit','ptStopLoss','ptMaxTrades','ptMinMatches','ptMinSimilarity','ptMinBias','ptMinAgreement','ptCooldown']) {
+for (const id of ['ptStake','ptTakeProfit','ptStopLoss','ptMaxTrades','ptMinMatches','ptMinSimilarity','ptMinBias','ptCooldown']) {
   $(id).addEventListener('change', () => {
     try { if (!engine.snapshot().running) readTraderConfig(); } catch (error) { showTraderError(error.message); }
     if (lastAnalysis) renderPatternSignal(lastAnalysis);
@@ -468,20 +506,24 @@ engine.subscribe(state => {
   $('ptReset').disabled = state.running || Number(state.openContracts || 0) > 0;
 
   $('ptTradeRows').innerHTML = state.trades.length ? state.trades.map(t => {
-    const expected = t.expectedWindow || t.patternMeta?.expectedWindow || '—';
+    const meta = t.patternMeta || {};
+    const expected = t.expectedWindow || meta.expectedWindow || '—';
     const actual = t.actualWindow || '—';
     const latency = t.latencyClass || latencyClass(actualEntryOffset(t));
-    const agreement = t.patternMeta ? `${t.patternMeta.consensusCount}/4 [${(t.patternMeta.consensusHorizons || []).join(',')}]` : '—';
-    return `<tr><td>#${t.contractId}</td><td>${t.direction}</td><td><span class="result ${t.status}">${t.status}</span></td><td>${t.duration}t</td><td>${escapeHtml(agreement)}</td><td>${escapeHtml(expected)}</td><td>${escapeHtml(actual)}</td><td>${escapeHtml(latency)}</td><td class="${(t.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${t.profit === undefined ? '—' : `${t.profit >= 0 ? '+' : ''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs === undefined ? '—' : Number(t.sendToAckMs).toFixed(0)+'ms'}</td><td>${t.entrySpot ?? '—'} → ${t.exitSpot ?? '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="11" class="empty">No v3 long-horizon Pattern Trader trades yet.</td></tr>';
+    return `<tr><td>#${t.contractId}</td><td>${escapeHtml(meta.arm || '—')}</td><td>${escapeHtml(meta.baseDirection || '—')}</td><td>${t.direction}</td><td><span class="result ${t.status}">${t.status}</span></td><td>${t.duration}t</td><td>${escapeHtml(expected)}</td><td>${escapeHtml(actual)}</td><td>${escapeHtml(latency)}</td><td class="${(t.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${t.profit === undefined ? '—' : `${t.profit >= 0 ? '+' : ''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs === undefined ? '—' : Number(t.sendToAckMs).toFixed(0)+'ms'}</td><td>${t.entrySpot ?? '—'} → ${t.exitSpot ?? '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="12" class="empty">No v4 A/B trades yet.</td></tr>';
 
-  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 50).map(l => `<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${escapeHtml(l.message)}</span></div>`).join('');
+  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 50).map(l => {
+    const message = l.message === 'Engine armed. Waiting for fresh BOS.' ? 'Pattern Trader execution engine armed.' : l.message;
+    return `<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${escapeHtml(message)}</span></div>`;
+  }).join('');
   renderLedger();
 });
 
 window.addEventListener('DOMContentLoaded', () => {
   $('ptAppId').value = localStorage.getItem('sani.deriv.appId') || '';
   $('ptToken').value = sessionStorage.getItem('sani.deriv.token') || '';
+  if (!localStorage.getItem(NEXT_ARM_KEY)) setNextArm('NORMAL');
   renderLedger();
   if ($('ptAppId').value && $('ptToken').value) $('ptLoadAccounts').click();
   const snap = window.SaniObservatory?.getSnapshot?.();
