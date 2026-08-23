@@ -1,15 +1,172 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0c0f"><title>SANI Pattern Observatory</title><link rel="stylesheet" href="/styles.css"></head><body><main class="shell observatoryShell">
-<header class="topbar"><div><div class="eyebrow">SANI TRADING LAB</div><h1>Pattern Observatory v5</h1></div><div class="statusCluster"><span id="obsDot" class="dot"></span><span id="obsStatus">Disconnected</span><span class="accountPill">PATTERN LAB</span></div></header>
-<nav class="workspaceTabs"><a href="/">BOS Lab</a><a class="active" href="/observatory.html">Pattern Observatory</a></nav>
-<section class="observatoryHero"><div class="heroCard obsIntro"><div class="eyebrow">BASE 3-TICK PROSPECTIVE COHORT</div><h2>Trade the base direction. Score the inverse for free.</h2><p>v5 keeps the execution-aware 3-tick base model and sends only BASE/NORMAL Demo trades. After every settled contract, the exact opposite direction is scored as a shadow outcome on the same entry and expiry window. No inverse order is purchased.</p><div class="obsBadges"><span>Demo only</span><span>fixed 3 ticks</span><span>BASE/NORMAL actual</span><span>shadow inverse</span><span>100-trade cap</span></div></div><div class="card obsQuickStats"><div class="sectionTitle"><span>Observatory state</span><small>BOS untouched</small></div><div class="metricRow obsMetrics"><div class="metric"><span>Archive</span><strong id="archiveCount">0</strong></div><div class="metric"><span>Pattern</span><strong id="patternSizeStat">20</strong></div><div class="metric"><span>Matches</span><strong id="matchCount">0</strong></div><div class="metric"><span>Avg similarity</span><strong id="avgSimilarity">—</strong></div><div class="metric"><span>Expected entry</span><strong id="executionOffsetStat">T+1</strong></div></div></div></section>
-<section class="twoCol"><div class="card"><div class="sectionTitle"><span>Market feed</span><small>Deriv public ticks · auto reconnect</small></div><div class="formGrid"><label>Symbol<input id="obsSymbol" value="1HZ25V"></label><label>Archive limit<select id="archiveLimit"><option value="2000">2,000 ticks</option><option value="5000" selected>5,000 ticks</option><option value="10000">10,000 ticks</option></select></label></div><div class="actions compact"><button id="obsConnect" class="primary">Connect Observatory</button><button id="obsDisconnect">Disconnect</button><button id="clearTickArchive">Clear archive</button></div><p class="muted">The Observatory still scores 3/5/8/10 windows for context, but v5 trading uses only the execution-aware 3-tick score.</p><div id="obsError" class="errorBox hidden"></div></div><div class="card"><div class="sectionTitle"><span>Pattern lens</span><small>analysis settings</small></div><div class="formGrid three"><label>Pattern length<select id="patternLength"><option value="10">10 ticks</option><option value="20" selected>20 ticks</option><option value="30">30 ticks</option><option value="40">40 ticks</option></select></label><label>Similarity floor<input id="similarityFloor" type="number" min="0.50" max="0.99" step="0.01" value="0.82"></label><label>Max matches<input id="maxMatches" type="number" min="10" max="200" step="10" value="80"></label></div><div class="actions compact"><button id="reanalyzeBtn">Re-analyze now</button></div><p class="muted">Shapes are normalized so geometry matters more than absolute price size.</p></div></section>
-<section class="card observatoryCanvasCard"><div class="sectionTitle"><span>Live Tick Canvas</span><small id="canvasCaption">waiting for ticks</small></div><canvas id="tickCanvas" class="tickCanvas" width="1400" height="430"></canvas><div class="canvasLegend"><span><i class="legendCurrent"></i>current pattern window</span><span><i class="legendHistory"></i>recent tick path</span></div></section>
-<section class="twoCol"><div class="card"><div class="sectionTitle"><span>Current Pattern Shape</span><small>normalized geometry</small></div><canvas id="patternCanvas" class="patternCanvas" width="680" height="310"></canvas><p class="muted">Bright line = current shape. Faint lines = closest historical relatives.</p></div><div class="card"><div class="sectionTitle"><span>Raw Future Horizon Score</span><small>context only</small></div><div id="horizonGrid" class="horizonGrid"><div class="empty">Need enough archived ticks to form historical matches.</div></div><div class="sectionTitle"><span>Execution-aware Score</span><small id="executionWindowCaption">using measured entry offset T+1</small></div><div id="executionHorizonGrid" class="horizonGrid"><div class="empty">Need enough archived ticks to score executable windows.</div></div><p class="muted">For v5 entry, only the 3-tick execution-aware box decides CALL/PUT. The exact opposite is scored only after settlement as a shadow counterfactual.</p></div></section>
-<section class="card"><div class="sectionTitle"><span>Nearest Pattern Library</span><small>closest historical relatives</small></div><div class="tableWrap"><table><thead><tr><th>Rank</th><th>Similarity</th><th>Seen at</th><th>+3</th><th>+5</th><th>+8</th><th>+10</th></tr></thead><tbody id="patternRows"><tr><td colspan="7" class="empty">No pattern matches yet.</td></tr></tbody></table></div></section>
-<section class="card"><div class="sectionTitle"><span>Pattern Trader v5</span><small>BASE/NORMAL actual · shadow inverse · Demo only</small></div><div class="heroLine"><span>Session P/L</span><strong id="ptPnl">+$0.00</strong></div><div class="metricRow"><div class="metric"><span>W / L</span><strong id="ptWL">0 / 0</strong></div><div class="metric"><span>Open</span><strong id="ptOpen">0</strong></div><div class="metric"><span>Status</span><strong id="ptStatus">DISCONNECTED</strong></div><div class="metric"><span>Account</span><strong id="ptAccountPill" class="accountPill">NO ACCOUNT</strong></div></div><div class="metricRow"><div class="metric"><span>Qualified v5</span><strong id="ptQualified">0</strong></div><div class="metric"><span>Bought</span><strong id="ptBought">0</strong></div><div class="metric"><span>Skipped</span><strong id="ptSkipped">0</strong></div><div class="metric"><span>Measured entry</span><strong id="ptEntryOffset">T+1</strong></div></div><div class="metricRow"><div class="metric"><span>Cohort N</span><strong id="ptCohortN">0</strong></div><div class="metric"><span>BASE W/L</span><strong id="ptBaseWL">0 / 0</strong></div><div class="metric"><span>Shadow inverse W/L</span><strong id="ptShadowWL">0 / 0</strong></div><div class="metric"><span>Shadow inverse win rate</span><strong id="ptShadowRate">0.0%</strong></div></div><div id="ptSignal" class="patternTradeSignal"><b>WAIT</b><span>No qualified 3-tick base signal yet.</span></div>
-<div class="twoCol"><div><div class="sectionTitle"><span>Trading connection</span><small>Deriv Options account</small></div><div class="formGrid"><label>App ID<input id="ptAppId" autocomplete="off" placeholder="Deriv App ID"></label><label>Trade token<input id="ptToken" type="password" autocomplete="off" placeholder="PAT / OAuth token"></label></div><div class="actions compact"><button id="ptLoadAccounts">Load accounts</button></div><label>Account<select id="ptAccount"><option value="">Load accounts first</option></select></label><div id="ptRealGate" class="dangerZone hidden"><strong>Demo-only experiment</strong><p>v5 deliberately blocks Real accounts. Select the Demo account for this prospective cohort.</p></div><div class="actions compact"><button id="ptConnect" class="primary">Connect Trader</button><button id="ptDisconnect">Disconnect</button></div><div id="traderError" class="errorBox hidden"></div></div><div><div class="sectionTitle"><span>Trade rule</span><small>fixed 3-tick BASE/NORMAL</small></div><div class="formGrid three"><label>Stake ($)<input id="ptStake" type="number" min="0.35" step="0.01" value="1"></label><label>TP ($)<input id="ptTakeProfit" type="number" min="0" step="0.1" value="0"></label><label>SL ($)<input id="ptStopLoss" type="number" min="0" step="0.1" value="0"></label><label>Max trades<input id="ptMaxTrades" type="number" min="1" step="1" value="100"></label><label>Min matches<input id="ptMinMatches" type="number" min="10" step="5" value="40"></label><label>Min avg similarity %<input id="ptMinSimilarity" type="number" min="50" max="99" step="1" value="86"></label><label>Min 3-tick bias %<input id="ptMinBias" type="number" min="50" max="99" step="1" value="55"></label><label>Cooldown ticks<input id="ptCooldown" type="number" min="0" step="1" value="20"></label></div><div class="actions compact"><button id="ptStart" class="primary">Start Pattern Trader v5</button><button id="ptPause">Pause</button><button id="ptStop">Stop</button><button id="ptReset">Reset session</button></div><p class="muted">Every accepted trade is exactly 3 ticks and follows the base model direction. No inverse contract is bought. After settlement, the opposite direction is marked WON or LOST on the same observed window.</p></div></div>
-<div class="sectionTitle"><span>Pattern Trader v5 transactions</span><small>actual BASE trade plus shadow inverse outcome</small></div><div class="tableWrap"><table><thead><tr><th>Contract</th><th>Traded</th><th>Result</th><th>Shadow side</th><th>Shadow result</th><th>Duration</th><th>Pred window</th><th>Actual window</th><th>Latency</th><th>P/L</th><th>ACK</th><th>Entry → exit</th></tr></thead><tbody id="ptTradeRows"><tr><td colspan="12" class="empty">No v5 BASE/NORMAL trades yet.</td></tr></tbody></table></div>
-<div class="sectionTitle"><span>v5 Signal Ledger</span><small>fresh cohort · v2/v3/v4 ledgers remain separate in browser storage</small></div><div class="actions compact"><button id="ptExportLedger">Export v5 CSV</button><button id="ptClearLedger">Clear v5 ledger</button><button id="ptResetCalibration">Reset execution calibration</button></div><div class="tableWrap"><table><thead><tr><th>Time</th><th>Base</th><th>3t bias</th><th>Matches</th><th>Similarity</th><th>Pred → actual window</th><th>Latency</th><th>BASE result</th><th>Shadow inverse</th><th>Contract</th></tr></thead><tbody id="ptLedgerRows"><tr><td colspan="10" class="empty">No v5 signals recorded yet.</td></tr></tbody></table></div><p class="muted">Only purchased BASE trades count toward the 100-trade cohort. Skipped/observed signals remain research rows. Shadow inverse is calculated only after an actual BASE contract settles, so it shares the same executable window.</p>
-<div class="sectionTitle"><span>Trader journal</span><small><span id="ptDot" class="dot"></span></small></div><div id="ptLogs" class="logs"><div class="empty">Pattern Trader messages will appear here.</div></div></section>
-<section class="card"><div class="sectionTitle"><span>v5 experiment</span><small>one prospective question</small></div><div class="observatoryRoadmap"><div><b>Actual trade</b><span>Execution-aware 3-tick BASE direction.</span></div><div><b>Shadow control</b><span>Exact opposite direction scored after settlement, no second order.</span></div><div><b>Cohort</b><span>Up to 100 actual Demo trades with the entry rule frozen.</span></div><div><b>Decision</b><span>Judge BASE from its actual prospective W/L and P/L, using shadow inverse only as a control.</span></div></div></section><footer>Pattern Observatory v5 is a Demo-only fixed 3-tick BASE/NORMAL experiment with shadow inverse scoring. BOS remains untouched.</footer>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0c0f"><title>SANI Master Regime Trader</title><link rel="stylesheet" href="/styles.css"></head><body><main class="shell observatoryShell">
+<header class="topbar"><div><div class="eyebrow">SANI TRADING LAB</div><h1>Master Regime Trader v6</h1></div><div class="statusCluster"><span id="obsDot" class="dot"></span><span id="obsStatus">Disconnected</span><span class="accountPill">MASTER LAB</span></div></header>
+<nav class="workspaceTabs"><a href="/">BOS Lab</a><a class="active" href="/observatory.html">Master / Pattern Lab</a></nav>
+
+<section class="observatoryHero">
+  <div class="heroCard obsIntro">
+    <div class="eyebrow">200 → 80 → CHOP/VOL → 20 → TRADE</div>
+    <h2>Trade the mountain, not every wiggle.</h2>
+    <p>v6 makes trend hierarchy the decision engine. The 200-tick window identifies the regime, 80 ticks must confirm it, CHOP and volatility can veto participation, and the 20-tick structure must form a pullback plus resumption before a 3-tick Demo contract is allowed.</p>
+    <div class="obsBadges"><span>Demo only</span><span>200t regime</span><span>80t confirmation</span><span>CHOP veto</span><span>20t HL/LH entry</span><span>fixed 3 ticks</span></div>
+  </div>
+  <div class="card obsQuickStats">
+    <div class="sectionTitle"><span>Observatory state</span><small>BOS untouched</small></div>
+    <div class="metricRow obsMetrics">
+      <div class="metric"><span>Archive</span><strong id="archiveCount">0</strong></div>
+      <div class="metric"><span>Pattern</span><strong id="patternSizeStat">20</strong></div>
+      <div class="metric"><span>Matches</span><strong id="matchCount">0</strong></div>
+      <div class="metric"><span>Avg similarity</span><strong id="avgSimilarity">—</strong></div>
+      <div class="metric"><span>Expected entry</span><strong id="executionOffsetStat">T+1</strong></div>
+    </div>
+  </div>
+</section>
+
+<section class="twoCol">
+  <div class="card">
+    <div class="sectionTitle"><span>Market feed</span><small>Deriv public ticks · auto reconnect</small></div>
+    <div class="formGrid">
+      <label>Symbol<input id="obsSymbol" value="1HZ25V"></label>
+      <label>Archive limit<select id="archiveLimit"><option value="2000">2,000 ticks</option><option value="5000" selected>5,000 ticks</option><option value="10000">10,000 ticks</option></select></label>
+    </div>
+    <div class="actions compact"><button id="obsConnect" class="primary">Connect Observatory</button><button id="obsDisconnect">Disconnect</button><button id="clearTickArchive">Clear archive</button></div>
+    <p class="muted">The same raw tick archive powers both the old pattern research and the new v6 200/80/20 regime engine.</p>
+    <div id="obsError" class="errorBox hidden"></div>
+  </div>
+  <div class="card">
+    <div class="sectionTitle"><span>Pattern lens</span><small>research context only</small></div>
+    <div class="formGrid three">
+      <label>Pattern length<select id="patternLength"><option value="10">10 ticks</option><option value="20" selected>20 ticks</option><option value="30">30 ticks</option><option value="40">40 ticks</option></select></label>
+      <label>Similarity floor<input id="similarityFloor" type="number" min="0.50" max="0.99" step="0.01" value="0.82"></label>
+      <label>Max matches<input id="maxMatches" type="number" min="10" max="200" step="10" value="80"></label>
+    </div>
+    <div class="actions compact"><button id="reanalyzeBtn">Re-analyze now</button></div>
+    <p class="muted">Pattern similarity remains visible for research, but it does not gate v6 entries.</p>
+  </div>
+</section>
+
+<section class="card observatoryCanvasCard">
+  <div class="sectionTitle"><span>Live Tick Canvas</span><small id="canvasCaption">waiting for ticks</small></div>
+  <canvas id="tickCanvas" class="tickCanvas" width="1400" height="430"></canvas>
+  <div class="canvasLegend"><span><i class="legendCurrent"></i>current pattern window</span><span><i class="legendHistory"></i>recent tick path</span></div>
+</section>
+
+<section class="twoCol">
+  <div class="card">
+    <div class="sectionTitle"><span>Current Pattern Shape</span><small>normalized geometry · context only</small></div>
+    <canvas id="patternCanvas" class="patternCanvas" width="680" height="310"></canvas>
+    <p class="muted">Pattern relatives are still recorded so later we can test whether they add value on top of the master trend engine.</p>
+  </div>
+  <div class="card">
+    <div class="sectionTitle"><span>Raw Future Horizon Score</span><small>context only</small></div>
+    <div id="horizonGrid" class="horizonGrid"><div class="empty">Need enough archived ticks to form historical matches.</div></div>
+    <div class="sectionTitle"><span>Execution-aware Score</span><small id="executionWindowCaption">using measured entry offset T+1</small></div>
+    <div id="executionHorizonGrid" class="horizonGrid"><div class="empty">Need enough archived ticks to score executable windows.</div></div>
+    <p class="muted">v6 does not use these pattern scores to choose CALL or PUT. Direction comes from regime + trend + structure.</p>
+  </div>
+</section>
+
+<section class="card">
+  <div class="sectionTitle"><span>Nearest Pattern Library</span><small>research context</small></div>
+  <div class="tableWrap"><table><thead><tr><th>Rank</th><th>Similarity</th><th>Seen at</th><th>+3</th><th>+5</th><th>+8</th><th>+10</th></tr></thead><tbody id="patternRows"><tr><td colspan="7" class="empty">No pattern matches yet.</td></tr></tbody></table></div>
+</section>
+
+<section class="card observatoryCanvasCard">
+  <div class="sectionTitle"><span>Master Entry / Exit Visualizer</span><small id="masterCanvasCaption">waiting for v6 regime analysis</small></div>
+  <canvas id="masterCanvas" class="tickCanvas" width="1400" height="390"></canvas>
+  <p class="muted">Triangles mark actual entries, circles mark expiry, connecting lines show the held 3-tick path, and recent HH/HL/LH/LL labels expose where the 20-tick trigger fired or missed.</p>
+</section>
+
+<section class="card">
+  <div class="sectionTitle"><span>Master Trader v6</span><small>regime → confirmation → veto → pullback/resumption · Demo only</small></div>
+  <div class="heroLine"><span>Session P/L</span><strong id="ptPnl">+$0.00</strong></div>
+
+  <div class="metricRow">
+    <div class="metric"><span>W / L</span><strong id="ptWL">0 / 0</strong></div>
+    <div class="metric"><span>Open</span><strong id="ptOpen">0</strong></div>
+    <div class="metric"><span>Status</span><strong id="ptStatus">DISCONNECTED</strong></div>
+    <div class="metric"><span>Account</span><strong id="ptAccountPill" class="accountPill">NO ACCOUNT</strong></div>
+  </div>
+
+  <div class="metricRow">
+    <div class="metric"><span>200t regime</span><strong id="mtRegime200">—</strong></div>
+    <div class="metric"><span>80t trend</span><strong id="mtTrend80">—</strong></div>
+    <div class="metric"><span>Active session</span><strong id="mtSession">NEUTRAL</strong></div>
+    <div class="metric"><span>20t entry</span><strong id="mtEntry20">WAIT</strong></div>
+  </div>
+
+  <div class="metricRow">
+    <div class="metric"><span>CHOP filter</span><strong id="mtChop">—</strong></div>
+    <div class="metric"><span>Volatility</span><strong id="mtVolatility">—</strong></div>
+    <div class="metric"><span>Measured entry</span><strong id="ptEntryOffset">T+1</strong></div>
+    <div class="metric"><span>Bought v6</span><strong id="ptBought">0</strong></div>
+  </div>
+
+  <div class="metricRow">
+    <div class="metric"><span>Cohort N</span><strong id="ptCohortN">0</strong></div>
+    <div class="metric"><span>Cohort W/L</span><strong id="ptCohortWL">0 / 0</strong></div>
+    <div class="metric"><span>Cohort P/L</span><strong id="ptCohortPnl">+$0.00</strong></div>
+    <div class="metric"><span>BULL W/L</span><strong id="ptBullWL">0 / 0</strong></div>
+    <div class="metric"><span>BEAR W/L</span><strong id="ptBearWL">0 / 0</strong></div>
+  </div>
+
+  <div class="metricRow">
+    <div class="metric"><span>Qualified setups</span><strong id="ptQualified">0</strong></div>
+    <div class="metric"><span>Skipped setups</span><strong id="ptSkipped">0</strong></div>
+  </div>
+
+  <div id="ptSignal" class="patternTradeSignal"><b>WAIT</b><span>Need 200 archived ticks and aligned master structure.</span></div>
+
+  <div class="twoCol">
+    <div>
+      <div class="sectionTitle"><span>Trading connection</span><small>Deriv Options account</small></div>
+      <div class="formGrid">
+        <label>App ID<input id="ptAppId" autocomplete="off" placeholder="Deriv App ID"></label>
+        <label>Trade token<input id="ptToken" type="password" autocomplete="off" placeholder="PAT / OAuth token"></label>
+      </div>
+      <div class="actions compact"><button id="ptLoadAccounts">Load accounts</button></div>
+      <label>Account<select id="ptAccount"><option value="">Load accounts first</option></select></label>
+      <div id="ptRealGate" class="dangerZone hidden"><strong>Demo-only master experiment</strong><p>v6 blocks Real accounts. Validate the fresh regime strategy on Demo first.</p></div>
+      <div class="actions compact"><button id="ptConnect" class="primary">Connect Trader</button><button id="ptDisconnect">Disconnect</button></div>
+      <div id="traderError" class="errorBox hidden"></div>
+    </div>
+
+    <div>
+      <div class="sectionTitle"><span>Frozen v6 trade rules</span><small>do not tune mid-cohort</small></div>
+      <div class="formGrid three">
+        <label>Stake ($)<input id="ptStake" type="number" min="0.35" step="0.01" value="1"></label>
+        <label>TP ($)<input id="ptTakeProfit" type="number" min="0" step="0.1" value="0"></label>
+        <label>SL ($)<input id="ptStopLoss" type="number" min="0" step="0.1" value="0"></label>
+        <label>Persistent max trades<input id="ptMaxTrades" type="number" min="1" step="1" value="100"></label>
+        <label>Cooldown ticks<input id="ptCooldown" type="number" min="0" step="1" value="20"></label>
+      </div>
+      <div class="actions compact"><button id="ptStart" class="primary">Start Master Trader v6</button><button id="ptPause">Pause</button><button id="ptStop">Stop</button><button id="ptReset">Reset engine session</button></div>
+      <p class="muted">Fixed internals: 200-tick regime, 80-tick confirmation, CHOP veto, healthy-volatility requirement, 5-tick session confirmation, neutral buffer before direction flips, 20-tick Higher-Low/Lower-High resumption trigger, fixed 3-tick contract. One pullback can be traded only once.</p>
+    </div>
+  </div>
+
+  <div class="sectionTitle"><span>Master Trader v6 transactions</span><small>actual entries and exits</small></div>
+  <div class="tableWrap"><table><thead><tr><th>Contract</th><th>Session</th><th>Trade</th><th>Entry type</th><th>Result</th><th>Duration</th><th>Pred window</th><th>Actual window</th><th>Latency</th><th>P/L</th><th>ACK</th><th>Entry → exit</th></tr></thead><tbody id="ptTradeRows"><tr><td colspan="12" class="empty">No v6 master trades yet.</td></tr></tbody></table></div>
+
+  <div class="sectionTitle"><span>v6 Master Setup Ledger</span><small>fresh cohort · v5 remains separate in browser storage</small></div>
+  <div class="actions compact"><button id="ptExportLedger">Export v6 CSV</button><button id="ptClearLedger">Clear v6 cohort</button><button id="ptResetCalibration">Reset execution calibration</button></div>
+  <div class="tableWrap"><table><thead><tr><th>Time</th><th>Session</th><th>Trade</th><th>Entry</th><th>200 slope</th><th>80 slope</th><th>Chop</th><th>Vol</th><th>Pred → actual</th><th>Latency</th><th>Status</th><th>Contract</th></tr></thead><tbody id="ptLedgerRows"><tr><td colspan="12" class="empty">No v6 master setups recorded yet.</td></tr></tbody></table></div>
+  <p class="muted">The persistent 100-trade cap is counted from the v6 ledger, so refreshing or resetting the engine session does not silently start another 100 trades.</p>
+
+  <div class="sectionTitle"><span>Trader journal</span><small><span id="ptDot" class="dot"></span></small></div>
+  <div id="ptLogs" class="logs"><div class="empty">Master Trader messages will appear here.</div></div>
+</section>
+
+<section class="card">
+  <div class="sectionTitle"><span>v6 master state machine</span><small>one-direction session trading</small></div>
+  <div class="observatoryRoadmap">
+    <div><b>1 · Regime</b><span>200 ticks classify BULL, BEAR, or NEUTRAL from slope, directional efficiency, net movement, and swing structure.</span></div>
+    <div><b>2 · Confirm</b><span>80 ticks must agree. A pullback can disagree temporarily, but no entry occurs until alignment returns.</span></div>
+    <div><b>3 · Veto</b><span>CHOP or dead/chaotic volatility blocks participation even if a slope exists.</span></div>
+    <div><b>4 · Enter</b><span>20 ticks must form HL + bullish resumption for CALL, or LH + bearish resumption for PUT.</span></div>
+    <div><b>5 · Milk</b><span>After expiry, wait for a fresh pullback in the same session and hunt another aligned entry.</span></div>
+    <div><b>6 · Invalidate</b><span>Persistent opposite pressure sends the strategy to NEUTRAL first. It never flips BULL↔BEAR on one wiggle.</span></div>
+  </div>
+</section>
+
+<footer>Master Trader v6 is an experimental Demo-only regime-following system. No martingale. BOS remains untouched.</footer>
 </main><script type="module" src="/observatory.js"></script><script type="module" src="/pattern-trader.js"></script></body></html>
