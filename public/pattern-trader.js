@@ -3,20 +3,19 @@ import { SaniEngine, DEFAULT_CONFIG } from './core/engine.mjs';
 const $ = id => document.getElementById(id);
 const nowPerf = () => globalThis.performance?.now?.() ?? Date.now();
 
-const LEDGER_KEY = 'sani.masterTrader.signalLedger.v6.5';
+const LEDGER_KEY = 'sani.masterTrader.signalLedger.v6.6';
+const VISUAL_KEY = 'sani.masterTrader.visualSetups.v6.6';
 const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
 const LONG = 200;
 const AUTH = 80;
 const FAST = 20;
-const WAVE = 64;
+const WAVE = 56;
 const DURATION = 3;
-const MIN_Q = 55;
 const HARD_DAMAGE = 0.786;
-const GOLDEN_MIN = 0.382;
-const GOLDEN_MAX = 0.618;
-const FIRE_MIN = 0.34;
-const FIRE_MAX = 0.64;
-const TOUCH_MAX_AGE = 3;
+const CORE_MIN = 0.382;
+const CORE_MAX = 0.618;
+const FIRE_MIN = 0.32;
+const FIRE_MAX = 0.68;
 
 let accounts = [];
 let selectedAccount = null;
@@ -24,14 +23,14 @@ let lastOtpContext = null;
 let lastDiagnostics = null;
 let lastSignalEpoch = 0;
 let cooldownUntil = 0;
-let ledger = load(LEDGER_KEY);
+let ledger = loadArray(LEDGER_KEY);
+let visualHistory = loadArray(VISUAL_KEY);
 const contractToLedger = new Map();
+const waveMemory = new Map();
 
 const strategy = {
   session: 'NEUTRAL',
-  candidate: 'NEUTRAL',
-  candidateCount: 0,
-  invalidation: 0,
+  neutralTicks: 0,
   sessionId: 0
 };
 
@@ -52,21 +51,25 @@ const engine = new SaniEngine({
   reconnect: true,
   maxReconnectAttempts: 8
 });
-engine.onTick = function pocketLockTick(tick) {
+engine.onTick = function firstTurnTick(tick) {
   this.lastTick = tick;
   this.ticksSeen += 1;
   this.emit();
 };
 
-function load(key) {
+function loadArray(key) {
   try {
     const value = JSON.parse(localStorage.getItem(key) || '[]');
     return Array.isArray(value) ? value : [];
   } catch { return []; }
 }
-function save() {
+function saveLedger() {
   ledger = ledger.slice(0, 5000);
   try { localStorage.setItem(LEDGER_KEY, JSON.stringify(ledger)); } catch {}
+}
+function saveVisuals() {
+  visualHistory = visualHistory.slice(0, 1200);
+  try { localStorage.setItem(VISUAL_KEY, JSON.stringify(visualHistory)); } catch {}
 }
 function symbol() { return $('obsSymbol')?.value?.trim() || '1HZ25V'; }
 function ticks() {
@@ -87,13 +90,13 @@ function avgStep(p) {
   for (let i = 1; i < p.length; i += 1) s += Math.abs(p[i] - p[i - 1]);
   return s / (p.length - 1);
 }
-function eff(p) {
+function efficiency(p) {
   if (p.length < 2) return 0;
   let path = 0;
   for (let i = 1; i < p.length; i += 1) path += Math.abs(p[i] - p[i - 1]);
   return path ? Math.abs(p.at(-1) - p[0]) / path : 0;
 }
-function turns(p) {
+function turnRate(p) {
   const signs = [];
   for (let i = 1; i < p.length; i += 1) {
     const d = p[i] - p[i - 1];
@@ -104,11 +107,10 @@ function turns(p) {
   for (let i = 1; i < signs.length; i += 1) if (signs[i] !== signs[i - 1]) n += 1;
   return n / (signs.length - 1);
 }
-function linSlope(p) {
+function linearSlope(p) {
   const n = p.length;
   if (n < 2) return 0;
-  const xm = (n - 1) / 2;
-  const ym = mean(p);
+  const xm = (n - 1) / 2, ym = mean(p);
   let num = 0, den = 0;
   for (let i = 0; i < n; i += 1) {
     const dx = i - xm;
@@ -120,8 +122,7 @@ function linSlope(p) {
 function pivots(p, r = 2) {
   const highs = [], lows = [];
   for (let i = r; i < p.length - r; i += 1) {
-    const left = p.slice(i - r, i);
-    const right = p.slice(i + 1, i + r + 1);
+    const left = p.slice(i - r, i), right = p.slice(i + 1, i + r + 1);
     const hi = left.every(v => p[i] >= v) && right.every(v => p[i] >= v) && [...left, ...right].some(v => p[i] > v);
     const lo = left.every(v => p[i] <= v) && right.every(v => p[i] <= v) && [...left, ...right].some(v => p[i] < v);
     if (hi) highs.push({ i, quote: p[i] });
@@ -129,7 +130,7 @@ function pivots(p, r = 2) {
   }
   return { highs, lows };
 }
-function struct(p, r = 3) {
+function structure(p, r = 3) {
   const x = pivots(p, r), h = x.highs.slice(-2), l = x.lows.slice(-2);
   if (h.length < 2 || l.length < 2) return 'MIXED';
   if (h[1].quote > h[0].quote && l[1].quote > l[0].quote) return 'BULL';
@@ -137,14 +138,14 @@ function struct(p, r = 3) {
   return 'MIXED';
 }
 function metrics(rows, r = 3) {
-  const p = rows.map(x => x.quote), step = avgStep(p), slope = linSlope(p);
+  const p = rows.map(x => x.quote), step = avgStep(p), slope = linearSlope(p);
   return {
     slopeNorm: step ? slope / step : 0,
-    efficiency: eff(p),
-    turnRate: turns(p),
+    efficiency: efficiency(p),
+    turnRate: turnRate(p),
     avgStep: step,
     net: p.at(-1) - p[0],
-    structure: struct(p, r)
+    structure: structure(p, r)
   };
 }
 function trend200(m) {
@@ -155,84 +156,53 @@ function trend200(m) {
   return 'NEUTRAL';
 }
 function trend80(m) {
-  if (Math.abs(m.slopeNorm) < .078 || m.efficiency < .065) return 'NEUTRAL';
-  if (m.slopeNorm > 0 && m.net > 0 && (m.structure === 'BULL' || m.slopeNorm >= .13)) return 'BULL';
-  if (m.slopeNorm < 0 && m.net < 0 && (m.structure === 'BEAR' || m.slopeNorm <= -.13)) return 'BEAR';
+  if (Math.abs(m.slopeNorm) < .072 || m.efficiency < .055) return 'NEUTRAL';
+  if (m.slopeNorm > 0 && m.net > 0 && (m.structure === 'BULL' || m.slopeNorm >= .12)) return 'BULL';
+  if (m.slopeNorm < 0 && m.net < 0 && (m.structure === 'BEAR' || m.slopeNorm <= -.12)) return 'BEAR';
   return 'NEUTRAL';
 }
 function fastTrend(m) {
-  if (Math.abs(m.slopeNorm) < .07 || m.efficiency < .08) return 'NEUTRAL';
-  return m.slopeNorm > 0 && m.net > 0 ? 'BULL' : m.slopeNorm < 0 && m.net < 0 ? 'BEAR' : 'NEUTRAL';
+  if (Math.abs(m.slopeNorm) < .055 || m.efficiency < .06) return 'NEUTRAL';
+  if (m.slopeNorm > 0 && m.net > 0) return 'BULL';
+  if (m.slopeNorm < 0 && m.net < 0) return 'BEAR';
+  return 'NEUTRAL';
 }
 function chop(m80, m20) {
   const score = (
-    clamp((.16 - m80.efficiency) / .16, 0, 1) +
-    clamp((m80.turnRate - .49) / .25, 0, 1) +
-    clamp((.065 - Math.abs(m80.slopeNorm)) / .065, 0, 1) +
-    clamp((m20.turnRate - .66) / .2, 0, 1)
+    clamp((.14 - m80.efficiency) / .14, 0, 1) +
+    clamp((m80.turnRate - .52) / .25, 0, 1) +
+    clamp((.055 - Math.abs(m80.slopeNorm)) / .055, 0, 1) +
+    clamp((m20.turnRate - .72) / .18, 0, 1)
   ) / 4;
-  return { score, isChop: score >= .68 };
+  return { score, isChop: score >= .76 };
 }
-function vol(m200, m80, m20) {
+function volatility(m200, m80, m20) {
   const a = m80.avgStep ? m20.avgStep / m80.avgStep : 1;
   const b = m200.avgStep ? m80.avgStep / m200.avgStep : 1;
-  if (a < .40 || b < .50) return 'DEAD';
-  if (a > 2.15 || m20.turnRate > .87) return 'CHAOTIC';
+  if (a < .36 || b < .46) return 'DEAD';
+  if (a > 2.35 || m20.turnRate > .91) return 'CHAOTIC';
   return 'HEALTHY';
 }
 
-function updateSession(active, fast, isChop, volatility) {
-  const authority = !isChop && volatility === 'HEALTHY' ? active : 'NEUTRAL';
-  if (strategy.session === 'NEUTRAL') {
-    const candidate = authority !== 'NEUTRAL' ? authority : fast;
-    if (candidate === 'NEUTRAL') {
-      strategy.candidate = 'NEUTRAL';
-      strategy.candidateCount = 0;
-      return;
-    }
-    if (strategy.candidate === candidate) strategy.candidateCount += 1;
-    else { strategy.candidate = candidate; strategy.candidateCount = 1; }
-    if (strategy.candidateCount >= 2) {
-      strategy.session = candidate;
-      strategy.sessionId += 1;
-      strategy.invalidation = 0;
-    }
+function updateSession(active80, fast, isChop, volState) {
+  if (isChop || volState !== 'HEALTHY') {
+    strategy.neutralTicks += 1;
+    if (strategy.neutralTicks >= 2) strategy.session = 'NEUTRAL';
     return;
   }
-  if (authority === strategy.session || (authority === 'NEUTRAL' && fast === strategy.session)) {
-    strategy.invalidation = 0;
+  const authority = active80 !== 'NEUTRAL' ? active80 : fast;
+  if (authority === 'NEUTRAL') {
+    strategy.neutralTicks += 1;
+    if (strategy.neutralTicks >= 2) strategy.session = 'NEUTRAL';
     return;
   }
-  strategy.invalidation += authority !== 'NEUTRAL' && authority !== strategy.session ? 2 : 1;
-  if (strategy.invalidation >= 3) {
-    const replacement = authority !== 'NEUTRAL' ? authority : fast;
-    strategy.session = replacement !== strategy.session ? replacement : 'NEUTRAL';
+  strategy.neutralTicks = 0;
+  if (strategy.session !== authority) {
+    strategy.session = authority;
     strategy.sessionId += 1;
-    strategy.candidate = 'NEUTRAL';
-    strategy.candidateCount = 0;
-    strategy.invalidation = 0;
   }
 }
 
-function liveWave(rows, direction) {
-  const p = rows.map(x => x.quote), step = avgStep(p) || 1, x = pivots(p, 2);
-  if (direction === 'BULL') {
-    for (const low of [...x.lows].reverse()) {
-      const future = p.slice(low.i + 1);
-      if (future.length < 3) continue;
-      const high = Math.max(...future), i = low.i + 1 + future.indexOf(high);
-      if (high - low.quote >= step * 3.2 && i - low.i >= 3) return waveFrom(rows, direction, low, { i, quote: high }, step);
-    }
-  } else if (direction === 'BEAR') {
-    for (const high of [...x.highs].reverse()) {
-      const future = p.slice(high.i + 1);
-      if (future.length < 3) continue;
-      const low = Math.min(...future), i = high.i + 1 + future.indexOf(low);
-      if (high.quote - low >= step * 3.2 && i - high.i >= 3) return waveFrom(rows, direction, high, { i, quote: low }, step);
-    }
-  }
-  return null;
-}
 function waveFrom(rows, direction, start, end, step) {
   const p = rows.map(x => x.quote);
   const range = direction === 'BULL' ? end.quote - start.quote : start.quote - end.quote;
@@ -243,140 +213,151 @@ function waveFrom(rows, direction, start, end, step) {
   const currentRetrace = direction === 'BULL' ? (end.quote - current) / range : (current - end.quote) / range;
   return { direction, start, end, step, range, retraces, maxRetrace, currentRetrace };
 }
+function liveWave(rows, direction) {
+  const p = rows.map(x => x.quote), step = avgStep(p) || 1, x = pivots(p, 2);
+  if (direction === 'BULL') {
+    for (const low of [...x.lows].reverse()) {
+      const future = p.slice(low.i + 1);
+      if (future.length < 3) continue;
+      const high = Math.max(...future), i = low.i + 1 + future.indexOf(high);
+      if (high - low.quote >= step * 3.0 && i - low.i >= 3) return waveFrom(rows, direction, low, { i, quote: high }, step);
+    }
+  } else if (direction === 'BEAR') {
+    for (const high of [...x.highs].reverse()) {
+      const future = p.slice(high.i + 1);
+      if (future.length < 3) continue;
+      const low = Math.min(...future), i = high.i + 1 + future.indexOf(low);
+      if (high.quote - low >= step * 3.0 && i - high.i >= 3) return waveFrom(rows, direction, high, { i, quote: low }, step);
+    }
+  }
+  return null;
+}
 function fibPrice(w, ratio) {
   return w.direction === 'BULL' ? w.end.quote - w.range * ratio : w.end.quote + w.range * ratio;
 }
-function keyFor(w, rows) {
+function waveKey(w, rows) {
   return w ? `${strategy.sessionId}:${w.direction}:${rows[w.start.i]?.epoch}` : '';
 }
-function traded(key) {
+function alreadyTraded(key) {
   return ledger.some(r => r.waveKey === key && Number.isFinite(+r.contractId));
 }
-function pocketTouch(w) {
-  if (!w?.retraces?.length) return { touched: false, zone: 'NONE', age: Infinity, touchRatio: 0 };
-  let idx = -1, ratio = 0;
-  for (let i = 0; i < w.retraces.length; i += 1) {
-    const r = w.retraces[i];
-    if (r >= GOLDEN_MIN && r <= GOLDEN_MAX) { idx = i; ratio = r; }
-  }
-  return { touched: idx >= 0, zone: idx >= 0 ? 'GOLDEN' : 'NONE', age: idx >= 0 ? w.retraces.length - 1 - idx : Infinity, touchRatio: ratio };
-}
-function microTurn(rows, direction, step) {
+function firstTurn(rows, direction, step) {
   const p = rows.map(x => x.quote), n = p.length;
-  if (n < 4) return { ok: false, strength: 0, kind: 'NONE' };
-  const c = p[n - 1], a = p[n - 2], b = p[n - 3], d = p[n - 4];
-  const strength = Math.abs(c - a) / (step || 1);
+  if (n < 3) return { ok: false, strength: 0, kind: 'NONE' };
+  const current = p[n - 1], prev = p[n - 2], prev2 = p[n - 3];
+  const unit = step || 1;
   if (direction === 'BULL') {
-    const turn = c > a && a <= b && c - a >= step * .08;
-    const break2 = c > a && c > b && c - a >= step * .14;
-    return { ok: turn || break2, strength, kind: turn ? 'TURN' : break2 ? 'BREAK2' : 'NONE' };
+    const wasPullingBack = prev < prev2;
+    const turned = current > prev && current - prev >= unit * .04;
+    return { ok: wasPullingBack && turned, strength: Math.max(0, current - prev) / unit, kind: wasPullingBack && turned ? 'FIRST_UP' : 'NONE' };
   }
   if (direction === 'BEAR') {
-    const turn = c < a && a >= b && a - c >= step * .08;
-    const break2 = c < a && c < b && a - c >= step * .14;
-    return { ok: turn || break2, strength, kind: turn ? 'TURN' : break2 ? 'BREAK2' : 'NONE' };
+    const wasPullingBack = prev > prev2;
+    const turned = current < prev && prev - current >= unit * .04;
+    return { ok: wasPullingBack && turned, strength: Math.max(0, prev - current) / unit, kind: wasPullingBack && turned ? 'FIRST_DOWN' : 'NONE' };
   }
   return { ok: false, strength: 0, kind: 'NONE' };
 }
-function phase(w, touch, turn) {
+function phase(w, turn) {
   if (!w) return 'SEARCHING';
-  if (w.maxRetrace > HARD_DAMAGE) return 'REANCHOR';
+  if (w.maxRetrace > HARD_DAMAGE || w.currentRetrace > HARD_DAMAGE) return 'INVALID';
   if (w.currentRetrace < 0) return 'EXTENDING';
-  if (!touch.touched) return w.maxRetrace < GOLDEN_MIN ? 'RETRACE' : 'ARMING';
-  if (touch.age > TOUCH_MAX_AGE) return 'REANCHOR';
-  if (w.currentRetrace < FIRE_MIN) return 'NO_CHASE';
-  if (w.currentRetrace > FIRE_MAX) return 'TOO_DEEP';
-  if (turn.ok) return 'SNIPER';
-  return 'POCKET';
+  if (w.currentRetrace < FIRE_MIN) return 'WAIT_POCKET';
+  if (w.currentRetrace <= FIRE_MAX) return turn.ok ? 'SNIPER' : 'ARMED';
+  return 'DEEP';
 }
-function qScore(d) {
+function quality(d) {
+  if (!d.wave) return 0;
   let q = 0;
   const r = d.wave.currentRetrace;
-  if (r >= GOLDEN_MIN && r <= GOLDEN_MAX) q += 34;
-  else if (r >= FIRE_MIN && r < GOLDEN_MIN) q += 22;
-  else q -= 25;
-  q += d.m80.efficiency >= .18 ? 17 : d.m80.efficiency >= .11 ? 11 : 6;
-  const slope = Math.abs(d.m80.slopeNorm);
-  q += slope >= .20 ? 14 : slope >= .12 ? 10 : 5;
-  q += d.turn.strength >= .60 ? 16 : d.turn.strength >= .25 ? 11 : 6;
-  q += d.chopScore <= .20 ? 10 : d.chopScore <= .38 ? 6 : 0;
+  q += r >= CORE_MIN && r <= CORE_MAX ? 35 : r >= FIRE_MIN && r <= FIRE_MAX ? 24 : 0;
+  q += d.m80.efficiency >= .16 ? 16 : d.m80.efficiency >= .09 ? 10 : 5;
+  q += Math.abs(d.m80.slopeNorm) >= .18 ? 13 : Math.abs(d.m80.slopeNorm) >= .10 ? 9 : 4;
+  q += d.fast === d.session ? 10 : 4;
+  q += d.turn.strength >= .5 ? 14 : d.turn.strength >= .18 ? 10 : 6;
+  q += d.chopScore <= .18 ? 8 : d.chopScore <= .35 ? 5 : 2;
   if (d.regime200 === d.session) q += 4;
-  if (d.fast === d.session) q += 6;
-  if (d.touch.age === 0) q += 8;
-  else if (d.touch.age === 1) q += 5;
-  else if (d.touch.age >= 3) q -= 8;
-  if (d.wave.maxRetrace > .70) q -= 20;
   return clamp(Math.round(q), 0, 100);
 }
-
+function reanchor(all, direction) {
+  for (const width of [48, 38, 30, 24, 20]) {
+    const rows = all.slice(-width), wave = liveWave(rows, direction);
+    if (!wave) continue;
+    if (wave.currentRetrace <= HARD_DAMAGE && wave.maxRetrace <= HARD_DAMAGE) return { rows, wave };
+  }
+  return null;
+}
+function rememberVisual(d) {
+  if (!d?.wave || !d.waveKey || !Number.isFinite(+d.epoch) || !Number.isFinite(+d.quote)) return;
+  const memory = waveMemory.get(d.waveKey) || { armed: false, terminal: false };
+  const push = (state, reason) => {
+    const unique = `${d.waveKey}:${state}`;
+    if (visualHistory.some(v => v.unique === unique)) return;
+    visualHistory.unshift({
+      unique, at: Date.now(), epoch: d.epoch, quote: d.quote, direction: d.session,
+      state, reason, waveKey: d.waveKey, retrace: d.wave.currentRetrace, quality: d.quality
+    });
+    saveVisuals();
+  };
+  if (d.phase === 'ARMED' && !memory.armed) {
+    memory.armed = true;
+    push('ARMED', 'Entered 32–68% fire pocket');
+  }
+  if (memory.armed && !memory.terminal && d.phase === 'WAIT_POCKET') {
+    memory.terminal = true;
+    push('MISSED', 'Left pocket with trend before first-turn trigger');
+  }
+  if (memory.armed && !memory.terminal && (d.phase === 'DEEP' || d.phase === 'INVALID')) {
+    memory.terminal = true;
+    push('INVALID', d.phase === 'INVALID' ? 'Wave invalidated past 78.6%' : 'Retrace moved beyond fire window');
+  }
+  if (d.ready) push('FIRE', 'First directional turn inside live pocket');
+  waveMemory.set(d.waveKey, memory);
+}
 function evaluate(snapshot) {
   const all = ticks();
   if (all.length < LONG) return { ready: false, reason: `Need ${LONG} ticks (${all.length}/${LONG})`, phase: 'WARMING', rows: all };
   const r200 = all.slice(-LONG), r80 = all.slice(-AUTH), r20 = all.slice(-FAST);
-  let waveRows = all.slice(-WAVE);
   const m200 = metrics(r200, 4), m80 = metrics(r80, 3), m20 = metrics(r20, 2);
   const regime200 = trend200(m200), active80 = trend80(m80), fast = fastTrend(m20);
-  const c = chop(m80, m20), volatility = vol(m200, m80, m20);
-  updateSession(active80, fast, c.isChop, volatility);
+  const c = chop(m80, m20), volState = volatility(m200, m80, m20);
+  updateSession(active80, fast, c.isChop, volState);
   const session = strategy.session;
+  let waveRows = all.slice(-WAVE);
   let wave = session === 'BULL' || session === 'BEAR' ? liveWave(waveRows, session) : null;
-  let touch = pocketTouch(wave);
-  let turn = microTurn(r20, session, wave?.step || m20.avgStep || 1);
-  let ph = phase(wave, touch, turn);
-  let key = keyFor(wave, waveRows);
-
-  if (wave && (ph === 'REANCHOR' || ph === 'NO_CHASE')) {
-    for (const width of [42, 30, 24]) {
-      const tight = all.slice(-width), next = liveWave(tight, session);
-      if (!next) continue;
-      const nextTouch = pocketTouch(next), nextTurn = microTurn(r20, session, next.step || m20.avgStep || 1), nextPhase = phase(next, nextTouch, nextTurn);
-      if (nextPhase !== 'REANCHOR' && nextPhase !== 'NO_CHASE') {
-        waveRows = tight;
-        wave = next;
-        touch = nextTouch;
-        turn = nextTurn;
-        ph = nextPhase;
-        key = keyFor(wave, waveRows);
-        break;
-      }
-    }
+  if (wave && (wave.maxRetrace > HARD_DAMAGE || wave.currentRetrace > HARD_DAMAGE)) {
+    const fresh = reanchor(all, session);
+    if (fresh) { waveRows = fresh.rows; wave = fresh.wave; }
   }
-
-  const duplicate = traded(key);
-  const q = wave ? qScore({ wave, touch, turn, m80, chopScore: c.score, regime200, session, fast }) : 0;
-  const permission = session !== 'NEUTRAL' && (active80 === session || (active80 === 'NEUTRAL' && fast === session));
-  const inFireWindow = Boolean(wave && wave.currentRetrace >= FIRE_MIN && wave.currentRetrace <= FIRE_MAX);
-  const ready = Boolean(
-    permission && !c.isChop && volatility === 'HEALTHY' && wave &&
-    wave.maxRetrace <= HARD_DAMAGE && touch.touched && touch.age <= TOUCH_MAX_AGE &&
-    inFireWindow && turn.ok && q >= MIN_Q && !duplicate
-  );
-
-  let reason = 'Scanning live waves';
-  if (c.isChop) reason = `CHOP veto ${(c.score * 100).toFixed(0)}%`;
-  else if (volatility !== 'HEALTHY') reason = `Volatility ${volatility}`;
-  else if (session === 'NEUTRAL') reason = `No active session · 80 ${active80} · FAST ${fast}`;
-  else if (active80 === 'NEUTRAL' && fast !== session) reason = `80 neutral; FAST does not support ${session}`;
-  else if (!wave) reason = 'Building fresh live impulse';
-  else if (wave.maxRetrace > HARD_DAMAGE) reason = 'Wave damaged; rolling anchor';
-  else if (!touch.touched) reason = `Retrace ${(wave.maxRetrace * 100).toFixed(1)}% · waiting for 38.2–61.8% pocket`;
-  else if (touch.age > TOUCH_MAX_AGE) reason = 'Pocket touch stale; rolling anchor';
-  else if (wave.currentRetrace < FIRE_MIN) reason = `NO CHASE · price escaped pocket to ${(wave.currentRetrace * 100).toFixed(1)}%`;
-  else if (wave.currentRetrace > FIRE_MAX) reason = `Too deep at ${(wave.currentRetrace * 100).toFixed(1)}% · wait/re-anchor`;
-  else if (!turn.ok) reason = `ARMED ${(wave.currentRetrace * 100).toFixed(1)}% · waiting first micro turn`;
-  else if (q < MIN_Q) reason = `Turn confirmed but Q${q} below ${MIN_Q}`;
-  else if (duplicate) reason = 'Wave already traded; waiting next wave';
-  else if (ready) reason = `POCKET LOCK + ${turn.kind} · FIRE NOW`;
-
-  return {
-    ready, reason, rows: all, waveRows, epoch: all.at(-1).epoch, quote: all.at(-1).quote,
-    regime200, active80, fast, session, phase: ph,
-    chop: c.isChop, chopScore: c.score, volatility,
-    m200, m80, m20, wave, touch, turn, waveKey: key, quality: q, inFireWindow
+  const turn = firstTurn(r20, session, wave?.step || m20.avgStep || 1);
+  const ph = phase(wave, turn);
+  const key = waveKey(wave, waveRows);
+  const permission = session !== 'NEUTRAL' && !c.isChop && volState === 'HEALTHY' && (active80 === session || active80 === 'NEUTRAL' || fast === session);
+  const duplicate = alreadyTraded(key);
+  const inFire = Boolean(wave && wave.currentRetrace >= FIRE_MIN && wave.currentRetrace <= FIRE_MAX);
+  const ready = Boolean(permission && wave && inFire && turn.ok && !duplicate && ph === 'SNIPER');
+  const d = {
+    ready, rows: all, waveRows, epoch: all.at(-1).epoch, quote: all.at(-1).quote,
+    regime200, active80, fast, session, phase: ph, chop: c.isChop, chopScore: c.score,
+    volatility: volState, m200, m80, m20, wave, turn, waveKey: key, inFire
   };
+  d.quality = quality(d);
+  if (c.isChop) d.reason = `CHOP veto ${(c.score * 100).toFixed(0)}%`;
+  else if (volState !== 'HEALTHY') d.reason = `Volatility ${volState}`;
+  else if (session === 'NEUTRAL') d.reason = `No direction · 80 ${active80} · FAST ${fast}`;
+  else if (!wave) d.reason = 'Building fresh impulse';
+  else if (ph === 'INVALID') d.reason = `INVALID ${(wave.currentRetrace * 100).toFixed(1)}% > 78.6% · re-anchor`;
+  else if (ph === 'WAIT_POCKET') d.reason = `Waiting pocket · NOW ${(wave.currentRetrace * 100).toFixed(1)}%`;
+  else if (ph === 'DEEP') d.reason = `Deep retrace ${(wave.currentRetrace * 100).toFixed(1)}% · no entry`;
+  else if (ph === 'ARMED') d.reason = `ARMED ${(wave.currentRetrace * 100).toFixed(1)}% · next first-turn tick can fire`;
+  else if (duplicate) d.reason = 'Wave already traded · waiting next wave';
+  else if (ready) d.reason = `${turn.kind} inside pocket · FIRE`;
+  else d.reason = 'Scanning';
+  rememberVisual(d);
+  return d;
 }
 
-function offsets() { return load(OFFSET_KEY).map(Number).filter(Number.isFinite).slice(-50); }
+function offsets() { return loadArray(OFFSET_KEY).map(Number).filter(Number.isFinite).slice(-50); }
 function offsetEstimate() {
   const a = offsets().map(v => Math.max(1, Math.min(10, Math.round(v)))).sort((a, b) => a - b);
   if (!a.length) return 1;
@@ -405,9 +386,8 @@ function makeSignal(snapshot, d) {
   return {
     symbol: symbol(), epoch: +(snapshot?.epoch ?? d.epoch), quote: +(snapshot?.quote ?? d.quote),
     direction: d.session === 'BULL' ? 'CALL' : 'PUT', session: d.session, phase: d.phase,
-    waveKey: d.waveKey, fibZone: 'POCKET_LOCK', fibTouch: d.touch.touchRatio,
-    fibMaxRetrace: d.wave.maxRetrace, fibEntryRetrace: d.wave.currentRetrace,
-    quality: d.quality, turnKind: d.turn.kind, turnStrength: d.turn.strength,
+    waveKey: d.waveKey, fibEntryRetrace: d.wave.currentRetrace, quality: d.quality,
+    turnKind: d.turn.kind, turnStrength: d.turn.strength,
     regime200: d.regime200, active80: d.active80, fast: d.fast,
     slope200: d.m200.slopeNorm, slope80: d.m80.slopeNorm, efficiency80: d.m80.efficiency,
     chopScore: d.chopScore, volatility: d.volatility,
@@ -421,18 +401,30 @@ function ensureRow(s) {
   let row = ledger.find(x => x.signalKey === key);
   if (row) return row;
   row = {
-    id: `mt65-${s.epoch}-${Date.now()}`, cohort: 'v6.5-pocket-lock-sniper', signalKey: key,
+    id: `mt66-${s.epoch}-${Date.now()}`, cohort: 'v6.6-first-turn-sniper', signalKey: key,
     observedAt: Date.now(), ...s,
     expectedWindow: `T+${s.executionOffset}→T+${s.executionOffset + DURATION}`,
     status: 'QUALIFIED'
   };
   ledger.unshift(row);
-  save();
+  saveLedger();
   return row;
 }
 function patchRow(id, patch) {
   const row = ledger.find(x => x.id === id);
-  if (row) { Object.assign(row, patch, { updatedAt: Date.now() }); save(); }
+  if (row) { Object.assign(row, patch, { updatedAt: Date.now() }); saveLedger(); }
+}
+function recordBlocked(s, state) {
+  const unique = `${s.waveKey}:BLOCKED:${s.epoch}:${state}`;
+  if (visualHistory.some(v => v.unique === unique)) return;
+  visualHistory.unshift({ unique, at: Date.now(), epoch: s.epoch, quote: s.quote, direction: s.session, state: 'BLOCKED', reason: state, waveKey: s.waveKey, retrace: s.fibEntryRetrace, quality: s.quality });
+  saveVisuals();
+}
+function recordEntryVisual(meta, trade) {
+  const unique = `${meta.waveKey}:ENTRY:${trade.contractId}`;
+  if (visualHistory.some(v => v.unique === unique)) return;
+  visualHistory.unshift({ unique, at: Date.now(), epoch: Number(trade.entryTickTime ?? meta.epoch), quote: Number(trade.entrySpot ?? meta.quote), direction: meta.session, state: 'ENTRY', reason: `#${trade.contractId}`, waveKey: meta.waveKey, retrace: meta.fibEntryRetrace, quality: meta.quality, contractId: trade.contractId });
+  saveVisuals();
 }
 function bought() { return ledger.filter(r => Number.isFinite(+r.contractId)).length; }
 function cohort() {
@@ -478,7 +470,7 @@ function auth() {
   selectedAccount = accounts.find(a => a.account_id === accountId) || null;
   if (!appId || !token) throw new Error('App ID and trade token are required.');
   if (!selectedAccount) throw new Error('Load and select a Deriv Options account.');
-  if (String(selectedAccount.account_type).toLowerCase() === 'real') throw new Error('Master v6.5 is Demo-only.');
+  if (String(selectedAccount.account_type).toLowerCase() === 'real') throw new Error('Master v6.6 is Demo-only.');
   return { appId, token, accountId };
 }
 async function api(path, body) {
@@ -495,9 +487,9 @@ async function freshWs() {
   if (!data.url) throw new Error('OTP response missing WebSocket URL.');
   return data.url;
 }
-function err(message) { $('traderError').textContent = message; $('traderError').classList.remove('hidden'); }
-function clearErr() { $('traderError').textContent = ''; $('traderError').classList.add('hidden'); }
-function accountsUI() {
+function showError(message) { $('traderError').textContent = message; $('traderError').classList.remove('hidden'); }
+function clearError() { $('traderError').textContent = ''; $('traderError').classList.add('hidden'); }
+function renderAccounts() {
   const select = $('ptAccount');
   select.innerHTML = accounts.length ? '' : '<option value="">No accounts found</option>';
   for (const a of accounts) {
@@ -513,9 +505,9 @@ function accountsUI() {
     if (demo) select.value = demo.account_id;
   }
   selectedAccount = accounts.find(a => a.account_id === select.value) || null;
-  gate();
+  renderGate();
 }
-function gate() {
+function renderGate() {
   selectedAccount = accounts.find(a => a.account_id === $('ptAccount').value) || null;
   const real = String(selectedAccount?.account_type || '').toLowerCase() === 'real';
   $('ptRealGate').classList.toggle('hidden', !real);
@@ -523,7 +515,7 @@ function gate() {
   $('ptConnect').disabled = !selectedAccount || real;
 }
 
-function trade(snapshot) {
+function maybeTrade(snapshot) {
   const d = evaluate(snapshot);
   lastDiagnostics = d;
   renderState(d);
@@ -533,31 +525,28 @@ function trade(snapshot) {
   if (!s) return;
   const row = ensureRow(s), state = engine.snapshot();
   if (s.epoch <= lastSignalEpoch) return;
-  if (Date.now() - Number(snapshot.at || 0) > 2500) return patchRow(row.id, { status: 'SKIP STALE' });
-  if (state.safeBlocked) return patchRow(row.id, { status: 'SKIP SAFE PAUSE' });
-  if (!state.running) return patchRow(row.id, { status: state.connected ? 'OBSERVED' : 'SKIP DISCONNECTED' });
-  if (bought() >= +($('ptMaxTrades').value || 100)) {
-    patchRow(row.id, { status: 'SKIP COHORT COMPLETE' });
-    engine.pause();
-    return;
-  }
-  const cd = +($('ptCooldown').value || 1);
-  if (s.epoch < cooldownUntil) return patchRow(row.id, { status: 'SKIP COOLDOWN' });
-  if (state.pendingTrade || state.openContracts > 0) return patchRow(row.id, { status: 'SKIP OPEN' });
+  if (Date.now() - Number(snapshot.at || 0) > 2500) { patchRow(row.id, { status: 'SKIP STALE' }); recordBlocked(s, 'STALE'); return; }
+  if (state.safeBlocked) { patchRow(row.id, { status: 'SKIP SAFE PAUSE' }); recordBlocked(s, 'SAFE PAUSE'); return; }
+  if (!state.running) { const status = state.connected ? 'OBSERVED' : 'SKIP DISCONNECTED'; patchRow(row.id, { status }); if (!state.connected) recordBlocked(s, 'DISCONNECTED'); return; }
+  if (bought() >= +($('ptMaxTrades').value || 100)) { patchRow(row.id, { status: 'SKIP COHORT COMPLETE' }); recordBlocked(s, 'COHORT COMPLETE'); engine.pause(); return; }
+  const cd = +($('ptCooldown').value || 0);
+  if (s.epoch < cooldownUntil) { patchRow(row.id, { status: 'SKIP COOLDOWN' }); recordBlocked(s, 'COOLDOWN'); return; }
+  if (state.pendingTrade || state.openContracts > 0) { patchRow(row.id, { status: 'SKIP OPEN' }); recordBlocked(s, 'OPEN CONTRACT'); return; }
   try {
     traderConfig();
     lastSignalEpoch = s.epoch;
     cooldownUntil = s.epoch + cd;
     patchRow(row.id, { status: 'ORDER SENT' });
     engine.execute({
-      direction: s.direction, structure: 'master-v6.5-pocket-lock-sniper',
+      direction: s.direction, structure: 'master-v6.6-first-turn-sniper',
       epoch: s.epoch, quote: s.quote, detectedPerf: nowPerf(), detectedWallMs: Date.now(),
       patternMeta: { ...s, ledgerId: row.id, expectedWindow: row.expectedWindow }
     });
-    engine.log('success', `MASTER v6.5 FIRE ${s.session} ${s.direction} · LOCK ${(s.fibEntryRetrace * 100).toFixed(1)}% · ${s.turnKind} · Q${s.quality}`);
+    engine.log('success', `MASTER v6.6 FIRE ${s.session} ${s.direction} · ${(s.fibEntryRetrace * 100).toFixed(1)}% · ${s.turnKind} · Q${s.quality}`);
   } catch (e) {
     patchRow(row.id, { status: 'ERROR', error: e.message });
-    err(e.message);
+    recordBlocked(s, `ERROR ${e.message}`);
+    showError(e.message);
     engine.pause();
   }
 }
@@ -571,9 +560,9 @@ function renderState(d) {
   set('mtTrend80', d ? `${d.active80}${d.active80 === 'NEUTRAL' && d.fast !== 'NEUTRAL' ? ' · FAST ' + d.fast : ''}` : '—');
   set('mtSession', d?.session && d.session !== 'NEUTRAL' ? `${d.session} · ${d.phase}` : 'NEUTRAL');
   if (!d?.wave) set('mtEntry20', 'SEARCH');
+  else if (d.phase === 'INVALID') set('mtEntry20', 'INVALID');
   else if (d.ready) set('mtEntry20', `FIRE ${(d.wave.currentRetrace * 100).toFixed(0)}%`);
-  else if (d.phase === 'NO_CHASE') set('mtEntry20', 'NO CHASE');
-  else if (d.touch?.touched) set('mtEntry20', `ARMED ${(d.wave.currentRetrace * 100).toFixed(0)}%`);
+  else if (d.phase === 'ARMED') set('mtEntry20', `ARMED ${(d.wave.currentRetrace * 100).toFixed(0)}%`);
   else set('mtEntry20', 'WAIT');
   set('mtChop', d ? `${d.chop ? 'VETO' : 'CLEAR'} · ${(d.chopScore * 100).toFixed(0)}%` : '—');
   set('mtVolatility', d?.volatility || '—');
@@ -581,7 +570,7 @@ function renderState(d) {
     const retrace = d?.wave ? ` · NOW ${(d.wave.currentRetrace * 100).toFixed(1)}%` : '';
     $('ptSignal').innerHTML = `<b>WAIT · ${esc(d?.phase || 'SEARCHING')}</b><span>${esc(d?.reason || 'Scanning')}${retrace}</span>`;
   } else {
-    $('ptSignal').innerHTML = `<b class="${d.session === 'BULL' ? 'positive' : 'negative'}">POCKET LOCK · ${d.session === 'BULL' ? 'CALL' : 'PUT'} · Q${d.quality}</b><span>entry ${(d.wave.currentRetrace * 100).toFixed(1)}% · ${d.turn.kind} · no chase</span>`;
+    $('ptSignal').innerHTML = `<b class="${d.session === 'BULL' ? 'positive' : 'negative'}">FIRST-TURN FIRE · ${d.session === 'BULL' ? 'CALL' : 'PUT'} · Q${d.quality}</b><span>${(d.wave.currentRetrace * 100).toFixed(1)}% · ${d.turn.kind} · immediate Demo execution</span>`;
   }
 }
 function renderLedger() {
@@ -600,15 +589,15 @@ function renderLedger() {
     const window = r.actualWindow ? `${r.expectedWindow} → ${r.actualWindow}` : r.expectedWindow;
     const entry = `${r.turnKind || '—'} · Q${r.quality ?? '—'} · ${(Number(r.fibEntryRetrace || 0) * 100).toFixed(0)}%`;
     return `<tr><td>${tm}</td><td>${esc(`${r.session || '—'} · ${r.phase || '—'}`)}</td><td>${r.direction || '—'}</td><td>${esc(entry)}</td><td>${Number.isFinite(+r.slope200) ? (+r.slope200).toFixed(3) : '—'}</td><td>${Number.isFinite(+r.slope80) ? (+r.slope80).toFixed(3) : '—'}</td><td>${Number.isFinite(+r.chopScore) ? (+r.chopScore * 100).toFixed(0) + '%' : '—'}</td><td>${r.volatility || '—'}</td><td>${window || '—'}</td><td>${r.latencyClass || '—'}</td><td>${r.status || '—'}${Number.isFinite(+r.mfe) ? ` · MFE ${(+r.mfe).toFixed(1)} / MAE ${(+r.mae).toFixed(1)}` : ''}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="12" class="empty">No v6.5 pocket-lock setups yet.</td></tr>';
+  }).join('') : '<tr><td colspan="12" class="empty">No v6.6 first-turn setups yet.</td></tr>';
 }
 function exportCsv() {
-  const headers = ['cohort','observed_at','symbol','epoch','quote','session','phase','direction','wave_key','fib_touch','fib_entry_retrace','quality','turn_kind','turn_strength','regime_200','active_80','fast','slope_200','slope_80','efficiency_80','chop_score','volatility','target_price','invalidation_price','expected_window','status','contract_id','profit','actual_window','latency_class','entry_spot','exit_spot','mfe','mae','target_touched','path_ticks','path_high','path_low'];
-  const rows = ledger.map(r => [r.cohort,new Date(r.observedAt).toISOString(),r.symbol,r.epoch,r.quote,r.session,r.phase,r.direction,r.waveKey,r.fibTouch,r.fibEntryRetrace,r.quality,r.turnKind,r.turnStrength,r.regime200,r.active80,r.fast,r.slope200,r.slope80,r.efficiency80,r.chopScore,r.volatility,r.targetPrice,r.invalidationPrice,r.expectedWindow,r.status,r.contractId??'',r.profit??'',r.actualWindow??'',r.latencyClass??'',r.entrySpot??'',r.exitSpot??'',r.mfe??'',r.mae??'',r.targetTouched??'',r.pathTicks??'',r.pathHigh??'',r.pathLow??'']);
+  const headers = ['cohort','observed_at','symbol','epoch','quote','session','phase','direction','wave_key','fib_entry_retrace','quality','turn_kind','turn_strength','regime_200','active_80','fast','slope_200','slope_80','efficiency_80','chop_score','volatility','target_price','invalidation_price','expected_window','status','contract_id','profit','actual_window','latency_class','entry_spot','exit_spot','mfe','mae','target_touched','path_ticks','path_high','path_low'];
+  const rows = ledger.map(r => [r.cohort,new Date(r.observedAt).toISOString(),r.symbol,r.epoch,r.quote,r.session,r.phase,r.direction,r.waveKey,r.fibEntryRetrace,r.quality,r.turnKind,r.turnStrength,r.regime200,r.active80,r.fast,r.slope200,r.slope80,r.efficiency80,r.chopScore,r.volatility,r.targetPrice,r.invalidationPrice,r.expectedWindow,r.status,r.contractId??'',r.profit??'',r.actualWindow??'',r.latencyClass??'',r.entrySpot??'',r.exitSpot??'',r.mfe??'',r.mae??'',r.targetTouched??'',r.pathTicks??'',r.pathHigh??'',r.pathLow??'']);
   const csv = [headers, ...rows].map(a => a.map(v => `"${String(v ?? '').replaceAll('"','""')}"`).join(',')).join('\n');
   const url = URL.createObjectURL(new Blob([csv], { type:'text/csv' })), a = document.createElement('a');
   a.href = url;
-  a.download = `master-v6.5-pocket-lock-${new Date().toISOString().replaceAll(':','-')}.csv`;
+  a.download = `master-v6.6-first-turn-${new Date().toISOString().replaceAll(':','-')}.csv`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
@@ -620,6 +609,23 @@ function scale(ctx, canvas) {
   }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return { w, h };
+}
+function drawMarker(ctx, state, x, y, direction) {
+  if (state === 'ARMED') {
+    ctx.strokeStyle = '#f3c567'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x,y-5); ctx.lineTo(x+5,y); ctx.lineTo(x,y+5); ctx.lineTo(x-5,y); ctx.closePath(); ctx.stroke();
+  } else if (state === 'MISSED') {
+    ctx.strokeStyle = 'rgba(200,206,216,.75)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x-4,y-4); ctx.lineTo(x+4,y+4); ctx.moveTo(x+4,y-4); ctx.lineTo(x-4,y+4); ctx.stroke();
+  } else if (state === 'INVALID') {
+    ctx.strokeStyle = '#ff7474'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x-5,y-5); ctx.lineTo(x+5,y+5); ctx.moveTo(x+5,y-5); ctx.lineTo(x-5,y+5); ctx.stroke();
+  } else if (state === 'BLOCKED') {
+    ctx.strokeStyle = '#f3c567'; ctx.lineWidth = 1.5; ctx.strokeRect(x-4,y-4,8,8);
+  } else if (state === 'FIRE') {
+    ctx.fillStyle = direction === 'BULL' ? 'rgba(103,217,154,.65)' : 'rgba(255,116,116,.65)';
+    ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill();
+  }
 }
 function draw() {
   const canvas = $('masterCanvas');
@@ -653,30 +659,33 @@ function draw() {
       for (const [x,y] of [[sx,sy],[ex,ey]]) { ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill(); }
 
       const fireTop = yFor(fibPrice(d.wave, FIRE_MIN)), fireBottom = yFor(fibPrice(d.wave, FIRE_MAX));
-      ctx.fillStyle = 'rgba(230,195,92,.14)';
+      ctx.fillStyle = 'rgba(230,195,92,.15)';
       ctx.fillRect(ex, Math.min(fireTop, fireBottom), Math.max(0, w - 12 - ex), Math.abs(fireBottom - fireTop));
-      const goldenTop = yFor(fibPrice(d.wave, GOLDEN_MIN)), goldenBottom = yFor(fibPrice(d.wave, GOLDEN_MAX));
-      ctx.fillStyle = 'rgba(230,195,92,.09)';
-      ctx.fillRect(ex, Math.min(goldenTop, goldenBottom), Math.max(0, w - 12 - ex), Math.abs(goldenBottom - goldenTop));
+      const coreTop = yFor(fibPrice(d.wave, CORE_MIN)), coreBottom = yFor(fibPrice(d.wave, CORE_MAX));
+      ctx.fillStyle = 'rgba(230,195,92,.11)';
+      ctx.fillRect(ex, Math.min(coreTop, coreBottom), Math.max(0, w - 12 - ex), Math.abs(coreBottom - coreTop));
 
-      for (const [ratio,label] of [[.236,'23.6'],[FIRE_MIN,'FIRE 34'],[.382,'38.2'],[.5,'50'],[.618,'61.8'],[FIRE_MAX,'FIRE 64'],[.786,'78.6 INVALID']]) {
+      for (const [ratio,label] of [[FIRE_MIN,'FIRE 32'],[.382,'38.2'],[.5,'50'],[.618,'61.8'],[FIRE_MAX,'FIRE 68'],[.786,'78.6 INVALID']]) {
         const y = yFor(fibPrice(d.wave, ratio));
-        ctx.strokeStyle = ratio === .786 ? 'rgba(255,116,116,.65)' : (ratio === FIRE_MIN || ratio === FIRE_MAX) ? 'rgba(255,215,105,.9)' : 'rgba(230,195,92,.34)';
+        ctx.strokeStyle = ratio === .786 ? 'rgba(255,116,116,.72)' : (ratio === FIRE_MIN || ratio === FIRE_MAX) ? 'rgba(255,215,105,.95)' : 'rgba(230,195,92,.38)';
         ctx.lineWidth = ratio === FIRE_MIN || ratio === FIRE_MAX ? 1.4 : .8;
         ctx.setLineDash(ratio === .786 ? [4,4] : []);
         ctx.beginPath(); ctx.moveTo(ex,y); ctx.lineTo(w - 12,y); ctx.stroke(); ctx.setLineDash([]);
-        ctx.fillStyle = ratio === .786 ? 'rgba(255,116,116,.9)' : 'rgba(230,195,92,.92)';
-        ctx.font = '10px system-ui'; ctx.fillText(label + (String(label).includes('FIRE') || String(label).includes('INVALID') ? '' : '%'), w - 72, y - 3);
+        ctx.fillStyle = ratio === .786 ? '#ff7474' : '#f3c567'; ctx.font = '10px system-ui';
+        ctx.fillText(label + (String(label).includes('FIRE') || String(label).includes('INVALID') ? '' : '%'), w - 82, y - 3);
       }
-
       const currentY = yFor(rows.at(-1).quote);
-      ctx.strokeStyle = d.ready ? '#67d99a' : d.phase === 'NO_CHASE' ? '#ff7474' : 'rgba(245,247,250,.35)';
-      ctx.lineWidth = 1; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(Math.max(ex, w - 190), currentY); ctx.lineTo(w - 12, currentY); ctx.stroke(); ctx.setLineDash([]);
-      ctx.fillStyle = d.ready ? '#67d99a' : d.phase === 'NO_CHASE' ? '#ff7474' : 'rgba(245,247,250,.85)';
-      ctx.beginPath(); ctx.arc(w - 16, currentY, 4, 0, Math.PI * 2); ctx.fill();
-      ctx.font = '11px system-ui';
-      ctx.fillText(d.ready ? 'FIRE NOW' : d.phase === 'NO_CHASE' ? 'NO CHASE' : d.touch?.touched ? 'ARMED' : 'WAIT POCKET', w - 125, Math.max(36, currentY - 8));
+      ctx.strokeStyle = d.ready ? '#67d99a' : d.phase === 'INVALID' ? '#ff7474' : 'rgba(245,247,250,.45)';
+      ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(Math.max(ex, w - 200),currentY); ctx.lineTo(w - 12,currentY); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = d.ready ? '#67d99a' : d.phase === 'INVALID' ? '#ff7474' : '#f5f7fa';
+      ctx.beginPath(); ctx.arc(w - 16,currentY,4,0,Math.PI*2); ctx.fill();
+      ctx.font = '11px system-ui'; ctx.fillText(d.ready ? 'FIRE NOW' : d.phase === 'ARMED' ? 'ARMED' : d.phase === 'INVALID' ? 'INVALID' : 'WAIT', w - 135, Math.max(36,currentY - 8));
     }
+  }
+
+  const visibleStart = rows[0].epoch, visibleEnd = rows.at(-1).epoch;
+  for (const v of visualHistory.filter(v => +v.epoch >= visibleStart && +v.epoch <= visibleEnd && v.state !== 'ENTRY')) {
+    drawMarker(ctx, v.state, xFor(+v.epoch), yFor(+v.quote), v.direction);
   }
 
   const recent = rows.slice(-20), pp = pivots(recent.map(x => x.quote), 2);
@@ -691,12 +700,6 @@ function draw() {
   };
   label(pp.highs, 'H'); label(pp.lows, 'L');
 
-  const visibleStart = rows[0].epoch, visibleEnd = rows.at(-1).epoch;
-  for (const r of ledger.filter(r => !Number.isFinite(+r.contractId) && +r.epoch >= visibleStart && +r.epoch <= visibleEnd)) {
-    const x = xFor(+r.epoch), y = yFor(+r.quote);
-    ctx.strokeStyle = r.direction === 'CALL' ? 'rgba(103,217,154,.7)' : 'rgba(255,116,116,.7)';
-    ctx.strokeRect(x - 4, y - 4, 8, 8);
-  }
   for (const r of ledger.filter(r => Number.isFinite(+r.contractId) && Number(r.entryTickTime ?? r.epoch) >= visibleStart && Number(r.entryTickTime ?? r.epoch) <= visibleEnd)) {
     const ep = Number(r.entryTickTime ?? r.epoch), price = Number(r.entrySpot ?? r.quote);
     const x = xFor(ep), y = yFor(price), call = r.direction === 'CALL';
@@ -716,11 +719,11 @@ function draw() {
       ctx.fillText(`X ${Number(r.profit || 0) >= 0 ? '+' : ''}${Number(r.profit || 0).toFixed(2)}`, ex + 7, ey - 7);
     }
   }
-  $('masterCanvasCaption').textContent = `${session} · ${d?.phase || 'SEARCHING'} · POCKET LOCK 34–64% · gold core 38.2–61.8% · red 78.6%=invalid · ${rows.length} ticks`;
+  $('masterCanvasCaption').textContent = `${session} · ${d?.phase || 'SEARCHING'} · FIRE 32–68% · core 38.2–61.8% · ◇ armed · × missed/invalid · □ blocked · ▲ entry · ○ exit · ${rows.length} ticks`;
 }
 
 const baseBuy = engine.onBuy.bind(engine);
-engine.onBuy = function onPocketBuy(message) {
+engine.onBuy = function onFirstTurnBuy(message) {
   const pending = this.pending.get(Number(message.req_id));
   const meta = pending?.signal?.patternMeta ? { ...pending.signal.patternMeta } : null;
   baseBuy(message);
@@ -731,10 +734,11 @@ engine.onBuy = function onPocketBuy(message) {
   trade.expectedWindow = meta.expectedWindow;
   contractToLedger.set(id, meta.ledgerId);
   patchRow(meta.ledgerId, { status:'BOUGHT', contractId:id, buyAckMs:trade.sendToAckMs });
+  recordEntryVisual(meta, trade);
   this.emit();
 };
 const baseContract = engine.onContract.bind(engine);
-engine.onContract = function onPocketContract(contract) {
+engine.onContract = function onFirstTurnContract(contract) {
   const id = Number(contract?.contract_id);
   baseContract(contract);
   const trade = this.trades.find(x => Number(x.contractId) === id);
@@ -756,7 +760,7 @@ engine.onContract = function onPocketContract(contract) {
 };
 
 $('ptLoadAccounts').onclick = async () => {
-  clearErr();
+  clearError();
   try {
     const appId = $('ptAppId').value.trim(), token = $('ptToken').value.trim();
     if (!appId || !token) throw new Error('App ID and trade token are required.');
@@ -765,43 +769,44 @@ $('ptLoadAccounts').onclick = async () => {
     accounts = data.accounts || [];
     localStorage.setItem('sani.deriv.appId', appId);
     sessionStorage.setItem('sani.deriv.token', token);
-    accountsUI();
-  } catch (e) { err(e.message); }
+    renderAccounts();
+  } catch (e) { showError(e.message); }
   finally { $('ptLoadAccounts').disabled = false; }
 };
-$('ptAccount').onchange = () => { localStorage.setItem('sani.deriv.accountId', $('ptAccount').value); lastOtpContext = null; gate(); };
+$('ptAccount').onchange = () => { localStorage.setItem('sani.deriv.accountId', $('ptAccount').value); lastOtpContext = null; renderGate(); };
 $('ptConnect').onclick = async () => {
-  clearErr();
+  clearError();
   try { traderConfig(); lastOtpContext = auth(); $('ptConnect').disabled = true; await engine.connect(freshWs); }
-  catch (e) { err(e.message); }
-  finally { gate(); }
+  catch (e) { showError(e.message); }
+  finally { renderGate(); }
 };
 $('ptDisconnect').onclick = () => { engine.disconnect(); lastOtpContext = null; };
 $('ptStart').onclick = () => {
-  clearErr();
+  clearError();
   try {
     auth(); traderConfig();
-    if (bought() >= +($('ptMaxTrades').value || 100)) throw new Error('v6.5 cohort cap reached.');
+    if (bought() >= +($('ptMaxTrades').value || 100)) throw new Error('v6.6 cohort cap reached.');
     engine.start();
-    engine.log('info', 'Master v6.5 armed: live wave → 38.2–61.8 pocket → first micro turn while still inside 34–64% fire window. No chase.');
-  } catch (e) { err(e.message); }
+    engine.log('info', 'Master v6.6 armed: 80/FAST direction → live wave → 32–68% pocket → first tick back with trend → immediate Demo trade.');
+  } catch (e) { showError(e.message); }
 };
 $('ptPause').onclick = () => engine.pause();
 $('ptStop').onclick = () => engine.stop();
-$('ptReset').onclick = () => { try { engine.resetSession(); lastSignalEpoch = 0; cooldownUntil = 0; } catch (e) { err(e.message); } };
+$('ptReset').onclick = () => { try { engine.resetSession(); lastSignalEpoch = 0; cooldownUntil = 0; } catch (e) { showError(e.message); } };
 $('ptClearLedger').onclick = () => {
-  if (confirm('Clear fresh v6.5 pocket-lock cohort?')) {
-    ledger = []; localStorage.removeItem(LEDGER_KEY);
-    strategy.session = 'NEUTRAL'; strategy.candidate = 'NEUTRAL'; strategy.candidateCount = 0; strategy.invalidation = 0;
+  if (confirm('Clear fresh v6.6 cohort and visual setup trail?')) {
+    ledger = []; visualHistory = []; waveMemory.clear();
+    localStorage.removeItem(LEDGER_KEY); localStorage.removeItem(VISUAL_KEY);
+    strategy.session = 'NEUTRAL'; strategy.neutralTicks = 0;
     renderLedger(); draw();
   }
 };
 $('ptResetCalibration').onclick = () => { if (confirm('Reset execution calibration?')) { localStorage.removeItem(OFFSET_KEY); renderLedger(); } };
 $('ptExportLedger').onclick = exportCsv;
 for (const id of ['ptStake','ptTakeProfit','ptStopLoss','ptMaxTrades','ptCooldown']) {
-  $(id).addEventListener('change', () => { try { if (!engine.snapshot().running) traderConfig(); } catch (e) { err(e.message); } });
+  $(id).addEventListener('change', () => { try { if (!engine.snapshot().running) traderConfig(); } catch (e) { showError(e.message); } });
 }
-window.addEventListener('sani-observatory-analysis', e => trade(e.detail));
+window.addEventListener('sani-observatory-analysis', e => maybeTrade(e.detail));
 window.addEventListener('resize', draw);
 
 engine.subscribe(state => {
@@ -818,23 +823,23 @@ engine.subscribe(state => {
     const m = t.patternMeta || {}, expected = t.expectedWindow || m.expectedWindow || '—', actual = t.actualWindow || '—';
     const row = ledger.find(r => Number(r.contractId) === Number(t.contractId));
     return `<tr><td>#${t.contractId}</td><td>${esc(`${m.session || '—'} · ${m.phase || 'WAVE'}`)}</td><td>${t.direction}</td><td>${esc(`${m.turnKind || '—'} · ${(Number(m.fibEntryRetrace || 0) * 100).toFixed(0)}% · Q${m.quality ?? '—'}`)}</td><td><span class="result ${t.status}">${t.status}</span></td><td>${t.duration}t</td><td>${expected}</td><td>${actual}</td><td>${t.latencyClass || '—'}</td><td class="${(t.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${t.profit === undefined ? '—' : `${t.profit >= 0 ? '+' : ''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs === undefined ? '—' : Number(t.sendToAckMs).toFixed(0) + 'ms'}</td><td>${t.entrySpot ?? '—'} → ${t.exitSpot ?? '—'}${row && Number.isFinite(+row.mfe) ? ` · MFE ${(+row.mfe).toFixed(1)}/MAE ${(+row.mae).toFixed(1)}` : ''}</td></tr>`;
-  }).join('') : '<tr><td colspan="12" class="empty">No v6.5 trades yet.</td></tr>';
-  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 70).map(l => `<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${esc(l.message === 'Engine armed. Waiting for fresh BOS.' ? 'Master v6.5 execution engine armed.' : l.message)}</span></div>`).join('');
+  }).join('') : '<tr><td colspan="12" class="empty">No v6.6 trades yet.</td></tr>';
+  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 70).map(l => `<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${esc(l.message === 'Engine armed. Waiting for fresh BOS.' ? 'Master v6.6 execution engine armed.' : l.message)}</span></div>`).join('');
   renderLedger(); draw();
 });
 
 window.addEventListener('DOMContentLoaded', () => {
-  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('Master Regime Trader v6.5'));
+  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('Master Regime Trader v6.6'));
   const title = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Master Trader v6'));
-  if (title) title.textContent = 'Master Trader v6.5 · Pocket-Lock Sniper';
+  if (title) title.textContent = 'Master Trader v6.6 · First-Turn Sniper';
   const rules = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Frozen v6'));
-  if (rules) rules.textContent = 'Frozen v6.5 pocket-lock rules';
-  if ($('ptStart')) $('ptStart').textContent = 'Start Master Trader v6.5';
-  if ($('ptCooldown')) $('ptCooldown').value = '1';
-  const fixedText = [...document.querySelectorAll('.muted')].find(x => x.textContent.includes('Fixed internals:'));
-  if (fixedText) fixedText.textContent = 'v6.5: 200 macro context, 80/FAST direction authority, live rolling impulse, 38.2–61.8 Fib pocket, hard 34–64% execution window, first micro turn, no chasing, one trade per wave origin, fixed 3-tick Demo contract. Exit telemetry records MFE/MAE and whether the prior wave target was touched.';
-  const stateTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('v6 master state machine'));
-  if (stateTitle) stateTitle.textContent = 'v6.5 pocket-lock state machine';
+  if (rules) rules.textContent = 'Frozen v6.6 first-turn rules';
+  if ($('ptStart')) $('ptStart').textContent = 'Start Master Trader v6.6';
+  if ($('ptCooldown')) $('ptCooldown').value = '0';
+  const fixedText = [...document.querySelectorAll('.muted')].find(x => x.textContent.includes('Fixed internals:') || x.textContent.includes('v6.5:'));
+  if (fixedText) fixedText.textContent = 'v6.6: 200 macro context, 80 authority with FAST fallback, live rolling wave, 32–68% execution pocket (38.2–61.8 core), first single tick back with the trend fires immediately, no quality-score gate, zero default cooldown, one-open-contract lock, fixed 3-tick Demo contract. Visual trail keeps armed, missed, invalid, blocked, entry and exit setups.';
+  const stateTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('v6') && x.textContent.includes('state machine'));
+  if (stateTitle) stateTitle.textContent = 'v6.6 first-turn state machine';
   $('ptAppId').value = localStorage.getItem('sani.deriv.appId') || '';
   $('ptToken').value = sessionStorage.getItem('sani.deriv.token') || '';
   renderLedger(); draw();
