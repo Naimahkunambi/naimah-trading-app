@@ -2,9 +2,10 @@ import { SaniEngine, DEFAULT_CONFIG } from './core/engine.mjs';
 
 const $ = id => document.getElementById(id);
 const perfNow = () => globalThis.performance?.now?.() ?? Date.now();
-const LEDGER_KEY = 'sani.patternTrader.signalLedger.v2';
+const LEDGER_KEY = 'sani.patternTrader.signalLedger.v3';
 const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
 const MAX_LEDGER = 2000;
+const ACTIVE_HORIZONS = [3, 5, 8, 10];
 
 let accounts = [];
 let selectedAccount = null;
@@ -19,7 +20,7 @@ const config = {
   ...DEFAULT_CONFIG,
   symbol: '1HZ25V',
   stake: 1,
-  duration: 1,
+  duration: 3,
   durationUnit: 't',
   executionMethod: 'direct',
   oneOpenContract: true,
@@ -34,7 +35,6 @@ const config = {
 };
 
 const engine = new SaniEngine(config);
-
 engine.onTick = function patternTraderTick(tick) {
   this.lastTick = tick;
   this.ticksSeen += 1;
@@ -45,9 +45,7 @@ function loadArray(key) {
   try {
     const value = JSON.parse(localStorage.getItem(key) || '[]');
     return Array.isArray(value) ? value : [];
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 function saveLedger() {
   signalLedger = signalLedger.slice(0, MAX_LEDGER);
@@ -74,13 +72,9 @@ function recordEntryOffset(value) {
 function actualEntryOffset(trade) {
   const signalEpoch = Number(trade?.signalEpoch);
   const entryTick = Number(trade?.entryTickTime);
-  if (Number.isFinite(signalEpoch) && Number.isFinite(entryTick)) {
-    return Math.max(1, Math.round(entryTick - signalEpoch));
-  }
+  if (Number.isFinite(signalEpoch) && Number.isFinite(entryTick)) return Math.max(1, Math.round(entryTick - signalEpoch));
   const startTime = Number(trade?.startTime);
-  if (Number.isFinite(signalEpoch) && Number.isFinite(startTime)) {
-    return Math.max(1, Math.round(startTime - signalEpoch) + 1);
-  }
+  if (Number.isFinite(signalEpoch) && Number.isFinite(startTime)) return Math.max(1, Math.round(startTime - signalEpoch) + 1);
   return undefined;
 }
 function latencyClass(offset) {
@@ -90,15 +84,14 @@ function latencyClass(offset) {
   if (offset === 2) return 'LATE +1';
   return 'LATE +2+';
 }
-function signalKey(signal) {
-  return `${signal.symbol || '1HZ25V'}:${signal.epoch}`;
-}
+function signalKey(signal) { return `${signal.symbol || '1HZ25V'}:${signal.epoch}`; }
 function ensureLedgerRow(signal) {
   const key = signalKey(signal);
   let row = signalLedger.find(r => r.signalKey === key);
   if (row) return row;
   row = {
-    id: `pt-${signal.epoch}-${Date.now()}`,
+    id: `pt3-${signal.epoch}-${Date.now()}`,
+    cohort: 'v3-long-horizon-ensemble',
     signalKey: key,
     observedAt: Date.now(),
     symbol: signal.symbol || '1HZ25V',
@@ -107,7 +100,9 @@ function ensureLedgerRow(signal) {
     direction: signal.direction,
     horizon: signal.horizon,
     strength: signal.strength,
-    rawStrength: signal.rawStrength,
+    consensusCount: signal.consensusCount,
+    consensusHorizons: signal.consensusHorizons,
+    consensusAvgStrength: signal.consensusAvgStrength,
     matchCount: signal.matchCount,
     avgSimilarity: signal.avgSimilarity,
     expectedOffset: signal.executionOffset,
@@ -138,10 +133,7 @@ function clearTraderError() {
 
 async function api(path, body) {
   const response = await fetch(`/api/${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    cache: 'no-store'
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store'
   });
   const json = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(json.error || `API ${response.status}`);
@@ -181,7 +173,6 @@ function getAuthContext() {
   if (real && $('ptRealPhrase').value !== 'REAL') throw new Error('Type REAL to unlock the real-money account.');
   return { appId, token, accountId };
 }
-
 async function freshWsUrl() {
   const ctx = lastOtpContext || getAuthContext();
   const data = await api('otp', ctx);
@@ -203,7 +194,6 @@ function renderAccounts() {
   selectedAccount = accounts.find(a => a.account_id === select.value) || null;
   renderAccountGate();
 }
-
 function renderAccountGate() {
   selectedAccount = accounts.find(a => a.account_id === $('ptAccount').value) || null;
   const real = String(selectedAccount?.account_type || '').toLowerCase() === 'real';
@@ -216,8 +206,9 @@ function renderAccountGate() {
 function thresholds() {
   return {
     minMatches: Number($('ptMinMatches').value || 40),
-    minSimilarity: Number($('ptMinSimilarity').value || 88),
+    minSimilarity: Number($('ptMinSimilarity').value || 86),
     minBias: Number($('ptMinBias').value || 55),
+    minAgreement: Number($('ptMinAgreement').value || 2),
     cooldownTicks: Number($('ptCooldown').value || 20)
   };
 }
@@ -226,22 +217,32 @@ function chooseSignal(snapshot) {
   if (!snapshot || !Number.isFinite(snapshot.epoch) || !Number.isFinite(snapshot.quote)) return null;
   const t = thresholds();
   if (snapshot.matchCount < t.minMatches || snapshot.avgSimilarity < t.minSimilarity) return null;
-  const scored = Array.isArray(snapshot.executionHorizons) && snapshot.executionHorizons.length
-    ? snapshot.executionHorizons
-    : snapshot.horizons || [];
-  const eligible = scored
-    .filter(h => h.decided >= t.minMatches && h.strength >= t.minBias && (h.bias === 'UP' || h.bias === 'DOWN'))
-    .sort((a, b) => b.strength - a.strength || b.decided - a.decided || a.horizon - b.horizon);
-  if (!eligible.length) return null;
-  const best = eligible[0];
-  const raw = (snapshot.horizons || []).find(h => h.horizon === best.horizon);
+
+  const scored = (Array.isArray(snapshot.executionHorizons) ? snapshot.executionHorizons : [])
+    .filter(h => ACTIVE_HORIZONS.includes(Number(h.horizon)) && h.decided >= t.minMatches && (h.bias === 'UP' || h.bias === 'DOWN'));
+  if (!scored.length) return null;
+
+  const up = scored.filter(h => h.bias === 'UP' && h.strength >= t.minBias);
+  const down = scored.filter(h => h.bias === 'DOWN' && h.strength >= t.minBias);
+  const winningSide = up.length === down.length
+    ? (up.reduce((s, h) => s + h.strength, 0) >= down.reduce((s, h) => s + h.strength, 0) ? up : down)
+    : (up.length > down.length ? up : down);
+  if (winningSide.length < t.minAgreement) return null;
+
+  const opposite = winningSide === up ? down : up;
+  if (opposite.length >= t.minAgreement) return null;
+
+  const best = [...winningSide].sort((a, b) => b.strength - a.strength || b.horizon - a.horizon)[0];
   const executionOffset = Number(best.startOffset ?? snapshot.executionOffset ?? entryOffsetEstimate());
+  const consensusAvgStrength = winningSide.reduce((s, h) => s + h.strength, 0) / winningSide.length;
   return {
     symbol: snapshot.symbol,
     direction: best.bias === 'UP' ? 'CALL' : 'PUT',
     horizon: best.horizon,
     strength: best.strength,
-    rawStrength: raw?.strength,
+    consensusCount: winningSide.length,
+    consensusHorizons: winningSide.map(h => h.horizon),
+    consensusAvgStrength,
     matchCount: snapshot.matchCount,
     avgSimilarity: snapshot.avgSimilarity,
     executionOffset,
@@ -259,27 +260,14 @@ function maybeTrade(snapshot) {
   const row = ensureLedgerRow(signal);
   const state = engine.snapshot();
   if (signal.epoch <= lastTradeSignalEpoch) return;
-  if (Date.now() - Number(snapshot.at || 0) > 2500) {
-    updateLedger(row.id, { status: 'SKIP STALE' });
-    return;
-  }
-  if (state.safeBlocked) {
-    updateLedger(row.id, { status: 'SKIP SAFE PAUSE' });
-    return;
-  }
+  if (Date.now() - Number(snapshot.at || 0) > 2500) return updateLedger(row.id, { status: 'SKIP STALE' });
+  if (state.safeBlocked) return updateLedger(row.id, { status: 'SKIP SAFE PAUSE' });
   if (!state.running) {
     const disconnected = !state.connected || state.status === 'reconnecting' || state.status === 'error';
-    updateLedger(row.id, { status: disconnected ? 'SKIP DISCONNECTED' : 'OBSERVED' });
-    return;
+    return updateLedger(row.id, { status: disconnected ? 'SKIP DISCONNECTED' : 'OBSERVED' });
   }
-  if (signal.epoch < cooldownUntilEpoch) {
-    updateLedger(row.id, { status: 'SKIP COOLDOWN' });
-    return;
-  }
-  if (state.pendingTrade || state.openContracts > 0) {
-    updateLedger(row.id, { status: 'SKIP OPEN' });
-    return;
-  }
+  if (signal.epoch < cooldownUntilEpoch) return updateLedger(row.id, { status: 'SKIP COOLDOWN' });
+  if (state.pendingTrade || state.openContracts > 0) return updateLedger(row.id, { status: 'SKIP OPEN' });
 
   try {
     readTraderConfig();
@@ -291,14 +279,14 @@ function maybeTrade(snapshot) {
     updateLedger(row.id, { status: 'ORDER SENT' });
     engine.execute({
       direction: signal.direction,
-      structure: 'pattern-observatory-v2',
+      structure: 'pattern-observatory-v3-ensemble',
       epoch: signal.epoch,
       quote: signal.quote,
       detectedPerf: now,
       detectedWallMs: Date.now(),
       patternMeta: { ...signal, ledgerId: row.id, expectedWindow: row.expectedWindow }
     });
-    engine.log('success', `PATTERN ${signal.direction} ${row.expectedWindow} · ${signal.strength.toFixed(1)}% execution-aware bias · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% similarity.`);
+    engine.log('success', `PATTERN v3 ${signal.direction} ${row.expectedWindow} · ${signal.consensusCount}/4 horizons agree (${signal.consensusHorizons.join(',')}) · best ${signal.strength.toFixed(1)}% · avg ${signal.consensusAvgStrength.toFixed(1)}%.`);
   } catch (error) {
     updateLedger(row.id, { status: 'ERROR', error: error.message });
     showTraderError(error.message);
@@ -309,11 +297,10 @@ function maybeTrade(snapshot) {
 function renderPatternSignal(snapshot, existingSignal) {
   const signal = existingSignal || chooseSignal(snapshot);
   if (!signal) {
-    $('ptSignal').innerHTML = '<b>WAIT</b><span>No execution-aware horizon meets the current trade thresholds.</span>';
+    $('ptSignal').innerHTML = '<b>WAIT</b><span>No 3/5/8/10-tick directional ensemble meets the trade thresholds.</span>';
     return;
   }
-  const raw = Number.isFinite(signal.rawStrength) ? ` · raw ${signal.rawStrength.toFixed(1)}%` : '';
-  $('ptSignal').innerHTML = `<b class="${signal.direction === 'CALL' ? 'positive' : 'negative'}">${signal.direction} · ${`T+${signal.executionOffset}→T+${signal.executionOffset + signal.horizon}`}</b><span>${signal.strength.toFixed(1)}% execution-aware bias${raw} · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% avg similarity</span>`;
+  $('ptSignal').innerHTML = `<b class="${signal.direction === 'CALL' ? 'positive' : 'negative'}">${signal.direction} · ${`T+${signal.executionOffset}→T+${signal.executionOffset + signal.horizon}`}</b><span>${signal.consensusCount}/4 horizons agree [${signal.consensusHorizons.join(', ')}] · best ${signal.strength.toFixed(1)}% · consensus avg ${signal.consensusAvgStrength.toFixed(1)}% · ${signal.matchCount} matches · ${signal.avgSimilarity.toFixed(1)}% similarity</span>`;
 }
 
 const baseOnBuy = engine.onBuy.bind(engine);
@@ -328,12 +315,7 @@ engine.onBuy = function patternOnBuy(message) {
   trade.ledgerId = meta.ledgerId;
   trade.expectedWindow = meta.expectedWindow;
   contractToLedger.set(contractId, meta.ledgerId);
-  updateLedger(meta.ledgerId, {
-    status: 'BOUGHT',
-    contractId,
-    buyAckMs: trade.sendToAckMs,
-    serverStartDelayMs: trade.serverStartDelayMs
-  });
+  updateLedger(meta.ledgerId, { status: 'BOUGHT', contractId, buyAckMs: trade.sendToAckMs, serverStartDelayMs: trade.serverStartDelayMs });
   this.emit();
 };
 
@@ -342,12 +324,8 @@ engine.onContract = function patternOnContract(contract) {
   const contractId = Number(contract?.contract_id);
   baseOnContract(contract);
   const trade = this.trades.find(t => Number(t.contractId) === contractId);
-  if (!trade) return;
-  const meta = trade.patternMeta;
-  if (!meta) return;
-
-  const settled = Boolean(contract?.is_sold || contract?.is_expired);
-  if (!settled) return;
+  if (!trade?.patternMeta) return;
+  if (!(contract?.is_sold || contract?.is_expired)) return;
   const offset = actualEntryOffset(trade);
   if (!trade.patternOffsetRecorded && Number.isFinite(offset)) {
     trade.patternOffsetRecorded = true;
@@ -355,9 +333,8 @@ engine.onContract = function patternOnContract(contract) {
   }
   trade.actualEntryOffset = offset;
   trade.latencyClass = latencyClass(offset);
-  trade.actualWindow = Number.isFinite(offset) ? `T+${offset}→T+${offset + Number(trade.duration || meta.horizon)}` : 'unknown';
-
-  const ledgerId = trade.ledgerId || contractToLedger.get(contractId) || meta.ledgerId;
+  trade.actualWindow = Number.isFinite(offset) ? `T+${offset}→T+${offset + Number(trade.duration || trade.patternMeta.horizon)}` : 'unknown';
+  const ledgerId = trade.ledgerId || contractToLedger.get(contractId) || trade.patternMeta.ledgerId;
   updateLedger(ledgerId, {
     status: String(trade.status || 'sold').toUpperCase(),
     contractId,
@@ -389,21 +366,20 @@ function renderLedger() {
     const signal = `${r.direction} ${r.horizon}t`;
     const bias = Number.isFinite(Number(r.strength)) ? `${Number(r.strength).toFixed(1)}%` : '—';
     const sim = Number.isFinite(Number(r.avgSimilarity)) ? `${Number(r.avgSimilarity).toFixed(1)}%` : '—';
+    const agreement = `${r.consensusCount ?? '—'}/4 ${Array.isArray(r.consensusHorizons) ? '[' + r.consensusHorizons.join(',') + ']' : ''}`;
     const window = r.actualWindow ? `${r.expectedWindow} → ${r.actualWindow}` : r.expectedWindow;
-    return `<tr><td>${time}</td><td>${escapeHtml(signal)}</td><td>${bias}</td><td>${r.matchCount ?? '—'}</td><td>${sim}</td><td>${escapeHtml(window)}</td><td>${escapeHtml(r.latencyClass || '—')}</td><td>${escapeHtml(r.status || '—')}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="9" class="empty">No qualified pattern signals recorded yet.</td></tr>';
+    return `<tr><td>${time}</td><td>${escapeHtml(signal)}</td><td>${bias}</td><td>${escapeHtml(agreement)}</td><td>${r.matchCount ?? '—'}</td><td>${sim}</td><td>${escapeHtml(window)}</td><td>${escapeHtml(r.latencyClass || '—')}</td><td>${escapeHtml(r.status || '—')}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="10" class="empty">No v3 long-horizon ensemble signals recorded yet.</td></tr>';
 }
 function exportLedgerCsv() {
-  const headers = ['observed_at','symbol','epoch','quote','direction','duration_ticks','execution_aware_bias_pct','raw_bias_pct','matches','avg_similarity_pct','expected_entry_offset','expected_window','status','contract_id','profit','actual_entry_offset','actual_window','latency_class','entry_spot','exit_spot'];
-  const rows = signalLedger.map(r => [
-    new Date(r.observedAt).toISOString(),r.symbol,r.epoch,r.quote,r.direction,r.horizon,r.strength,r.rawStrength ?? '',r.matchCount,r.avgSimilarity,r.expectedOffset,r.expectedWindow,r.status,r.contractId ?? '',r.profit ?? '',r.actualEntryOffset ?? '',r.actualWindow ?? '',r.latencyClass ?? '',r.entrySpot ?? '',r.exitSpot ?? ''
-  ]);
+  const headers = ['cohort','observed_at','symbol','epoch','quote','direction','duration_ticks','best_bias_pct','consensus_count','consensus_horizons','consensus_avg_bias_pct','matches','avg_similarity_pct','expected_entry_offset','expected_window','status','contract_id','profit','actual_entry_offset','actual_window','latency_class','entry_spot','exit_spot'];
+  const rows = signalLedger.map(r => [r.cohort,new Date(r.observedAt).toISOString(),r.symbol,r.epoch,r.quote,r.direction,r.horizon,r.strength,r.consensusCount,(r.consensusHorizons||[]).join('|'),r.consensusAvgStrength,r.matchCount,r.avgSimilarity,r.expectedOffset,r.expectedWindow,r.status,r.contractId ?? '',r.profit ?? '',r.actualEntryOffset ?? '',r.actualWindow ?? '',r.latencyClass ?? '',r.entrySpot ?? '',r.exitSpot ?? '']);
   const csv = [headers, ...rows].map(row => row.map(v => `"${String(v ?? '').replaceAll('"','""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = `pattern-signal-ledger-${new Date().toISOString().replaceAll(':','-')}.csv`;
+  anchor.download = `pattern-v3-long-horizon-${new Date().toISOString().replaceAll(':','-')}.csv`;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
@@ -420,13 +396,9 @@ $('ptLoadAccounts').onclick = async () => {
     localStorage.setItem('sani.deriv.appId', appId);
     sessionStorage.setItem('sani.deriv.token', token);
     renderAccounts();
-  } catch (error) {
-    showTraderError(error.message);
-  } finally {
-    $('ptLoadAccounts').disabled = false;
-  }
+  } catch (error) { showTraderError(error.message); }
+  finally { $('ptLoadAccounts').disabled = false; }
 };
-
 $('ptAccount').onchange = () => {
   localStorage.setItem('sani.deriv.accountId', $('ptAccount').value);
   $('ptRealPhrase').value = '';
@@ -434,7 +406,6 @@ $('ptAccount').onchange = () => {
   renderAccountGate();
 };
 $('ptRealPhrase').oninput = renderAccountGate;
-
 $('ptConnect').onclick = async () => {
   clearTraderError();
   try {
@@ -442,16 +413,10 @@ $('ptConnect').onclick = async () => {
     lastOtpContext = getAuthContext();
     $('ptConnect').disabled = true;
     await engine.connect(freshWsUrl);
-  } catch (error) {
-    showTraderError(error.message);
-  } finally {
-    renderAccountGate();
-  }
+  } catch (error) { showTraderError(error.message); }
+  finally { renderAccountGate(); }
 };
-$('ptDisconnect').onclick = () => {
-  engine.disconnect();
-  lastOtpContext = null;
-};
+$('ptDisconnect').onclick = () => { engine.disconnect(); lastOtpContext = null; };
 $('ptStart').onclick = () => {
   clearTraderError();
   try {
@@ -464,14 +429,11 @@ $('ptStart').onclick = () => {
 $('ptPause').onclick = () => engine.pause();
 $('ptStop').onclick = () => engine.stop();
 $('ptReset').onclick = () => {
-  try {
-    engine.resetSession();
-    lastTradeSignalEpoch = 0;
-    cooldownUntilEpoch = 0;
-  } catch (error) { showTraderError(error.message); }
+  try { engine.resetSession(); lastTradeSignalEpoch = 0; cooldownUntilEpoch = 0; }
+  catch (error) { showTraderError(error.message); }
 };
 $('ptClearLedger').onclick = () => {
-  if (!confirm('Clear the persistent Pattern Trader qualified-signal ledger?')) return;
+  if (!confirm('Clear the v3 long-horizon Pattern Trader ledger?')) return;
   signalLedger = [];
   localStorage.removeItem(LEDGER_KEY);
   renderLedger();
@@ -484,7 +446,7 @@ $('ptResetCalibration').onclick = () => {
 };
 $('ptExportLedger').onclick = exportLedgerCsv;
 
-for (const id of ['ptStake','ptTakeProfit','ptStopLoss','ptMaxTrades','ptMinMatches','ptMinSimilarity','ptMinBias','ptCooldown']) {
+for (const id of ['ptStake','ptTakeProfit','ptStopLoss','ptMaxTrades','ptMinMatches','ptMinSimilarity','ptMinBias','ptMinAgreement','ptCooldown']) {
   $(id).addEventListener('change', () => {
     try { if (!engine.snapshot().running) readTraderConfig(); } catch (error) { showTraderError(error.message); }
     if (lastAnalysis) renderPatternSignal(lastAnalysis);
@@ -492,7 +454,6 @@ for (const id of ['ptStake','ptTakeProfit','ptStopLoss','ptMaxTrades','ptMinMatc
 }
 
 window.addEventListener('sani-observatory-analysis', event => maybeTrade(event.detail));
-
 engine.subscribe(state => {
   $('ptStatus').textContent = state.safeBlocked ? 'SAFE PAUSE' : state.status === 'reconnecting' ? 'RECONNECTING' : state.connected ? (state.running ? 'TRADING' : 'CONNECTED') : 'DISCONNECTED';
   $('ptDot').classList.toggle('ok', state.connected && !state.safeBlocked);
@@ -510,12 +471,11 @@ engine.subscribe(state => {
     const expected = t.expectedWindow || t.patternMeta?.expectedWindow || '—';
     const actual = t.actualWindow || '—';
     const latency = t.latencyClass || latencyClass(actualEntryOffset(t));
-    return `<tr><td>#${t.contractId}</td><td>${t.direction}</td><td><span class="result ${t.status}">${t.status}</span></td><td>${t.duration}t</td><td>${escapeHtml(expected)}</td><td>${escapeHtml(actual)}</td><td>${escapeHtml(latency)}</td><td class="${(t.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${t.profit === undefined ? '—' : `${t.profit >= 0 ? '+' : ''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs === undefined ? '—' : Number(t.sendToAckMs).toFixed(0)+'ms'}</td><td>${t.entrySpot ?? '—'} → ${t.exitSpot ?? '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="10" class="empty">No Pattern Trader trades yet.</td></tr>';
+    const agreement = t.patternMeta ? `${t.patternMeta.consensusCount}/4 [${(t.patternMeta.consensusHorizons || []).join(',')}]` : '—';
+    return `<tr><td>#${t.contractId}</td><td>${t.direction}</td><td><span class="result ${t.status}">${t.status}</span></td><td>${t.duration}t</td><td>${escapeHtml(agreement)}</td><td>${escapeHtml(expected)}</td><td>${escapeHtml(actual)}</td><td>${escapeHtml(latency)}</td><td class="${(t.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${t.profit === undefined ? '—' : `${t.profit >= 0 ? '+' : ''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs === undefined ? '—' : Number(t.sendToAckMs).toFixed(0)+'ms'}</td><td>${t.entrySpot ?? '—'} → ${t.exitSpot ?? '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="11" class="empty">No v3 long-horizon Pattern Trader trades yet.</td></tr>';
 
-  if (state.logs?.[0]) {
-    $('ptLogs').innerHTML = state.logs.slice(0, 50).map(l => `<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${escapeHtml(l.message)}</span></div>`).join('');
-  }
+  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 50).map(l => `<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${escapeHtml(l.message)}</span></div>`).join('');
   renderLedger();
 });
 
@@ -525,8 +485,5 @@ window.addEventListener('DOMContentLoaded', () => {
   renderLedger();
   if ($('ptAppId').value && $('ptToken').value) $('ptLoadAccounts').click();
   const snap = window.SaniObservatory?.getSnapshot?.();
-  if (snap) {
-    lastAnalysis = snap;
-    renderPatternSignal(snap);
-  }
+  if (snap) { lastAnalysis = snap; renderPatternSignal(snap); }
 });
