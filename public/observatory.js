@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const HORIZONS = [1, 3, 5, 8, 10];
+const HORIZONS = [3, 5, 8, 10];
 const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
 const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
 const MAX_RECONNECT_ATTEMPTS = 8;
@@ -167,9 +167,7 @@ function analyze() {
     const end = start + n - 1;
     const shape = normalizeShape(ticks.slice(start, start + n).map(t => t.quote));
     const sim = cosine(currentShape, shape);
-    if (sim >= floor) {
-      candidates.push({ start, end, similarity: sim, shape, epoch: ticks[end].epoch });
-    }
+    if (sim >= floor) candidates.push({ start, end, similarity: sim, shape, epoch: ticks[end].epoch });
   }
 
   candidates.sort((a, b) => b.similarity - a.similarity);
@@ -221,7 +219,7 @@ function renderAnalysis(currentShape) {
 }
 function renderMatches() {
   if (!matches.length) {
-    $('patternRows').innerHTML = '<tr><td colspan="8" class="empty">No pattern matches above the similarity floor.</td></tr>';
+    $('patternRows').innerHTML = '<tr><td colspan="7" class="empty">No pattern matches above the similarity floor.</td></tr>';
     return;
   }
   $('patternRows').innerHTML = matches.slice(0, 25).map((m, i) => {
