@@ -1,12 +1,12 @@
 const $ = id => document.getElementById(id);
 const HORIZONS = [1, 3, 5, 8, 10];
+const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
 let ws;
 let ticks = [];
 let matches = [];
 let analysisQueued = false;
 let subscriptionId;
 
-const storedAppId = localStorage.getItem('sani.deriv.appId') || '1089';
 const stateKey = symbol => `sani.observatory.ticks.${symbol}`;
 
 function setStatus(text, ok = false) {
@@ -105,7 +105,6 @@ function analyze() {
   const maxH = Math.max(...HORIZONS);
   const candidates = [];
 
-  // Historical windows must have their future fully known and must not overlap the current pattern.
   for (let start = 0; start + n - 1 + maxH < currentStart; start += 1) {
     const end = start + n - 1;
     const shape = normalizeShape(ticks.slice(start, start + n).map(t => t.quote));
@@ -123,7 +122,6 @@ function analyze() {
   }
 
   candidates.sort((a, b) => b.similarity - a.similarity);
-  // Keep matches diverse: skip windows whose endings are almost identical in time/index.
   const chosen = [];
   for (const c of candidates) {
     if (chosen.some(x => Math.abs(x.end - c.end) < Math.max(3, Math.floor(n / 3)))) continue;
@@ -199,17 +197,6 @@ function drawGrid(ctx, width, height) {
   for (let x = 0; x <= width; x += width / 8) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
   for (let y = 0; y <= height; y += height / 5) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
 }
-function plot(ctx, values, width, height, stroke, lineWidth = 1.5, alpha = 1) {
-  if (values.length < 2) return;
-  const min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
-  ctx.save(); ctx.globalAlpha = alpha; ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.beginPath();
-  values.forEach((v, i) => {
-    const x = 12 + i / (values.length - 1) * (width - 24);
-    const y = height - 14 - (v - min) / span * (height - 28);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
-  ctx.stroke(); ctx.restore();
-}
 function drawTickCanvas() {
   const canvas = $('tickCanvas'); if (!canvas) return;
   const ctx = canvas.getContext('2d'); const { width, height } = canvasScale(ctx, canvas); drawGrid(ctx, width, height);
@@ -257,7 +244,7 @@ function connect() {
   const symbol = currentSymbol();
   setStatus('Connecting…');
   try {
-    ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(storedAppId)}`);
+    ws = new WebSocket(PUBLIC_WS_URL);
     ws.onopen = () => {
       setStatus('Loading history…', true);
       ws.send(JSON.stringify({ ticks_history: symbol, count: archiveLimit(), end: 'latest', style: 'ticks', req_id: 1 }));
