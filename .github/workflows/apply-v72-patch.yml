@@ -17,113 +17,109 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Patch Pattern + Structure Sniper
+      - name: Apply v7.2 patch
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          p = Path('public/pattern-trader.js')
+          s = p.read_text()
 
-          path = Path('public/pattern-trader.js')
-          s = path.read_text()
-
-          replacements = [
-            ("const VERSION = 'v7.1';\nconst LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.1';", "const VERSION = 'v7.2';\nconst LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.2';\nconst LEGACY_LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.1';"),
-            ("const MAX_BREAK_EXTENSION_STEPS = 1.10;\nconst EARLY_ARM_STEPS = 0.50;", "const MAX_BREAK_EXTENSION_STEPS = 1.10;\nconst FIXED_DURATION = 10;\nconst EARLY_ARM_STEPS = 0.50;"),
-            ("let replayOffset = 0;\nlet ledger = loadArray(LEDGER_KEY);", "let replayOffset = 0;\nlet ledger = loadArray(LEDGER_KEY);\nconst legacyLedger = loadArray(LEGACY_LEDGER_KEY);"),
-            ("  duration: 3,", "  duration: FIXED_DURATION,"),
-            ("engine.onTick = function v71Tick(tick) {", "engine.onTick = function v72Tick(tick) {"),
-            ("// v7.1 timing model:\n// 1) find HL/LH anchor, 2) freeze the BOS level, 3) fire on the FIRST break tick,\n// 4) reject a break that has already stretched too far beyond BOS.", "// v7.2 timing model:\n// 1) strict 200 + 80 directional alignment, 2) find HL/LH anchor, 3) freeze BOS,\n// 4) take the first actual break. Extension is measured, not used as a chase veto."),
-            ("    const timingClass = event\n      ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'CHASE')\n      : aboveBefore ? 'CHASE'\n        : early ? 'EARLY' : 'WAIT';\n    const ready = event && timingClass === 'PRIME';", "    const timingClass = event\n      ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'EXTENDED')\n      : aboveBefore ? 'POST_BREAK'\n        : early ? 'EARLY' : 'WAIT';\n    const ready = event;"),
-            ("      type: ready ? 'HL_BOS_FIRST_BREAK' : event ? 'HL_BOS_CHASE' : early ? 'HL_ARMED' : 'WAIT_BOS',", "      type: ready ? 'HL_BOS_FIRST_BREAK' : early ? 'HL_ARMED' : 'WAIT_BOS',"),
-            ("        : ready ? `HL → BOS first break · PRIME ${breakDistanceSteps.toFixed(2)}x`\n          : event ? `HL → BOS but CHASE ${breakDistanceSteps.toFixed(2)}x`", "        : ready ? `HL → BOS first break · ${timingClass} ${breakDistanceSteps.toFixed(2)}x`"),
-            ("  const timingClass = event\n    ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'CHASE')\n    : belowBefore ? 'CHASE'\n      : early ? 'EARLY' : 'WAIT';\n  const ready = event && timingClass === 'PRIME';", "  const timingClass = event\n    ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'EXTENDED')\n    : belowBefore ? 'POST_BREAK'\n      : early ? 'EARLY' : 'WAIT';\n  const ready = event;"),
-            ("    type: ready ? 'LH_BOS_FIRST_BREAK' : event ? 'LH_BOS_CHASE' : early ? 'LH_ARMED' : 'WAIT_BOS',", "    type: ready ? 'LH_BOS_FIRST_BREAK' : early ? 'LH_ARMED' : 'WAIT_BOS',"),
-            ("      : ready ? `LH → BOS first break · PRIME ${breakDistanceSteps.toFixed(2)}x`\n        : event ? `LH → BOS but CHASE ${breakDistanceSteps.toFixed(2)}x`", "      : ready ? `LH → BOS first break · ${timingClass} ${breakDistanceSteps.toFixed(2)}x`"),
-            ("    .filter(h => [3, 5, 8, 10].includes(Number(h.horizon)) && Number(h.decided || 0) >= MIN_MATCHES && ['UP', 'DOWN'].includes(h.bias))", "    .filter(h => Number(h.horizon) === FIXED_DURATION && Number(h.decided || 0) >= MIN_MATCHES && ['UP', 'DOWN'].includes(h.bias))"),
-            ("      duration: strongest?.horizon || 3,", "      duration: FIXED_DURATION,"),
-            ("  let direction = authority80;\n  if (direction === 'NEUTRAL' && fast20 !== 'NEUTRAL' && regime200 !== (fast20 === 'BULL' ? 'BEAR' : 'BULL')) direction = fast20;\n  if (direction !== 'NEUTRAL' && regime200 !== 'NEUTRAL' && regime200 !== direction && Math.abs(m200.slopeNorm) >= .11) direction = 'NEUTRAL';", "  // Data-led v7.2 rule: no fast override and no neutral shortcut.\n  // A trade direction exists only when BOTH macro context and 80t authority agree.\n  const direction = regime200 !== 'NEUTRAL' && regime200 === authority80 ? regime200 : 'NEUTRAL';"),
-            ("    : { ok: false, status: 'WAIT', reason: setup.timingClass === 'CHASE' ? 'Timing blocked: chase entry' : 'Waiting for PRIME BOS first break' };", "    : { ok: false, status: 'WAIT', reason: direction === 'NEUTRAL' ? 'Waiting for 200 + 80 alignment' : 'Waiting for first BOS break' };"),
-            ("  else if (setup.event && setup.timingClass === 'CHASE') phase = 'CHASE_BLOCK';\n  else if (setup.timingClass === 'EARLY') phase = 'ARMED_EARLY';", "  else if (setup.timingClass === 'EARLY') phase = 'ARMED_EARLY';"),
-            ("    duration: pattern.duration || 3,", "    duration: FIXED_DURATION,"),
-            ("      ? `AGREEMENT: ${direction} ${setup.pivotType} → BOS PRIME + ${pattern.reason}`\n      : structureReady\n        ? `PRIME BOS · ${pattern.reason}`", "      ? `AGREEMENT: 200+80 ${direction} · ${setup.pivotType} → BOS ${setup.timingClass} + ${pattern.reason}`\n      : structureReady\n        ? `BOS ${setup.timingClass} · ${pattern.reason}`"),
-            ("  const duration = Number(d.pattern?.duration || 3);", "  const duration = FIXED_DURATION;"),
-            ("  const timingBlocked = d.setup?.timingClass === 'CHASE' || !d.setup?.ready;", "  const timingBlocked = !d.setup?.ready;"),
-            ("    id: `v71-${d.epoch}-${Date.now()}`,\n    cohort: 'v7.1-hl-lh-bos-first-break',", "    id: `v72-${d.epoch}-${Date.now()}`,\n    cohort: 'v7.2-strict-200-80-bos-pattern-10t',"),
-            ("    status: timingBlocked ? 'BLOCK TIMING CHASE' : agreement ? 'AGREEMENT' : `BLOCK PATTERN ${d.pattern.status}`,", "    status: timingBlocked ? 'BLOCK STRUCTURE' : agreement ? 'AGREEMENT' : `BLOCK PATTERN ${d.pattern.status}`,"),
-            ("    duration: 3,\n    durationUnit: 't',", "    duration: FIXED_DURATION,\n    durationUnit: 't',"),
-            ("if (String(selectedAccount.account_type).toLowerCase() === 'real') throw new Error('v7.1 agreement trader is Demo-only.');", "if (String(selectedAccount.account_type).toLowerCase() === 'real') throw new Error('v7.2 agreement trader is Demo-only.');"),
-            ("  // Only a real first-BOS event becomes an auditable candidate. EARLY/WAIT\n  // states are displayed live but are not spammed into the ledger.", "  // Only a real first-BOS event becomes an auditable candidate. EARLY/WAIT\n  // states remain visual only. Macro alignment must already be strict 200 + 80."),
-            ("  // A first break that jumped too far is recorded and shadow-resolved, but not bought.\n  if (!d.setup.ready) return;", "  // v7.2 does NOT reject first-break continuation merely because BOS distance is extended.\n  if (!d.setup.ready) return;"),
-            ("    engine.config.duration = Number(d.pattern.duration);", "    engine.config.duration = FIXED_DURATION;"),
-            ("      structure: `v71-${d.setup.pivotType.toLowerCase()}-bos-first-break-${d.pattern.duration}t`,", "      structure: `v72-strict-${d.setup.pivotType.toLowerCase()}-bos-${d.setup.timingClass.toLowerCase()}-${FIXED_DURATION}t`,"),
-            ("    engine.log('success', `v7.1 PRIME ${row.direction} · ${row.pivotType}→BOS · Δ${Number(row.breakDistanceSteps).toFixed(2)}x · pattern ${row.patternStrength?.toFixed?.(1) ?? '—'}% · ${row.duration}t.`);", "    engine.log('success', `v7.2 STRICT ${row.direction} · 200+80 aligned · ${row.pivotType}→BOS ${row.timingClass} · Δ${Number(row.breakDistanceSteps).toFixed(2)}x · pattern ${row.patternStrength?.toFixed?.(1) ?? '—'}% · ${FIXED_DURATION}t.`);"),
-            ("  if (d?.setup?.timingClass === 'CHASE' && d?.structureEvent) {\n    set('dbStructure', `${d.direction} · CHASE BLOCK`);\n  } else if (d?.setup?.timingClass === 'EARLY') {", "  if (d?.setup?.timingClass === 'EARLY') {"),
-            ("  } else if (d?.structureReady) {\n    set('dbStructure', `${d.direction} · PRIME ${d.setup.pivotType}→BOS`);", "  } else if (d?.structureReady) {\n    set('dbStructure', `${d.direction} · ${d.setup.timingClass} ${d.setup.pivotType}→BOS`);"),
-            ("  set('dbPattern', d?.structureReady ? `${d.pattern.status} · ${d.pattern.reason}` : 'WAITING FOR PRIME BOS');", "  set('dbPattern', d?.structureReady ? `${d.pattern.status} · ${d.pattern.reason}` : 'WAITING FOR 200+80 + BOS');"),
-            ("    : `${bosMeta} · PRIME means first BOS break ≤${MAX_BREAK_EXTENSION_STEPS.toFixed(2)} average tick from level`);", "    : `${bosMeta} · strict gate = 200 and 80 must agree · Pattern audits fixed ${FIXED_DURATION}T horizon`);"),
-            ("      $('ptSignal').innerHTML = `<b class=\"${d.direction === 'BULL' ? 'positive' : 'negative'}\">FIRE PRIME · ${d.direction === 'BULL' ? 'CALL' : 'PUT'} ${d.pattern.duration}T</b><span>${esc(d.setup.pivotType)} → BOS first break · Δ${Number(d.setup.breakDistanceSteps).toFixed(2)}x · Pattern ${esc(d.pattern.reason)}</span>`;\n    } else if (d?.structureEvent && d?.setup?.timingClass === 'CHASE') {\n      $('ptSignal').innerHTML = `<b>BLOCK · CHASE</b><span>Direction may be right, but first BOS tick already extended ${Number(d.setup.breakDistanceSteps).toFixed(2)}x. Do not buy the end of the push.</span>`;", "      $('ptSignal').innerHTML = `<b class=\"${d.direction === 'BULL' ? 'positive' : 'negative'}\">FIRE · ${d.direction === 'BULL' ? 'CALL' : 'PUT'} ${FIXED_DURATION}T</b><span>200+80 aligned · ${esc(d.setup.pivotType)} → BOS ${esc(d.setup.timingClass)} · Δ${Number(d.setup.breakDistanceSteps).toFixed(2)}x · Pattern ${esc(d.pattern.reason)}</span>`;"),
-            ("      $('ptSignal').innerHTML = `<b>PRIME STRUCTURE · PATTERN ${esc(d.pattern.status)}</b><span>${esc(d.pattern.reason)} · no buy until Pattern agrees</span>`;", "      $('ptSignal').innerHTML = `<b>STRUCTURE READY · PATTERN ${esc(d.pattern.status)}</b><span>${esc(d.pattern.reason)} · no buy until Pattern agrees</span>`;"),
-            ("  const visibleCandidates = ledger.filter(r => Number(r.signalEpoch) >= startEpoch && Number(r.signalEpoch) <= endEpoch);", "  const visibleCandidates = [...legacyLedger, ...ledger].filter(r => Number(r.signalEpoch) >= startEpoch && Number(r.signalEpoch) <= endEpoch);"),
-            ("  if ($('masterCanvasCaption')) $('masterCanvasCaption').textContent = 'HL/LH anchor → blue BOS line → PRIME first break. C=blocked candidate · A=Pattern+Structure agreement · E=Deriv entry · X=expiry · replay keeps older setups';", "  if ($('masterCanvasCaption')) $('masterCanvasCaption').textContent = 'STRICT 200+80 alignment → HL/LH anchor → BOS first break → fixed 10T Pattern audit. Old v7.1 setups remain visible in replay. A=agreement · E=Deriv entry · X=expiry';"),
-            ("    a.download = `master-v7.1-bos-timing-${new Date().toISOString().replaceAll(':','-')}.csv`;", "    a.download = `master-v7.2-strict-alignment-10t-${new Date().toISOString().replaceAll(':','-')}.csv`;"),
-            ("function installV71UI() {\n  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('Pattern + Structure Sniper v7.1'));", "function installV72UI() {\n  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('Pattern + Structure Sniper v7.2'));"),
-            ("    if (eyebrow) eyebrow.textContent = 'HL/LH ANCHOR → BOS FIRST BREAK → PATTERN AUDIT → TRADE';", "    if (eyebrow) eyebrow.textContent = '200 + 80 ALIGN → HL/LH → BOS FIRST BREAK → PATTERN 10T → TRADE';"),
-            ("    if (h2) h2.textContent = 'Enter the start of the extension, not the end of it.';", "    if (h2) h2.textContent = 'Trade only when the mountain and the slope agree.';"),
-            ("    if (p) p.textContent = 'v7.1 separates direction from timing. Structure finds the HL/LH anchor and freezes a BOS level. The signal fires on the first break tick only, blocks stretched chase entries, then Pattern Lab audits the execution-aware horizon before a Demo buy.';", "    if (p) p.textContent = 'v7.2 restores the hierarchy the cohort data rewarded: 200t and 80t must agree first. Then HL/LH structure finds the BOS break. Extended first breaks are measured, not automatically rejected. Pattern Lab audits one fixed 10-tick execution horizon before a Demo buy.';"),
-            ("    const texts = ['Demo only','200t context','80t authority','HL/LH anchor','BOS first-break','Pattern active gate'];", "    const texts = ['Demo only','200+80 strict','HL/LH anchor','BOS first-break','Pattern active gate','fixed 10T'];"),
-            ("    if (p) p.textContent = 'Pattern audits PRIME BOS candidates only. Fixed gate: 40+ matches, 88%+ average similarity, 55%+ execution-aware directional edge.';", "    if (p) p.textContent = 'Pattern audits BOS candidates only after strict 200+80 alignment. Fixed gate: 40+ matches, 88%+ average similarity, 55%+ directional edge on the fixed 10T execution horizon.';"),
-            ("  if (scoreNote) scoreNote.textContent = 'v7.1 uses execution-aware Pattern scores after a PRIME HL/LH→BOS candidate exists. Pattern never creates a trade by itself.';", "  if (scoreNote) scoreNote.textContent = 'v7.2 uses Pattern only after strict 200+80 alignment and a real HL/LH→BOS break. Pattern never creates direction by itself.';"),
-            ("    if (note) note.textContent = 'Anchor marks the latest HL/LH. The blue dashed line is the frozen BOS level. PRIME means the first actual break, before the move is stretched. C marks blocked candidates, A agreement, E Deriv entry, X expiry.';", "    if (note) note.textContent = 'Anchor marks HL/LH and the blue line is frozen BOS. PRIME and EXTENDED are both first-break timing classes; extension is now measured instead of vetoed. Old v7.1 setups stay visible in replay. A agreement, E Deriv entry, X expiry.';"),
-            ("      <div class=\"decisionCard\"><span>1 · STRUCTURE + TIMING</span><strong id=\"dbStructure\">WAIT</strong><small>HL/LH → BOS first break</small></div>", "      <div class=\"decisionCard\"><span>1 · 200 + 80 ALIGNMENT</span><strong id=\"dbStructure\">WAIT</strong><small>Both must agree before BOS matters</small></div>"),
-            ("      <div class=\"decisionCard\"><span>2 · PATTERN</span><strong id=\"dbPattern\">WAIT</strong><small>Historical execution window</small></div>", "      <div class=\"decisionCard\"><span>2 · STRUCTURE + PATTERN</span><strong id=\"dbPattern\">WAIT</strong><small>HL/LH → BOS + fixed 10T history</small></div>"),
-            ("  if (masterTitle) masterTitle.textContent = 'Pattern + Structure Sniper v7.1 · BOS Timing';", "  if (masterTitle) masterTitle.textContent = 'Pattern + Structure Sniper v7.2 · Strict Alignment + 10T';"),
-            ("  if ($('ptStart')) $('ptStart').textContent = 'Start v7.1 Agreement Trader';", "  if ($('ptStart')) $('ptStart').textContent = 'Start v7.2 Strict Trader';"),
-            ("    ['Bought v6','Bought v7.1'],", "    ['Bought v6','Bought v7.2'],"),
-            ("  if (txTitle) txTitle.textContent = 'v7.1 actual PRIME agreement trades';", "  if (txTitle) txTitle.textContent = 'v7.2 strict-alignment Pattern trades';"),
-            ("  if (ledgerTitle) ledgerTitle.textContent = 'v7.1 Candidate Audit Trail';", "  if (ledgerTitle) ledgerTitle.textContent = 'v7.2 Candidate Audit Trail';"),
-            ("    <div><b>1 · Direction authority</b><span>200 ticks are macro context. 80 ticks are the main direction authority. A strong conflicting 200-tick context can veto a weak 80-tick flip.</span></div>\n    <div><b>2 · HL/LH anchor</b>", "    <div><b>1 · Strict direction lock</b><span>200 ticks and 80 ticks must BOTH be BULL or BOTH be BEAR. NEUTRAL at either level means no trade. FAST 20 can never override this gate.</span></div>\n    <div><b>2 · HL/LH anchor</b>"),
-            ("    <div><b>4 · PRIME timing</b><span>Fire on the first tick that breaks BOS. If that first break is already more than ${MAX_BREAK_EXTENSION_STEPS.toFixed(2)} average tick beyond the level, label CHASE and block it.</span></div>", "    <div><b>4 · First-break timing</b><span>Fire on the first tick that breaks BOS. Break distance is logged as PRIME or EXTENDED, but v7.2 does not auto-block continuation solely for being beyond ${MAX_BREAK_EXTENSION_STEPS.toFixed(2)} average tick.</span></div>"),
-            ("    <div><b>5 · Pattern audit</b><span>At that frozen T0, historical relatives must support the same direction with 40+ matches, 88%+ similarity and 55%+ execution-aware edge.</span></div>", "    <div><b>5 · Pattern audit</b><span>At that frozen T0, historical relatives must support the same direction with 40+ matches, 88%+ similarity and 55%+ edge on ONE fixed ${FIXED_DURATION}T execution horizon.</span></div>"),
-            ("    <div><b>6 · Demo execution + audit</b><span>Only PRIME + Pattern agreement reaches Deriv. Pattern blocks and chase blocks are shadow-resolved so we can measure what each filter saved or missed.</span></div>`;", "    <div><b>6 · Demo execution + audit</b><span>Only strict 200+80 + BOS + Pattern agreement reaches Deriv. Pattern blocks are shadow-resolved. v7.1 history remains visible in replay but v7.2 statistics stay clean.</span></div>`;"),
-            ("    engine.log('info', 'v7.1 armed: HL/LH anchor → frozen BOS → PRIME first break → Pattern audit → agreement-only Demo buy.');", "    engine.log('info', 'v7.2 armed: strict 200+80 alignment → HL/LH → frozen BOS first break → fixed 10T Pattern audit → Demo buy.');"),
-            ("    if (boughtCount() >= +($('ptMaxTrades').value || 100)) throw new Error('v7.1 cohort cap reached.');", "    if (boughtCount() >= +($('ptMaxTrades').value || 100)) throw new Error('v7.2 cohort cap reached.');"),
-            ("  if (confirm('Clear the fresh v7.1 BOS-timing cohort?')) {", "  if (confirm('Clear the fresh v7.2 strict-alignment cohort? v7.1 visual history will remain.') ) {"),
-            ("  installV71UI();", "  installV72UI();"),
-            ("  $('ptTradeRows').innerHTML = state.trades.length ? state.trades.map(trade => {", "  $('ptTradeRows').innerHTML = state.trades.length ? state.trades.map(trade => {"),
-            ("  }).join('') : '<tr><td colspan=\"12\" class=\"empty\">No v7.1 PRIME agreement trades yet.</td></tr>';", "  }).join('') : '<tr><td colspan=\"12\" class=\"empty\">No v7.2 strict-alignment trades yet.</td></tr>';"),
-            ("  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 60).map(log => `<div class=\"log ${log.level}\"><time>${new Date(log.at).toLocaleTimeString()}</time><span>${esc(log.message === 'Engine armed. Waiting for fresh BOS.' ? 'v7.1 BOS-timing engine armed.' : log.message)}</span></div>`).join('');", "  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 60).map(log => `<div class=\"log ${log.level}\"><time>${new Date(log.at).toLocaleTimeString()}</time><span>${esc(log.message === 'Engine armed. Waiting for fresh BOS.' ? 'v7.2 strict-alignment engine armed.' : log.message)}</span></div>`).join('');")
-          ]
-
-          missed = []
-          for old, new in replacements:
-            if old not in s:
-              missed.append(old[:120])
-            else:
+          def rep(old, new):
+              global s
+              if old not in s:
+                  print('WARN missing:', old[:90])
+                  return
               s = s.replace(old, new)
 
-          # Ensure every live trade is fixed to 10T even if a legacy pattern field slips through.
-          s = s.replace("const duration = Number(trade.duration || trade.patternMeta.duration || 3);", "const duration = Number(trade.duration || trade.patternMeta.duration || FIXED_DURATION);")
-          s = s.replace("const duration = Number(d.pattern?.duration || 3);", "const duration = FIXED_DURATION;")
+          rep("const VERSION = 'v7.1';", "const VERSION = 'v7.2';")
+          rep("const LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.1';", "const LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.2';\nconst LEGACY_LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.1';")
+          rep("const MAX_BREAK_EXTENSION_STEPS = 1.10;", "const MAX_BREAK_EXTENSION_STEPS = 1.10;\nconst FIXED_DURATION = 10;")
+          rep("let ledger = loadArray(LEDGER_KEY);", "let ledger = loadArray(LEDGER_KEY);\nconst legacyLedger = loadArray(LEGACY_LEDGER_KEY);")
+          rep("  duration: 3,", "  duration: FIXED_DURATION,")
+          rep("engine.onTick = function v71Tick(tick) {", "engine.onTick = function v72Tick(tick) {")
+
+          old = """  let direction = authority80;
+  if (direction === 'NEUTRAL' && fast20 !== 'NEUTRAL' && regime200 !== (fast20 === 'BULL' ? 'BEAR' : 'BULL')) direction = fast20;
+  if (direction !== 'NEUTRAL' && regime200 !== 'NEUTRAL' && regime200 !== direction && Math.abs(m200.slopeNorm) >= .11) direction = 'NEUTRAL';"""
+          new = """  // v7.2 strict hierarchy: FAST can never override macro/authority.
+  // A trade direction exists only when 200t and 80t are both non-neutral and agree.
+  const direction = regime200 !== 'NEUTRAL' && regime200 === authority80 ? regime200 : 'NEUTRAL';"""
+          rep(old, new)
+
+          rep("""    const timingClass = event
+      ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'CHASE')
+      : aboveBefore ? 'CHASE'
+        : early ? 'EARLY' : 'WAIT';
+    const ready = event && timingClass === 'PRIME';""",
+              """    const timingClass = event
+      ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'EXTENDED')
+      : aboveBefore ? 'POST_BREAK'
+        : early ? 'EARLY' : 'WAIT';
+    const ready = event;""")
+          rep("type: ready ? 'HL_BOS_FIRST_BREAK' : event ? 'HL_BOS_CHASE' : early ? 'HL_ARMED' : 'WAIT_BOS',",
+              "type: ready ? 'HL_BOS_FIRST_BREAK' : early ? 'HL_ARMED' : 'WAIT_BOS',")
+          rep(": ready ? `HL → BOS first break · PRIME ${breakDistanceSteps.toFixed(2)}x`\n          : event ? `HL → BOS but CHASE ${breakDistanceSteps.toFixed(2)}x`",
+              ": ready ? `HL → BOS first break · ${timingClass} ${breakDistanceSteps.toFixed(2)}x`")
+
+          rep("""  const timingClass = event
+    ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'CHASE')
+    : belowBefore ? 'CHASE'
+      : early ? 'EARLY' : 'WAIT';
+  const ready = event && timingClass === 'PRIME';""",
+              """  const timingClass = event
+    ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'EXTENDED')
+    : belowBefore ? 'POST_BREAK'
+      : early ? 'EARLY' : 'WAIT';
+  const ready = event;""")
+          rep("type: ready ? 'LH_BOS_FIRST_BREAK' : event ? 'LH_BOS_CHASE' : early ? 'LH_ARMED' : 'WAIT_BOS',",
+              "type: ready ? 'LH_BOS_FIRST_BREAK' : early ? 'LH_ARMED' : 'WAIT_BOS',")
+          rep(": ready ? `LH → BOS first break · PRIME ${breakDistanceSteps.toFixed(2)}x`\n        : event ? `LH → BOS but CHASE ${breakDistanceSteps.toFixed(2)}x`",
+              ": ready ? `LH → BOS first break · ${timingClass} ${breakDistanceSteps.toFixed(2)}x`")
+
+          rep(".filter(h => [3, 5, 8, 10].includes(Number(h.horizon)) && Number(h.decided || 0) >= MIN_MATCHES && ['UP', 'DOWN'].includes(h.bias))",
+              ".filter(h => Number(h.horizon) === FIXED_DURATION && Number(h.decided || 0) >= MIN_MATCHES && ['UP', 'DOWN'].includes(h.bias))")
           s = s.replace("duration: bestAgree.horizon,", "duration: FIXED_DURATION,")
-          s = s.replace("duration: bestAgree.horizon,\n    startOffset", "duration: FIXED_DURATION,\n    startOffset")
           s = s.replace("duration: strongest?.horizon || 3,", "duration: FIXED_DURATION,")
-          s = s.replace("Pattern ${esc(d.pattern.reason)} · no buy until Pattern agrees", "Pattern ${esc(d.pattern.reason)} · no buy until Pattern agrees on fixed ${FIXED_DURATION}T")
+          s = s.replace("duration: pattern.duration || 3,", "duration: FIXED_DURATION,")
+          s = s.replace("const duration = Number(d.pattern?.duration || 3);", "const duration = FIXED_DURATION;")
+          s = s.replace("const duration = Number(trade.duration || trade.patternMeta.duration || 3);", "const duration = Number(trade.duration || trade.patternMeta.duration || FIXED_DURATION);")
 
-          if missed:
-            raise SystemExit('Patch stopped. Expected source fragments missing:\n' + '\n'.join(missed))
+          rep("const timingBlocked = d.setup?.timingClass === 'CHASE' || !d.setup?.ready;", "const timingBlocked = !d.setup?.ready;")
+          rep("status: timingBlocked ? 'BLOCK TIMING CHASE' : agreement ? 'AGREEMENT' : `BLOCK PATTERN ${d.pattern.status}`,","
+              "status: timingBlocked ? 'BLOCK STRUCTURE' : agreement ? 'AGREEMENT' : `BLOCK PATTERN ${d.pattern.status}`,")
+          rep("id: `v71-${d.epoch}-${Date.now()}`,", "id: `v72-${d.epoch}-${Date.now()}`,")
+          rep("cohort: 'v7.1-hl-lh-bos-first-break',", "cohort: 'v7.2-strict-200-80-bos-pattern-10t',")
 
-          path.write_text(s)
+          rep("engine.config.duration = Number(d.pattern.duration);", "engine.config.duration = FIXED_DURATION;")
+          rep("structure: `v71-${d.setup.pivotType.toLowerCase()}-bos-first-break-${d.pattern.duration}t`,",
+              "structure: `v72-strict-${d.setup.pivotType.toLowerCase()}-bos-${d.setup.timingClass.toLowerCase()}-${FIXED_DURATION}t`,")
+
+          rep("const visibleCandidates = ledger.filter(r => Number(r.signalEpoch) >= startEpoch && Number(r.signalEpoch) <= endEpoch);",
+              "const visibleCandidates = [...legacyLedger, ...ledger].filter(r => Number(r.signalEpoch) >= startEpoch && Number(r.signalEpoch) <= endEpoch);")
+
+          s = s.replace("Pattern + Structure Sniper v7.1", "Pattern + Structure Sniper v7.2")
+          s = s.replace("v7.1", "v7.2")
+          s = s.replace("PRIME BOS", "BOS")
+          s = s.replace("WAITING FOR PRIME BOS", "WAITING FOR 200+80 + BOS")
+          s = s.replace("Pattern audits PRIME BOS candidates only.", "Pattern audits BOS candidates only after strict 200+80 alignment.")
+          s = s.replace("200 ticks are macro context. 80 ticks are the main direction authority. A strong conflicting 200-tick context can veto a weak 80-tick flip.", "200 ticks and 80 ticks must BOTH be BULL or BOTH be BEAR. NEUTRAL at either level means no trade. FAST 20 never overrides this gate.")
+          s = s.replace("If that first break is already more than ${MAX_BREAK_EXTENSION_STEPS.toFixed(2)} average tick beyond the level, label CHASE and block it.", "Break distance is logged as PRIME or EXTENDED. v7.2 does not reject the first break only because it continued beyond ${MAX_BREAK_EXTENSION_STEPS.toFixed(2)} average tick.")
+          s = s.replace("historical relatives must support the same direction with 40+ matches, 88%+ similarity and 55%+ execution-aware edge.", "historical relatives must support the same direction with 40+ matches, 88%+ similarity and 55%+ edge on the fixed 10T execution horizon.")
+          s = s.replace("No v7.2 PRIME agreement trades yet.", "No v7.2 strict-alignment trades yet.")
+          s = s.replace("master-v7.2-bos-timing-", "master-v7.2-strict-alignment-10t-")
+
+          p.write_text(s)
           PY
 
       - name: Syntax check
         run: node --check public/pattern-trader.js
 
-      - name: Commit patch and remove temporary workflow
+      - name: Commit v7.2
         shell: bash
         run: |
           git config user.name "SANI Patch Bot"
           git config user.email "actions@users.noreply.github.com"
-          git rm .github/workflows/apply-v72-patch.yml
           git add public/pattern-trader.js
-          git commit -m "feat: v7.2 strict 200+80 BOS pattern patch [skip ci]"
+          git commit -m "feat: v7.2 strict 200+80 alignment and fixed 10T [skip ci]"
           git push
