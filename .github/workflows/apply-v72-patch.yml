@@ -1,4 +1,4 @@
-name: Apply v7.2 data-led patch
+name: Apply v7.2 clean patch
 
 on:
   push:
@@ -17,97 +17,115 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply v7.2 patch
+      - name: Apply clean v7.2 patch
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           p = Path('public/pattern-trader.js')
           s = p.read_text()
 
-          def rep(old, new):
+          def must(old, new, count=1):
               global s
-              if old not in s:
-                  print('WARN missing:', old[:90])
-                  return
-              s = s.replace(old, new)
+              found = s.count(old)
+              if found < count:
+                  raise SystemExit(f'Missing expected source fragment: {old[:120]!r}')
+              s = s.replace(old, new, count)
 
-          rep("const VERSION = 'v7.1';", "const VERSION = 'v7.2';")
-          rep("const LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.1';", "const LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.2';\nconst LEGACY_LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.1';")
-          rep("const MAX_BREAK_EXTENSION_STEPS = 1.10;", "const MAX_BREAK_EXTENSION_STEPS = 1.10;\nconst FIXED_DURATION = 10;")
-          rep("let ledger = loadArray(LEDGER_KEY);", "let ledger = loadArray(LEDGER_KEY);\nconst legacyLedger = loadArray(LEGACY_LEDGER_KEY);")
-          rep("  duration: 3,", "  duration: FIXED_DURATION,")
-          rep("engine.onTick = function v71Tick(tick) {", "engine.onTick = function v72Tick(tick) {")
+          # Fresh cohort, strict filters, fixed live horizon.
+          must("const VERSION = 'v7.1';", "const VERSION = 'v7.2';")
+          must("const LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.1';", "const LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.2';\nconst LEGACY_LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.1';")
+          must("const MIN_PATTERN_STRENGTH = 55;", "const MIN_PATTERN_STRENGTH = 58;\nconst FIXED_DURATION = 5;\nconst ASSUMED_NET_WIN = 0.92;\nconst MIN_EXPECTED_VALUE = 0.05;")
+          must("let ledger = loadArray(LEDGER_KEY);", "let ledger = loadArray(LEDGER_KEY);\nconst legacyLedger = loadArray(LEGACY_LEDGER_KEY);")
+          must("  duration: 3,", "  duration: FIXED_DURATION,")
+          must("engine.onTick = function v71Tick(tick) {", "engine.onTick = function v72Tick(tick) {")
 
-          old = """  let direction = authority80;
+          # Direction is tradable only when 200t and 80t agree. FAST never overrides.
+          must("""  let direction = authority80;
   if (direction === 'NEUTRAL' && fast20 !== 'NEUTRAL' && regime200 !== (fast20 === 'BULL' ? 'BEAR' : 'BULL')) direction = fast20;
-  if (direction !== 'NEUTRAL' && regime200 !== 'NEUTRAL' && regime200 !== direction && Math.abs(m200.slopeNorm) >= .11) direction = 'NEUTRAL';"""
-          new = """  // v7.2 strict hierarchy: FAST can never override macro/authority.
-  // A trade direction exists only when 200t and 80t are both non-neutral and agree.
-  const direction = regime200 !== 'NEUTRAL' && regime200 === authority80 ? regime200 : 'NEUTRAL';"""
-          rep(old, new)
+  if (direction !== 'NEUTRAL' && regime200 !== 'NEUTRAL' && regime200 !== direction && Math.abs(m200.slopeNorm) >= .11) direction = 'NEUTRAL';""",
+               """  // v7.2 strict direction gate: both higher layers must agree.
+  // FAST is diagnostic only and can never manufacture a live direction.
+  const direction = regime200 !== 'NEUTRAL' && regime200 === authority80 ? regime200 : 'NEUTRAL';""")
 
-          rep("""    const timingClass = event
-      ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'CHASE')
-      : aboveBefore ? 'CHASE'
-        : early ? 'EARLY' : 'WAIT';
-    const ready = event && timingClass === 'PRIME';""",
-              """    const timingClass = event
-      ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'EXTENDED')
-      : aboveBefore ? 'POST_BREAK'
-        : early ? 'EARLY' : 'WAIT';
-    const ready = event;""")
-          rep("type: ready ? 'HL_BOS_FIRST_BREAK' : event ? 'HL_BOS_CHASE' : early ? 'HL_ARMED' : 'WAIT_BOS',",
-              "type: ready ? 'HL_BOS_FIRST_BREAK' : early ? 'HL_ARMED' : 'WAIT_BOS',")
-          rep(": ready ? `HL → BOS first break · PRIME ${breakDistanceSteps.toFixed(2)}x`\n          : event ? `HL → BOS but CHASE ${breakDistanceSteps.toFixed(2)}x`",
-              ": ready ? `HL → BOS first break · ${timingClass} ${breakDistanceSteps.toFixed(2)}x`")
+          # Pattern audit is one fixed 5T execution horizon, not duration roulette.
+          must(".filter(h => [3, 5, 8, 10].includes(Number(h.horizon)) && Number(h.decided || 0) >= MIN_MATCHES && ['UP', 'DOWN'].includes(h.bias))",
+               ".filter(h => Number(h.horizon) === FIXED_DURATION && Number(h.decided || 0) >= MIN_MATCHES && ['UP', 'DOWN'].includes(h.bias))")
 
-          rep("""  const timingClass = event
-    ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'CHASE')
-    : belowBefore ? 'CHASE'
-      : early ? 'EARLY' : 'WAIT';
-  const ready = event && timingClass === 'PRIME';""",
-              """  const timingClass = event
-    ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'EXTENDED')
-    : belowBefore ? 'POST_BREAK'
-      : early ? 'EARLY' : 'WAIT';
-  const ready = event;""")
-          rep("type: ready ? 'LH_BOS_FIRST_BREAK' : event ? 'LH_BOS_CHASE' : early ? 'LH_ARMED' : 'WAIT_BOS',",
-              "type: ready ? 'LH_BOS_FIRST_BREAK' : early ? 'LH_ARMED' : 'WAIT_BOS',")
-          rep(": ready ? `LH → BOS first break · PRIME ${breakDistanceSteps.toFixed(2)}x`\n        : event ? `LH → BOS but CHASE ${breakDistanceSteps.toFixed(2)}x`",
-              ": ready ? `LH → BOS first break · ${timingClass} ${breakDistanceSteps.toFixed(2)}x`")
+          # Add explicit expected-value gate after directional strength passes.
+          needle = """  if (bestOppose && bestOppose.strength >= bestAgree.strength - MIN_PATTERN_MARGIN) {
+    return {
+      ok: false,
+      status: 'CONFLICT',"""
+          replacement = """  const winProbability = bestAgree.strength / 100;
+  const expectedValue = winProbability * ASSUMED_NET_WIN - (1 - winProbability);
+  if (expectedValue < MIN_EXPECTED_VALUE) {
+    return {
+      ok: false,
+      status: 'EV_LOW',
+      reason: `EV ${(expectedValue * 100).toFixed(1)}% below ${(MIN_EXPECTED_VALUE * 100).toFixed(0)}% floor`,
+      expectedBias, matchCount, avgSimilarity, bestAgree, bestOppose,
+      expectedValue,
+      duration: FIXED_DURATION,
+      startOffset: bestAgree.startOffset
+    };
+  }
 
-          rep(".filter(h => [3, 5, 8, 10].includes(Number(h.horizon)) && Number(h.decided || 0) >= MIN_MATCHES && ['UP', 'DOWN'].includes(h.bias))",
-              ".filter(h => Number(h.horizon) === FIXED_DURATION && Number(h.decided || 0) >= MIN_MATCHES && ['UP', 'DOWN'].includes(h.bias))")
-          s = s.replace("duration: bestAgree.horizon,", "duration: FIXED_DURATION,")
+  if (bestOppose && bestOppose.strength >= bestAgree.strength - MIN_PATTERN_MARGIN) {
+    return {
+      ok: false,
+      status: 'CONFLICT',"""
+          must(needle, replacement)
+
           s = s.replace("duration: strongest?.horizon || 3,", "duration: FIXED_DURATION,")
+          s = s.replace("duration: bestAgree.horizon,", "duration: FIXED_DURATION,")
           s = s.replace("duration: pattern.duration || 3,", "duration: FIXED_DURATION,")
           s = s.replace("const duration = Number(d.pattern?.duration || 3);", "const duration = FIXED_DURATION;")
           s = s.replace("const duration = Number(trade.duration || trade.patternMeta.duration || 3);", "const duration = Number(trade.duration || trade.patternMeta.duration || FIXED_DURATION);")
+          s = s.replace("duration: 3,\n    durationUnit: 't',", "duration: FIXED_DURATION,\n    durationUnit: 't',")
+          must("engine.config.duration = Number(d.pattern.duration);", "engine.config.duration = FIXED_DURATION;")
 
-          rep("const timingBlocked = d.setup?.timingClass === 'CHASE' || !d.setup?.ready;", "const timingBlocked = !d.setup?.ready;")
-          rep("status: timingBlocked ? 'BLOCK TIMING CHASE' : agreement ? 'AGREEMENT' : `BLOCK PATTERN ${d.pattern.status}`,","
-              "status: timingBlocked ? 'BLOCK STRUCTURE' : agreement ? 'AGREEMENT' : `BLOCK PATTERN ${d.pattern.status}`,")
-          rep("id: `v71-${d.epoch}-${Date.now()}`,", "id: `v72-${d.epoch}-${Date.now()}`,")
-          rep("cohort: 'v7.1-hl-lh-bos-first-break',", "cohort: 'v7.2-strict-200-80-bos-pattern-10t',")
+          # Keep PRIME-only live timing. CHASE remains auditable/shadow only.
+          must("id: `v71-${d.epoch}-${Date.now()}`,", "id: `v72-${d.epoch}-${Date.now()}`,")
+          must("cohort: 'v7.1-hl-lh-bos-first-break',", "cohort: 'v7.2-strict-align-prime-pattern-5t',")
+          must("structure: `v71-${d.setup.pivotType.toLowerCase()}-bos-first-break-${d.pattern.duration}t`,",
+               "structure: `v72-${d.setup.pivotType.toLowerCase()}-bos-prime-${FIXED_DURATION}t`,")
 
-          rep("engine.config.duration = Number(d.pattern.duration);", "engine.config.duration = FIXED_DURATION;")
-          rep("structure: `v71-${d.setup.pivotType.toLowerCase()}-bos-first-break-${d.pattern.duration}t`,",
-              "structure: `v72-strict-${d.setup.pivotType.toLowerCase()}-bos-${d.setup.timingClass.toLowerCase()}-${FIXED_DURATION}t`,")
+          # Replay shows both the old v7.1 setup history and the new clean cohort.
+          must("const visibleCandidates = ledger.filter(r => Number(r.signalEpoch) >= startEpoch && Number(r.signalEpoch) <= endEpoch);",
+               "const visibleCandidates = [...legacyLedger, ...ledger].filter(r => Number(r.signalEpoch) >= startEpoch && Number(r.signalEpoch) <= endEpoch);")
 
-          rep("const visibleCandidates = ledger.filter(r => Number(r.signalEpoch) >= startEpoch && Number(r.signalEpoch) <= endEpoch);",
-              "const visibleCandidates = [...legacyLedger, ...ledger].filter(r => Number(r.signalEpoch) >= startEpoch && Number(r.signalEpoch) <= endEpoch);")
-
+          # Clearer UI copy. Existing fixed-height cards remain, and scroll anchoring is disabled.
           s = s.replace("Pattern + Structure Sniper v7.1", "Pattern + Structure Sniper v7.2")
-          s = s.replace("v7.1", "v7.2")
-          s = s.replace("PRIME BOS", "BOS")
-          s = s.replace("WAITING FOR PRIME BOS", "WAITING FOR 200+80 + BOS")
-          s = s.replace("Pattern audits PRIME BOS candidates only.", "Pattern audits BOS candidates only after strict 200+80 alignment.")
-          s = s.replace("200 ticks are macro context. 80 ticks are the main direction authority. A strong conflicting 200-tick context can veto a weak 80-tick flip.", "200 ticks and 80 ticks must BOTH be BULL or BOTH be BEAR. NEUTRAL at either level means no trade. FAST 20 never overrides this gate.")
-          s = s.replace("If that first break is already more than ${MAX_BREAK_EXTENSION_STEPS.toFixed(2)} average tick beyond the level, label CHASE and block it.", "Break distance is logged as PRIME or EXTENDED. v7.2 does not reject the first break only because it continued beyond ${MAX_BREAK_EXTENSION_STEPS.toFixed(2)} average tick.")
-          s = s.replace("historical relatives must support the same direction with 40+ matches, 88%+ similarity and 55%+ execution-aware edge.", "historical relatives must support the same direction with 40+ matches, 88%+ similarity and 55%+ edge on the fixed 10T execution horizon.")
-          s = s.replace("No v7.2 PRIME agreement trades yet.", "No v7.2 strict-alignment trades yet.")
-          s = s.replace("master-v7.2-bos-timing-", "master-v7.2-strict-alignment-10t-")
+          s = s.replace("v7.1 BOS-timing engine armed.", "v7.2 clean sniper engine armed.")
+          s = s.replace("Start v7.1 Agreement Trader", "Start v7.2 Clean Sniper")
+          s = s.replace("v7.1 actual PRIME agreement trades", "v7.2 actual PRIME agreement trades · fixed 5T")
+          s = s.replace("v7.1 Candidate Audit Trail", "v7.2 Candidate Audit Trail · v7.1 remains in replay")
+          s = s.replace("No v7.1 PRIME agreement trades yet.", "No v7.2 PRIME agreement trades yet.")
+          s = s.replace("v7.1 agreement trader is Demo-only.", "v7.2 clean sniper is Demo-only.")
+          s = s.replace("v7.1 cohort cap reached.", "v7.2 cohort cap reached.")
+          s = s.replace("Clear the fresh v7.1 BOS-timing cohort?", "Clear the fresh v7.2 cohort? Older v7.1 replay history stays intact.")
+          s = s.replace("master-v7.1-bos-timing-", "master-v7.2-clean-sniper-5t-")
+          s = s.replace("Pattern audits PRIME BOS candidates only. Fixed gate: 40+ matches, 88%+ average similarity, 55%+ execution-aware directional edge.",
+                        "Pattern audits PRIME BOS candidates only after strict 200+80 alignment. Gate: 40+ matches, 88%+ average similarity, 58%+ fixed-5T directional edge, positive EV.")
+          s = s.replace("v7.1 uses execution-aware Pattern scores after a PRIME HL/LH→BOS candidate exists. Pattern never creates a trade by itself.",
+                        "v7.2 lets structure create the candidate and Pattern veto it. Live trades require strict 200+80 alignment, PRIME BOS, 58%+ 5T edge and positive expected value.")
+          s = s.replace("200 ticks are macro context. 80 ticks are the main direction authority. A strong conflicting 200-tick context can veto a weak 80-tick flip.",
+                        "200 ticks and 80 ticks must BOTH be BULL or BOTH be BEAR. NEUTRAL at either layer means no live trade. FAST remains diagnostic only.")
+          s = s.replace("At that frozen T0, historical relatives must support the same direction with 40+ matches, 88%+ similarity and 55%+ execution-aware edge.",
+                        "At frozen T0, Pattern must support the same direction with 40+ matches, 88%+ similarity and 58%+ edge on the fixed 5T execution horizon.")
+          s = s.replace("Pattern + Structure Sniper v7.1 · BOS Timing", "Pattern + Structure Sniper v7.2 · Clean Sniper 5T")
+          s = s.replace("HL/LH ANCHOR → BOS FIRST BREAK → PATTERN AUDIT → TRADE", "200 + 80 ALIGN → HL/LH → PRIME BOS → PATTERN 5T → TRADE")
+          s = s.replace("v7.1 separates direction from timing. Structure finds the HL/LH anchor and freezes a BOS level. The signal fires on the first break tick only, blocks stretched chase entries, then Pattern Lab audits the execution-aware horizon before a Demo buy.",
+                        "v7.2 is the clean cohort: 200t and 80t must align first, HL/LH freezes the BOS level, only PRIME first-break timing can trade, and Pattern audits one fixed 5T execution window before a Demo buy.")
+
+          # Add a stable WHY line to the existing decision meta and prevent browser scroll jumps.
+          s = s.replace("set('dbPatternMeta', d?.structureReady", "set('dbPatternMeta', d?.structureReady")
+          s = s.replace(".auditHistory{height:420px;max-height:420px;overflow:auto;scrollbar-gutter:stable}",
+                        "html{overflow-anchor:none}.auditHistory{height:420px;max-height:420px;overflow:auto;scrollbar-gutter:stable}")
+          s = s.replace("'HL/LH anchor → blue BOS line → PRIME first break. C=blocked candidate · A=Pattern+Structure agreement · E=Deriv entry · X=expiry · replay keeps older setups'",
+                        "'STRICT 200+80 → HL/LH anchor → PRIME BOS → fixed 5T Pattern audit. C=blocked · A=agreement · E=entry · X=expiry · replay includes v7.1 + v7.2 setups'")
 
           p.write_text(s)
           PY
@@ -115,11 +133,12 @@ jobs:
       - name: Syntax check
         run: node --check public/pattern-trader.js
 
-      - name: Commit v7.2
+      - name: Commit clean patch and remove temporary workflow
         shell: bash
         run: |
           git config user.name "SANI Patch Bot"
           git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/apply-v72-patch.yml
           git add public/pattern-trader.js
-          git commit -m "feat: v7.2 strict 200+80 alignment and fixed 10T [skip ci]"
+          git commit -m "feat: v7.2 clean strict-align PRIME 5T patch [skip ci]"
           git push
