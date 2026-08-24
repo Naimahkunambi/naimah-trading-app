@@ -379,14 +379,14 @@ export class SaniEngine {
   }
 
   execute(signal) {
-    if (!this.running || this.cooldownRemaining > 0 || this.safeBlocked) return;
+    if (!this.running || this.cooldownRemaining > 0 || this.safeBlocked) return false;
     if (this.config.oneOpenContract && (this.open.size || this.hasPendingTrade())) {
       this.log('warn', `${signal.direction} skipped: one-open-contract lock.`);
-      return;
+      return false;
     }
-    if (this.trades.length >= Number(this.config.maxTrades)) return this.hitStop('trade cap');
-    if (Number(this.config.takeProfit) > 0 && this.sessionPnL >= Number(this.config.takeProfit)) return this.hitStop('take profit');
-    if (Number(this.config.stopLoss) > 0 && this.sessionPnL <= -Math.abs(Number(this.config.stopLoss))) return this.hitStop('stop loss');
+    if (this.trades.length >= Number(this.config.maxTrades)) { this.hitStop('trade cap'); return false; }
+    if (Number(this.config.takeProfit) > 0 && this.sessionPnL >= Number(this.config.takeProfit)) { this.hitStop('take profit'); return false; }
+    if (Number(this.config.stopLoss) > 0 && this.sessionPnL <= -Math.abs(Number(this.config.stopLoss))) { this.hitStop('stop loss'); return false; }
 
     const reqId = ++this.req;
     const sentPerf = perfNow();
@@ -395,7 +395,7 @@ export class SaniEngine {
     const signalToSendMs = sentPerf - detectedPerf;
     if (Number(this.config.maxSignalToSendMs) > 0 && signalToSendMs > Number(this.config.maxSignalToSendMs)) {
       this.log('warn', `Signal-to-send ${signalToSendMs.toFixed(1)}ms exceeded ${this.config.maxSignalToSendMs}ms guard; skipped.`);
-      return;
+      return false;
     }
 
     const kind = this.config.executionMethod === 'direct' ? 'buy-direct' : 'proposal';
@@ -406,6 +406,7 @@ export class SaniEngine {
         : proposalRequest(signal.direction, this.config, reqId);
       this.send(payload);
       this.log('info', `${signal.direction} order sent in ${signalToSendMs.toFixed(1)}ms (${this.config.executionMethod}).`);
+      return true;
     } catch (error) {
       this.pending.delete(reqId);
       throw error;

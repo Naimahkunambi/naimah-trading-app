@@ -3,13 +3,14 @@ import { V73UI } from './pattern-trader-v73-ui.js';
 
 const $ = id => document.getElementById(id);
 const perfNow = () => globalThis.performance?.now?.() ?? Date.now();
-const VERSION = 'v8';
-const SIGNAL_KEY = 'sani.patternFirst.signals.v8';
+const VERSION = 'v8.1';
+const SIGNAL_KEY = 'sani.sniperCampaign.signals.v8.1';
 const LEGACY_KEYS = ['sani.sniper.setups.v7.3','sani.masterTrader.signalLedger.v7.2','sani.masterTrader.signalLedger.v7.1'];
 const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
 const FIXED_DURATION = 1;
 const DEFAULT_BATCH = 2;
-const MAX_CONCURRENT = 6;
+const DEMO_MAX_CONCURRENT = 6;
+const REAL_MAX_CONCURRENT = 2;
 
 let worker;
 let workerAnalysis = null;
@@ -32,7 +33,7 @@ const engine = new SaniEngine({
   oneOpenContract: false,
   takeProfit: 0,
   stopLoss: 0,
-  maxTrades: 500,
+  maxTrades: 60,
   maxConsecutiveLosses: 0,
   cooldownTicks: 0,
   maxSignalToSendMs: 250,
@@ -77,7 +78,9 @@ function loadLegacy() {
   return out;
 }
 function allForUI() { return [...signals, ...legacySignals].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)); }
-function render() { V73UI.render({ analysis:workerAnalysis, signals:allForUI(), ticks:localTicks, engine:engine.snapshot(), batchSize:batchSize(), maxConcurrent:MAX_CONCURRENT }); }
+function isRealAccount() { return String(selectedAccount?.account_type || '').toLowerCase() === 'real'; }
+function maxConcurrent() { return isRealAccount() ? REAL_MAX_CONCURRENT : DEMO_MAX_CONCURRENT; }
+function render() { V73UI.render({ analysis:workerAnalysis, signals:allForUI(), ticks:localTicks, engine:engine.snapshot(), batchSize:batchSize(), maxConcurrent:maxConcurrent(), accountType:isRealAccount()?'REAL':'DEMO' }); }
 
 function executionOffsetEstimate() {
   try {
@@ -96,7 +99,16 @@ function recordOffset(v) {
 }
 function batchSize() {
   const raw = Number($('ptCooldown')?.value || DEFAULT_BATCH);
-  return Math.max(1, Math.min(3, Math.round(raw || DEFAULT_BATCH)));
+  return Math.max(1, Math.min(2, Math.round(raw || DEFAULT_BATCH)));
+}
+function workerMemoryRows() {
+  return signals.filter(row => ['WON','LOST'].includes(row.shadow?.outcome) && row.pattern?.familyId).map(row => ({
+    familyId:row.pattern.familyId,
+    structureTag:row.structure?.tag,
+    phase:row.structure?.phase,
+    addressKey:row.addressKey,
+    outcome:row.shadow.outcome
+  }));
 }
 function totalBought() { return signals.reduce((s, r) => s + (r.actualTrades || []).filter(t => t.contractId).length, 0); }
 function pendingBuys() {
@@ -142,21 +154,25 @@ function initWorker() {
     else if (msg.type === 'SHADOW_RESULT') {
       const row = upsertSignal(msg.signalId);
       row.shadow = msg.shadow;
+      row.variants = msg.variants || row.variants;
+      row.variantOutcomes = msg.variantOutcomes || row.variantOutcomes;
+      row.addressKey = msg.addressKey || row.addressKey;
       saveSignals();
     }
     render();
   };
   worker.onerror = e => {
-    console.error('v8 worker', e);
+    console.error('v8.1 worker', e);
     workerAnalysis = { state:'WORKER_ERROR', reason:e.message || 'Worker error' };
     render();
   };
-  worker.postMessage({ type:'INIT', ticks:localTicks, executionOffset:executionOffsetEstimate() });
+  worker.postMessage({ type:'INIT', ticks:localTicks, executionOffset:executionOffsetEstimate(), memoryRows:workerMemoryRows() });
 }
 
 function handleDecision(d) {
   const row = upsertSignal(d.signalId, {
     approved:d.approved,
+    controlApproved:d.controlApproved,
     state:d.state,
     tradeDirection:d.tradeDirection,
     predicted:d.predicted,
@@ -166,9 +182,12 @@ function handleDecision(d) {
     executionOffset:d.executionOffset,
     structure:d.structure,
     pattern:d.pattern,
+    sniper:d.sniper,
+    variants:d.variants,
     context80:d.context80,
     context200:d.context200,
     campaign:d.campaign,
+    requestedBatch:d.requestedBatch,
     decisionMs:d.decisionMs,
     why:d.why
   });
@@ -177,10 +196,11 @@ function handleDecision(d) {
   const s = engine.snapshot();
   if (!s.running) { row.executionState = s.connected ? 'OBSERVED' : 'DISCONNECTED'; saveSignals(); return; }
   if (s.safeBlocked) { row.executionState = 'SAFE_BLOCK'; saveSignals(); return; }
-  if (totalBought() >= Number($('ptMaxTrades')?.value || 500)) { row.executionState = 'CAP'; saveSignals(); engine.pause(); return; }
+  if (Number(s.cooldownRemaining || 0) > 0) { row.executionState = `RISK_COOLDOWN_${s.cooldownRemaining}`; saveSignals(); return; }
+  if (totalBought() >= Number($('ptMaxTrades')?.value || 60)) { row.executionState = 'CAP'; saveSignals(); engine.pause(); return; }
 
-  const room = Math.max(0, MAX_CONCURRENT - exposure());
-  const wanted = Math.min(batchSize(), room, Math.max(0, Number($('ptMaxTrades')?.value || 500) - totalBought()));
+  const room = Math.max(0, maxConcurrent() - exposure());
+  const wanted = Math.min(Number(d.requestedBatch || 1), batchSize(), room, Math.max(0, Number($('ptMaxTrades')?.value || 60) - totalBought()));
   if (wanted <= 0) { row.executionState = 'EXPOSURE_FULL'; saveSignals(); return; }
 
   try {
@@ -188,21 +208,21 @@ function handleDecision(d) {
     const sent = [];
     for (let slot = 1; slot <= wanted; slot += 1) {
       const detectedPerf = perfNow();
-      engine.execute({
+      const didSend = engine.execute({
         direction:d.tradeDirection,
-        structure:`v8-${d.pattern.familyId}-${d.structure.tag}`,
+        structure:`v81-${d.pattern.familyId}-${d.structure.tag}`,
         epoch:d.signalEpoch,
         quote:d.signalQuote,
         detectedPerf,
         detectedWallMs:Date.now(),
-        patternMeta:{ signalId:d.signalId, slot, familyId:d.pattern.familyId, edge:d.pattern.edge, structureTag:d.structure.tag }
+        patternMeta:{ signalId:d.signalId, slot, slotRole:slot===1?'BASE':'EARNED', familyId:d.pattern.familyId, edge:d.pattern.edge, grade:d.sniper?.grade, structureTag:d.structure.tag }
       });
-      sent.push(slot);
+      if (didSend) sent.push(slot);
     }
     row.executionState = sent.length ? `ORDER_SENT_X${sent.length}` : 'NOT_SENT';
-    row.requestedBatch = wanted;
+    row.requestedBatch = sent.length;
     saveSignals();
-    engine.log('success', `v8 ${d.tradeDirection} x${wanted} · ${d.pattern.familyId} · edge ${d.pattern.edge.toFixed(1)}% · ${d.structure.tag} · decision ${d.decisionMs.toFixed(1)}ms.`);
+    if (sent.length) engine.log('success', `v8.1 ${d.tradeDirection} x${sent.length} · ${d.sniper?.event} ${d.sniper?.grade} · score ${Number(d.sniper?.score||0).toFixed(1)} · ${d.pattern.familyId} · ${d.decisionMs.toFixed(1)}ms.`);
   } catch (err) {
     row.executionState = 'ERROR'; row.error = err.message; saveSignals(); showError(err.message);
   }
@@ -211,6 +231,10 @@ function handleDecision(d) {
 engine.onTick = function v8Tick(tick) {
   this.lastTick = tick;
   this.ticksSeen += 1;
+  if (this.cooldownRemaining > 0) {
+    this.cooldownRemaining -= 1;
+    if (this.cooldownRemaining === 0) this.log('success', 'Risk cooldown complete. Sniper may fire on the next qualified repeat.');
+  }
   postTick(tick);
   this.emit();
 };
@@ -225,10 +249,11 @@ engine.onBuy = function onV8Buy(message) {
   if (!trade || !meta?.signalId) return;
   trade.signalId = meta.signalId;
   trade.batchSlot = meta.slot;
+  trade.slotRole = meta.slotRole;
   contractMeta.set(contractId, meta);
   const row = upsertSignal(meta.signalId);
   const existing = row.actualTrades.find(t => Number(t.contractId) === contractId);
-  if (!existing) row.actualTrades.push({ contractId, slot:meta.slot, outcome:'OPEN', buyAckMs:trade.sendToAckMs });
+  if (!existing) row.actualTrades.push({ contractId, slot:meta.slot, slotRole:meta.slotRole, outcome:'OPEN', buyAckMs:trade.sendToAckMs });
   saveSignals(); render();
 };
 
@@ -243,7 +268,7 @@ engine.onContract = function onV8Contract(contract) {
   const offset = actualOffset(trade);
   if (Number.isFinite(offset)) recordOffset(offset);
   const row = upsertSignal(meta.signalId);
-  const item = row.actualTrades.find(t => Number(t.contractId) === id) || { contractId:id, slot:meta.slot };
+  const item = row.actualTrades.find(t => Number(t.contractId) === id) || { contractId:id, slot:meta.slot, slotRole:meta.slotRole };
   Object.assign(item, {
     outcome:trade.status === 'won' ? 'WON' : trade.status === 'lost' ? 'LOST' : String(trade.status || 'SOLD').toUpperCase(),
     profit:trade.profit,
@@ -260,6 +285,7 @@ engine.onContract = function onV8Contract(contract) {
 };
 
 function traderConfig() {
+  const real = isRealAccount();
   const config = {
     ...engine.config,
     symbol:currentSymbol(),
@@ -269,15 +295,20 @@ function traderConfig() {
     maxTrades:+$('ptMaxTrades').value,
     duration:FIXED_DURATION,
     durationUnit:'t',
-    cooldownTicks:0,
+    cooldownTicks:real ? 30 : 0,
     executionMethod:'direct',
     oneOpenContract:false,
     maxSignalToSendMs:250,
     currency:selectedAccount?.currency || 'USD',
+    maxConsecutiveLosses:real ? 3 : 0,
     reconnect:true,
     maxReconnectAttempts:8
   };
   if (!(config.stake > 0)) throw new Error('Stake must be greater than 0.');
+  if (real && !$('v81RealConfirm')?.checked) throw new Error('Confirm the guarded Real-money test before connecting or starting.');
+  if (real && !(config.stopLoss > 0)) throw new Error('A stop loss greater than $0 is mandatory on a Real account.');
+  if (real && config.stake > 5) throw new Error('v8.1 Real test stake is capped at $5 per contract.');
+  if (real && config.maxTrades > 50) throw new Error('v8.1 Real test is capped at 50 contracts per cohort.');
   if (!engine.snapshot().running) engine.setConfig(config);
   return config;
 }
@@ -286,7 +317,7 @@ function auth() {
   selectedAccount = accounts.find(a => a.account_id === accountId) || null;
   if (!appId || !token) throw new Error('App ID and trade token are required.');
   if (!selectedAccount) throw new Error('Load and select a Deriv Options account.');
-  if (String(selectedAccount.account_type).toLowerCase() === 'real') throw new Error('v8 is Demo-only.');
+  if (isRealAccount() && !$('v81RealConfirm')?.checked) throw new Error('Tick the Real-money confirmation first.');
   return { appId, token, accountId };
 }
 async function api(path, body) {
@@ -316,19 +347,25 @@ function renderGate() {
   selectedAccount = accounts.find(a => a.account_id === $('ptAccount').value) || null;
   const real = String(selectedAccount?.account_type || '').toLowerCase() === 'real';
   $('ptRealGate')?.classList.toggle('hidden', !real);
+  if ($('v81RealMode')) $('v81RealMode').classList.toggle('hidden', !real);
   if ($('ptAccountPill')) $('ptAccountPill').textContent = selectedAccount ? String(selectedAccount.account_type).toUpperCase() : 'NO ACCOUNT';
-  if ($('ptConnect')) $('ptConnect').disabled = !selectedAccount || real;
+  if (real) {
+    if ($('ptMaxTrades') && Number($('ptMaxTrades').value) > 50) $('ptMaxTrades').value = '30';
+    if ($('ptStopLoss') && !(Number($('ptStopLoss').value) > 0)) $('ptStopLoss').value = '5';
+  }
+  if ($('ptConnect')) $('ptConnect').disabled = !selectedAccount || (real && !$('v81RealConfirm')?.checked);
+  render();
 }
 
 function exportCsv() {
-  const headers = ['signal_id','created_at','approved','trade_direction','signal_epoch','signal_quote','structure_tag','phase','pivot_type','pattern_family','pattern_length','edge','matches','similarity','top10','context80','context200','campaign_direction','campaign_pulses','decision_ms','execution_state','actual_contracts','actual_wins','actual_losses','actual_profit','shadow','why'];
+  const headers = ['signal_id','created_at','sniper_approved','control_approved','event','grade','score','repeat_count','batch','trade_direction','signal_epoch','signal_quote','structure_tag','phase','pattern_family','pattern_length','edge','matches','similarity','top10','family_memory','address_memory','campaign_direction','campaign_fires','variant_control','variant_repeat','variant_length','variant_memory','variant_hysteresis','variant_structure','variant_sniper','decision_ms','execution_state','actual_contracts','actual_wins','actual_losses','actual_profit','shadow','why'];
   const rows = signals.map(s => {
     const trades = s.actualTrades || [];
-    return [s.signalId,new Date(s.createdAt||Date.now()).toISOString(),s.approved,s.tradeDirection,s.signalEpoch,s.signalQuote,s.structure?.tag,s.structure?.phase,s.structure?.pivotType,s.pattern?.familyId,s.pattern?.length,s.pattern?.edge,s.pattern?.matchCount,s.pattern?.avgSimilarity,`${s.pattern?.top10Agree||0}/${s.pattern?.top10Total||0}`,s.context80,s.context200,s.campaign?.direction,s.campaign?.pulses,s.decisionMs,s.executionState,trades.length,trades.filter(t=>t.outcome==='WON').length,trades.filter(t=>t.outcome==='LOST').length,trades.reduce((a,t)=>a+(+t.profit||0),0),s.shadow?.outcome,s.why];
+    return [s.signalId,new Date(s.createdAt||Date.now()).toISOString(),s.approved,s.controlApproved,s.sniper?.event,s.sniper?.grade,s.sniper?.score,s.sniper?.repeatCount,s.requestedBatch,s.tradeDirection,s.signalEpoch,s.signalQuote,s.structure?.tag,s.structure?.phase,s.pattern?.familyId,s.pattern?.length,s.pattern?.edge,s.pattern?.matchCount,s.pattern?.avgSimilarity,`${s.pattern?.top10Agree||0}/${s.pattern?.top10Total||0}`,`${s.sniper?.familyMemory?.wins||0}/${s.sniper?.familyMemory?.losses||0}`,`${s.sniper?.addressMemory?.wins||0}/${s.sniper?.addressMemory?.losses||0}`,s.campaign?.direction,s.campaign?.fires,s.variants?.control,s.variants?.repeat,s.variants?.length,s.variants?.memory,s.variants?.hysteresis,s.variants?.structure,s.variants?.sniper,s.decisionMs,s.executionState,trades.length,trades.filter(t=>t.outcome==='WON').length,trades.filter(t=>t.outcome==='LOST').length,trades.reduce((a,t)=>a+(+t.profit||0),0),s.shadow?.outcome,s.why];
   });
   const csv = [headers,...rows].map(r => r.map(v => `"${String(v??'').replaceAll('"','""')}"`).join(',')).join('\n');
   const url = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
-  const a = document.createElement('a'); a.href = url; a.download = `sani-v8-pattern-first-${new Date().toISOString().replaceAll(':','-')}.csv`; a.click(); setTimeout(()=>URL.revokeObjectURL(url),500);
+  const a = document.createElement('a'); a.href = url; a.download = `sani-v8.1-sniper-campaign-${new Date().toISOString().replaceAll(':','-')}.csv`; a.click(); setTimeout(()=>URL.revokeObjectURL(url),500);
 }
 
 function bindControls() {
@@ -344,13 +381,14 @@ function bindControls() {
     finally { $('ptLoadAccounts').disabled = false; }
   };
   $('ptAccount').onchange = () => { localStorage.setItem('sani.deriv.accountId', $('ptAccount').value); lastOtpContext = null; renderGate(); };
+  $('v81RealConfirm')?.addEventListener('change', renderGate);
   $('ptConnect').onclick = async () => { clearError(); try { traderConfig(); lastOtpContext = auth(); $('ptConnect').disabled = true; await engine.connect(freshWs); } catch(e) { showError(e.message); } finally { renderGate(); } };
   $('ptDisconnect').onclick = () => { engine.disconnect(); lastOtpContext = null; };
-  $('ptStart').onclick = () => { clearError(); try { auth(); traderConfig(); engine.start(); engine.log('info','v8 armed: Pattern first on every fresh tick. Structure tags context. Repeated batches are allowed while the pattern edge persists.'); } catch(e) { showError(e.message); } };
+  $('ptStart').onclick = () => { clearError(); try { auth(); traderConfig(); engine.start(); engine.log('info',`v8.1 armed on ${isRealAccount()?'REAL':'DEMO'}: only the full sniper lane can buy. Six comparison variants remain shadow-only.`); } catch(e) { showError(e.message); } };
   $('ptPause').onclick = () => engine.pause();
   $('ptStop').onclick = () => engine.stop();
   $('ptReset').onclick = () => { try { engine.resetSession(); worker?.postMessage({type:'RESET'}); } catch(e) { showError(e.message); } };
-  $('ptClearLedger').onclick = () => { if (confirm('Clear the fresh v8 pattern-first cohort?')) { signals=[]; localStorage.removeItem(SIGNAL_KEY); render(); } };
+  $('ptClearLedger').onclick = () => { if (confirm('Clear the fresh v8.1 sniper cohort?')) { signals=[]; localStorage.removeItem(SIGNAL_KEY); render(); } };
   $('ptResetCalibration').onclick = () => { if (confirm('Reset measured execution offset?')) { localStorage.removeItem(OFFSET_KEY); worker?.postMessage({type:'CONFIG',executionOffset:1}); render(); } };
   $('ptExportLedger').onclick = exportCsv;
   for (const id of ['ptStake','ptTakeProfit','ptStopLoss','ptMaxTrades','ptCooldown']) $(id)?.addEventListener('change', () => { try { if (!engine.snapshot().running) traderConfig(); render(); } catch(e) { showError(e.message); } });
@@ -365,7 +403,9 @@ engine.subscribe(state => {
   if ($('ptPause')) $('ptPause').disabled = !state.running;
   if ($('ptStop')) $('ptStop').disabled = !state.connected;
   if ($('ptReset')) $('ptReset').disabled = state.running || Number(state.openContracts||0)>0 || pendingBuys()>0;
-  if ($('ptLogs')) $('ptLogs').innerHTML = state.logs?.length ? state.logs.slice(0,60).map(log => `<div class="log ${log.level}"><time>${new Date(log.at).toLocaleTimeString()}</time><span>${String(log.message||'')}</span></div>`).join('') : '<div class="empty">v8 messages appear here.</div>';
+  if ($('ptAccount')) $('ptAccount').disabled = state.connected;
+  if ($('ptLoadAccounts')) $('ptLoadAccounts').disabled = state.connected;
+  if ($('ptLogs')) $('ptLogs').innerHTML = state.logs?.length ? state.logs.slice(0,60).map(log => `<div class="log ${log.level}"><time>${new Date(log.at).toLocaleTimeString()}</time><span>${String(log.message||'')}</span></div>`).join('') : '<div class="empty">v8.1 messages appear here.</div>';
   render();
 });
 
@@ -378,7 +418,7 @@ window.addEventListener('resize', render);
 function boot() {
   V73UI.install();
   if ($('ptCooldown')) $('ptCooldown').value = String(DEFAULT_BATCH);
-  if ($('ptMaxTrades') && Number($('ptMaxTrades').value) < 200) $('ptMaxTrades').value = '500';
+  if ($('ptMaxTrades')) $('ptMaxTrades').value = '60';
   $('ptAppId').value = localStorage.getItem('sani.deriv.appId') || '';
   $('ptToken').value = sessionStorage.getItem('sani.deriv.token') || '';
   bindControls();

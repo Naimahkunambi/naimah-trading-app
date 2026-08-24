@@ -1,13 +1,13 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0c0f"><title>SANI Master Regime Trader</title><link rel="stylesheet" href="/styles.css"></head><body><main class="shell observatoryShell">
-<header class="topbar"><div><div class="eyebrow">SANI TRADING LAB</div><h1>Master Regime Trader v6</h1></div><div class="statusCluster"><span id="obsDot" class="dot"></span><span id="obsStatus">Disconnected</span><span class="accountPill">MASTER LAB</span></div></header>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0c0f"><title>SANI Sniper Campaign v8.1</title><link rel="stylesheet" href="/styles.css"></head><body><main class="shell observatoryShell">
+<header class="topbar"><div><div class="eyebrow">SANI TRADING LAB</div><h1>SANI Sniper Campaign v8.1</h1></div><div class="statusCluster"><span id="obsDot" class="dot"></span><span id="obsStatus">Disconnected</span><span class="accountPill">SNIPER LAB</span></div></header>
 <nav class="workspaceTabs"><a href="/">BOS Lab</a><a class="active" href="/observatory.html">Master / Pattern Lab</a></nav>
 
 <section class="observatoryHero">
   <div class="heroCard obsIntro">
-    <div class="eyebrow">200 → 80 → CHOP/VOL → 20 → TRADE</div>
-    <h2>Trade the mountain, not every wiggle.</h2>
-    <p>v6 makes trend hierarchy the decision engine. The 200-tick window identifies the regime, 80 ticks must confirm it, CHOP and volatility can veto participation, and the 20-tick structure must form a pullback plus resumption before a 3-tick Demo contract is allowed.</p>
-    <div class="obsBadges"><span>Demo only</span><span>200t regime</span><span>80t confirmation</span><span>CHOP veto</span><span>20t HL/LH entry</span><span>fixed 3 ticks</span></div>
+    <div class="eyebrow">SEED → REPEAT → FIRE → LOCK → FLIP</div>
+    <h2>Many patterns are seen. Only repeated evidence earns the shot.</h2>
+    <p>v8.1 keeps the fast pattern-first engine, then adds family identity, repeat confirmation, length priority, calibrated memory, campaign hysteresis and structure scoring.</p>
+    <div class="obsBadges"><span>Demo + guarded Real</span><span>pattern-first</span><span>1T contract</span><span>7 shadow lanes</span><span>campaign lock</span><span>earned ×2</span></div>
   </div>
   <div class="card obsQuickStats">
     <div class="sectionTitle"><span>Observatory state</span><small>BOS untouched</small></div>
@@ -71,13 +71,13 @@
 </section>
 
 <section class="card observatoryCanvasCard">
-  <div class="sectionTitle"><span>Master Entry / Exit Visualizer</span><small id="masterCanvasCaption">waiting for v6 regime analysis</small></div>
+  <div class="sectionTitle"><span>Sniper Map</span><small id="masterCanvasCaption">seed → repeat → fire → expiry</small></div>
   <canvas id="masterCanvas" class="tickCanvas" width="1400" height="390"></canvas>
-  <p class="muted">Triangles mark actual entries, circles mark expiry, connecting lines show the held 3-tick path, and recent HH/HL/LH/LL labels expose where the 20-tick trigger fired or missed.</p>
+  <p class="muted">Only seeds, sniper fires, confirmed flips, actual entries and expiries are drawn. Structure labels appear only where a sniper shot fired.</p>
 </section>
 
 <section class="card">
-  <div class="sectionTitle"><span>Master Trader v6</span><small>regime → confirmation → veto → pullback/resumption · Demo only</small></div>
+  <div class="sectionTitle"><span>Sniper Campaign v8.1</span><small>full sniper execution · six comparison lanes shadow-only</small></div>
   <div class="heroLine"><span>Session P/L</span><strong id="ptPnl">+$0.00</strong></div>
 
   <div class="metricRow">
@@ -98,7 +98,7 @@
     <div class="metric"><span>CHOP filter</span><strong id="mtChop">—</strong></div>
     <div class="metric"><span>Volatility</span><strong id="mtVolatility">—</strong></div>
     <div class="metric"><span>Measured entry</span><strong id="ptEntryOffset">T+1</strong></div>
-    <div class="metric"><span>Bought v6</span><strong id="ptBought">0</strong></div>
+    <div class="metric"><span>Bought v8.1</span><strong id="ptBought">0</strong></div>
   </div>
 
   <div class="metricRow">
@@ -125,13 +125,13 @@
       </div>
       <div class="actions compact"><button id="ptLoadAccounts">Load accounts</button></div>
       <label>Account<select id="ptAccount"><option value="">Load accounts first</option></select></label>
-      <div id="ptRealGate" class="dangerZone hidden"><strong>Demo-only master experiment</strong><p>v6 blocks Real accounts. Validate the fresh regime strategy on Demo first.</p></div>
+      <div id="ptRealGate" class="dangerZone hidden"><strong>Guarded Real-money experiment</strong><p>Real execution requires explicit confirmation and hard session limits.</p></div>
       <div class="actions compact"><button id="ptConnect" class="primary">Connect Trader</button><button id="ptDisconnect">Disconnect</button></div>
       <div id="traderError" class="errorBox hidden"></div>
     </div>
 
     <div>
-      <div class="sectionTitle"><span>Frozen v6 trade rules</span><small>do not tune mid-cohort</small></div>
+      <div class="sectionTitle"><span>Frozen v8.1 test rules</span><small>do not tune mid-cohort</small></div>
       <div class="formGrid three">
         <label>Stake ($)<input id="ptStake" type="number" min="0.35" step="0.01" value="1"></label>
         <label>TP ($)<input id="ptTakeProfit" type="number" min="0" step="0.1" value="0"></label>
@@ -140,7 +140,7 @@
         <label>Cooldown ticks<input id="ptCooldown" type="number" min="0" step="1" value="20"></label>
       </div>
       <div class="actions compact"><button id="ptStart" class="primary">Start Master Trader v6</button><button id="ptPause">Pause</button><button id="ptStop">Stop</button><button id="ptReset">Reset engine session</button></div>
-      <p class="muted">Fixed internals: 200-tick regime, 80-tick confirmation, CHOP veto, healthy-volatility requirement, 5-tick session confirmation, neutral buffer before direction flips, 20-tick Higher-Low/Lower-High resumption trigger, fixed 3-tick contract. One pullback can be traded only once.</p>
+      <p class="muted">Fixed internals: one-tick contract; same-family repeat inside three ticks; 12T priority; Bayesian family/address memory; two-vote campaign flip; one contract for B-grade and an earned second contract for A-grade.</p>
     </div>
   </div>
 
@@ -150,14 +150,14 @@
   <div class="sectionTitle"><span>v6 Master Setup Ledger</span><small>fresh cohort · v5 remains separate in browser storage</small></div>
   <div class="actions compact"><button id="ptExportLedger">Export v6 CSV</button><button id="ptClearLedger">Clear v6 cohort</button><button id="ptResetCalibration">Reset execution calibration</button></div>
   <div class="tableWrap"><table><thead><tr><th>Time</th><th>Session</th><th>Trade</th><th>Entry</th><th>200 slope</th><th>80 slope</th><th>Chop</th><th>Vol</th><th>Pred → actual</th><th>Latency</th><th>Status</th><th>Contract</th></tr></thead><tbody id="ptLedgerRows"><tr><td colspan="12" class="empty">No v6 master setups recorded yet.</td></tr></tbody></table></div>
-  <p class="muted">The persistent 100-trade cap is counted from the v6 ledger, so refreshing or resetting the engine session does not silently start another 100 trades.</p>
+  <p class="muted">The persistent cohort cap counts actual contracts, including the earned second contract, so refreshing does not silently reset risk.</p>
 
   <div class="sectionTitle"><span>Trader journal</span><small><span id="ptDot" class="dot"></span></small></div>
   <div id="ptLogs" class="logs"><div class="empty">Master Trader messages will appear here.</div></div>
 </section>
 
 <section class="card">
-  <div class="sectionTitle"><span>v6 master state machine</span><small>one-direction session trading</small></div>
+  <div class="sectionTitle"><span>v8.1 sniper state machine</span><small>seven ideas · separately scored</small></div>
   <div class="observatoryRoadmap">
     <div><b>1 · Regime</b><span>200 ticks classify BULL, BEAR, or NEUTRAL from slope, directional efficiency, net movement, and swing structure.</span></div>
     <div><b>2 · Confirm</b><span>80 ticks must agree. A pullback can disagree temporarily, but no entry occurs until alignment returns.</span></div>
@@ -168,5 +168,5 @@
   </div>
 </section>
 
-<footer>Master Trader v6 is an experimental Demo-only regime-following system. No martingale. BOS remains untouched.</footer>
+<footer>Sniper Campaign v8.1 is experimental. Demo and guarded Real execution are available. No martingale; no profit guarantee.</footer>
 </main><script type="module" src="/observatory.js"></script><script type="module" src="/pattern-trader-v72.js"></script></body></html>

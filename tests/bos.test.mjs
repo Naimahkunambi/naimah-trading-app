@@ -55,7 +55,7 @@ test('shadow scores T+1/T+2/T+3 from BOS price with ties as losses', () => {
   lab.onTick({ quote: 100 });
   lab.onTick({ quote: 102 });
   const rows = lab.snapshot();
-  assert.deepEqual(rows.map(x => [x.horizon, x.wins, x.losses]), [[1,1,0],[2,0,1],[3,1,0]]);
+  assert.deepEqual(rows.filter(x => x.scope === 'ALL').slice(0, 3).map(x => [x.horizon, x.wins, x.losses]), [['0→1',1,0],['1→2',0,1],['2→3',1,0]]);
 });
 
 test('direct buy request matches parameter-buy shape', () => {
