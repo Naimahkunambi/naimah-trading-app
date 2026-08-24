@@ -1,0 +1,51 @@
+name: Fix v7.3 controller boot
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/fix-v73-controller-boot.yml']
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch controller boot
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('public/pattern-trader-v73.js')
+          s = p.read_text()
+          old = """window.addEventListener('DOMContentLoaded',()=>{V73UI.install();V73UI.onReplay(()=>render());if($('ptAppId'))$('ptAppId').value=localStorage.getItem('sani.deriv.appId')||'';if($('ptToken'))$('ptToken').value=sessionStorage.getItem('sani.deriv.token')||'';bindControls();initWorker();render();if($('ptAppId')?.value&&$('ptToken')?.value)$('ptLoadAccounts').click()});"""
+          new = """let v73Booted = false;
+export function bootV73(){
+  if(v73Booted) return;
+  v73Booted = true;
+  V73UI.onReplay(()=>render());
+  if($('ptAppId')) $('ptAppId').value = localStorage.getItem('sani.deriv.appId') || '';
+  if($('ptToken')) $('ptToken').value = sessionStorage.getItem('sani.deriv.token') || '';
+  bindControls();
+  initWorker();
+  render();
+  if($('ptAppId')?.value && $('ptToken')?.value) $('ptLoadAccounts')?.click();
+}
+if(document.readyState === 'loading') window.addEventListener('DOMContentLoaded', bootV73, { once:true });
+else queueMicrotask(bootV73);"""
+          if old not in s:
+              raise SystemExit('Expected DOMContentLoaded bootstrap fragment not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Syntax check
+        run: node --check public/pattern-trader-v73.js
+      - name: Commit and remove workflow
+        shell: bash
+        run: |
+          git config user.name "SANI Patch Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/fix-v73-controller-boot.yml
+          git add public/pattern-trader-v73.js
+          git commit -m "fix: make v7.3 controller boot idempotent and reliable [skip ci]"
+          git push
