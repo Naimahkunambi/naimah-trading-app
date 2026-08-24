@@ -3,8 +3,8 @@ import { SaniEngine, DEFAULT_CONFIG } from './core/engine.mjs';
 const $ = id => document.getElementById(id);
 const perfNow = () => globalThis.performance?.now?.() ?? Date.now();
 
-const VERSION = 'v7.0';
-const LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.0';
+const VERSION = 'v7.1';
+const LEDGER_KEY = 'sani.masterTrader.signalLedger.v7.1';
 const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
 const LONG = 200;
 const AUTH = 80;
@@ -13,6 +13,8 @@ const MIN_MATCHES = 40;
 const MIN_AVG_SIMILARITY = 88;
 const MIN_PATTERN_STRENGTH = 55;
 const MIN_PATTERN_MARGIN = 1.0;
+const MAX_BREAK_EXTENSION_STEPS = 1.10;
+const EARLY_ARM_STEPS = 0.50;
 const VISUAL_TICKS = 220;
 const REPLAY_STEP = 180;
 
@@ -44,7 +46,8 @@ const engine = new SaniEngine({
   maxReconnectAttempts: 8
 });
 
-engine.onTick = function v7Tick(tick) {
+// Master/Pattern Lab owns the signal. Keep the core BOS engine disabled here.
+engine.onTick = function v71Tick(tick) {
   this.lastTick = tick;
   this.ticksSeen += 1;
   this.emit();
@@ -185,40 +188,76 @@ function volatilityState(m200, m80, m20) {
   return 'HEALTHY';
 }
 
+// v7.1 timing model:
+// 1) find HL/LH anchor, 2) freeze the BOS level, 3) fire on the FIRST break tick,
+// 4) reject a break that has already stretched too far beyond BOS.
 function structureSetup(rows20, direction, step) {
   const p = rows20.map(x => x.quote);
   const n = p.length;
   const unit = step || avgStep(p) || 1;
-  if (n < 12 || (direction !== 'BULL' && direction !== 'BEAR')) {
-    return { ready: false, type: 'NONE', level: NaN, pullbackSteps: 0, setupId: '' };
-  }
+  const empty = {
+    ready: false, event: false, type: 'NONE', level: NaN, bosLevel: NaN,
+    pullbackSteps: 0, breakDistanceSteps: NaN, timingClass: 'WAIT',
+    pivotType: '', pivotQuote: NaN, pivotEpoch: NaN, setupId: ''
+  };
+  if (n < 14 || (direction !== 'BULL' && direction !== 'BEAR')) return empty;
 
   const current = p[n - 1];
   const previous = p[n - 2];
+  // The level must exist BEFORE the previous/current ticks. This prevents the
+  // current breakout itself from moving the goalpost.
   const shelf = p.slice(n - 8, n - 2);
-  const context = p.slice(n - 12, n - 2);
+  const context = p.slice(n - 14, n - 2);
+  const recentP = p.slice(-16);
+  const recentRows = rows20.slice(-16);
+  const pp = pivots(recentP, 1);
   const buffer = unit * .02;
+  const signalEpoch = Number(rows20.at(-1)?.epoch || 0);
 
   if (direction === 'BULL') {
     const level = Math.max(...shelf);
     const low = Math.min(...context);
     const high = Math.max(...context);
     const pullbackSteps = (high - low) / unit;
-    const broke = previous > level + buffer;
-    const held = current > level - buffer;
-    const resumed = current >= previous - unit * .30;
-    const hl = (() => {
-      const lows = pivots(p.slice(-14), 1).lows.slice(-2);
-      return lows.length < 2 || lows[1].quote >= lows[0].quote - unit * .20;
-    })();
-    const ready = broke && held && resumed && pullbackSteps >= .65 && hl;
+    const lows = pp.lows.slice(-2);
+    const lastLow = lows.at(-1);
+    const previousLow = lows.length > 1 ? lows.at(-2) : null;
+    const hl = !previousLow || !lastLow || lastLow.quote >= previousLow.quote - unit * .20;
+    const pivotQuote = lastLow?.quote ?? low;
+    const pivotEpoch = lastLow ? Number(recentRows[lastLow.i]?.epoch) : Number(rows20[n - 3]?.epoch || signalEpoch);
+
+    const aboveNow = current > level + buffer;
+    const aboveBefore = previous > level + buffer;
+    const firstBreak = aboveNow && !aboveBefore;
+    const breakDistanceSteps = aboveNow ? Math.max(0, (current - level) / unit) : Math.max(0, (level - current) / unit);
+    const early = !aboveNow && current > previous && breakDistanceSteps <= EARLY_ARM_STEPS;
+    const shapeOk = hl && pullbackSteps >= .65;
+    const event = firstBreak && shapeOk;
+    const timingClass = event
+      ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'CHASE')
+      : aboveBefore ? 'CHASE'
+        : early ? 'EARLY' : 'WAIT';
+    const ready = event && timingClass === 'PRIME';
+
     return {
       ready,
-      type: ready ? 'PULLBACK_RESUME' : 'WAIT_RESUME',
+      event,
+      type: ready ? 'HL_BOS_FIRST_BREAK' : event ? 'HL_BOS_CHASE' : early ? 'HL_ARMED' : 'WAIT_BOS',
       level,
+      bosLevel: level,
       pullbackSteps,
-      structureText: hl ? 'HL / stable low' : 'low structure weak',
-      setupId: `B:${Math.round(level * 100)}:${Math.round(low * 100)}`
+      breakDistanceSteps,
+      timingClass,
+      pivotType: 'HL',
+      pivotQuote,
+      pivotEpoch,
+      firstBreak,
+      structureText: !hl ? 'HL structure weak'
+        : ready ? `HL → BOS first break · PRIME ${breakDistanceSteps.toFixed(2)}x`
+          : event ? `HL → BOS but CHASE ${breakDistanceSteps.toFixed(2)}x`
+            : early ? `HL armed · ${breakDistanceSteps.toFixed(2)}x below BOS`
+              : 'HL found · waiting first BOS break',
+      setupId: `B:${Math.round(level * 100)}:${Math.round(pivotQuote * 100)}:${signalEpoch}`
     };
   }
 
@@ -226,21 +265,45 @@ function structureSetup(rows20, direction, step) {
   const high = Math.max(...context);
   const low = Math.min(...context);
   const pullbackSteps = (high - low) / unit;
-  const broke = previous < level - buffer;
-  const held = current < level + buffer;
-  const resumed = current <= previous + unit * .30;
-  const lh = (() => {
-    const highs = pivots(p.slice(-14), 1).highs.slice(-2);
-    return highs.length < 2 || highs[1].quote <= highs[0].quote + unit * .20;
-  })();
-  const ready = broke && held && resumed && pullbackSteps >= .65 && lh;
+  const highs = pp.highs.slice(-2);
+  const lastHigh = highs.at(-1);
+  const previousHigh = highs.length > 1 ? highs.at(-2) : null;
+  const lh = !previousHigh || !lastHigh || lastHigh.quote <= previousHigh.quote + unit * .20;
+  const pivotQuote = lastHigh?.quote ?? high;
+  const pivotEpoch = lastHigh ? Number(recentRows[lastHigh.i]?.epoch) : Number(rows20[n - 3]?.epoch || signalEpoch);
+
+  const belowNow = current < level - buffer;
+  const belowBefore = previous < level - buffer;
+  const firstBreak = belowNow && !belowBefore;
+  const breakDistanceSteps = belowNow ? Math.max(0, (level - current) / unit) : Math.max(0, (current - level) / unit);
+  const early = !belowNow && current < previous && breakDistanceSteps <= EARLY_ARM_STEPS;
+  const shapeOk = lh && pullbackSteps >= .65;
+  const event = firstBreak && shapeOk;
+  const timingClass = event
+    ? (breakDistanceSteps <= MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'CHASE')
+    : belowBefore ? 'CHASE'
+      : early ? 'EARLY' : 'WAIT';
+  const ready = event && timingClass === 'PRIME';
+
   return {
     ready,
-    type: ready ? 'PULLBACK_RESUME' : 'WAIT_RESUME',
+    event,
+    type: ready ? 'LH_BOS_FIRST_BREAK' : event ? 'LH_BOS_CHASE' : early ? 'LH_ARMED' : 'WAIT_BOS',
     level,
+    bosLevel: level,
     pullbackSteps,
-    structureText: lh ? 'LH / stable high' : 'high structure weak',
-    setupId: `S:${Math.round(level * 100)}:${Math.round(high * 100)}`
+    breakDistanceSteps,
+    timingClass,
+    pivotType: 'LH',
+    pivotQuote,
+    pivotEpoch,
+    firstBreak,
+    structureText: !lh ? 'LH structure weak'
+      : ready ? `LH → BOS first break · PRIME ${breakDistanceSteps.toFixed(2)}x`
+        : event ? `LH → BOS but CHASE ${breakDistanceSteps.toFixed(2)}x`
+          : early ? `LH armed · ${breakDistanceSteps.toFixed(2)}x above BOS`
+            : 'LH found · waiting first BOS break',
+    setupId: `S:${Math.round(level * 100)}:${Math.round(pivotQuote * 100)}:${signalEpoch}`
   };
 }
 
@@ -285,7 +348,8 @@ function patternDecision(snapshot, structureDirection) {
       status: strongest?.bias && strongest.bias !== expectedBias ? 'DISAGREE' : 'WEAK',
       reason: strongest ? `Best pattern ${strongest.bias} ${strongest.strength.toFixed(1)}% @ ${strongest.horizon}T` : 'No agreeing pattern edge',
       expectedBias, matchCount, avgSimilarity, bestAgree, bestOppose, strongest,
-      duration: strongest?.horizon || 3, startOffset: strongest?.startOffset ?? Number(snapshot?.executionOffset || 1)
+      duration: strongest?.horizon || 3,
+      startOffset: strongest?.startOffset ?? Number(snapshot?.executionOffset || 1)
     };
   }
 
@@ -295,7 +359,8 @@ function patternDecision(snapshot, structureDirection) {
       status: 'CONFLICT',
       reason: `Conflict: agree ${bestAgree.strength.toFixed(1)}% vs oppose ${bestOppose.strength.toFixed(1)}%`,
       expectedBias, matchCount, avgSimilarity, bestAgree, bestOppose,
-      duration: bestAgree.horizon, startOffset: bestAgree.startOffset
+      duration: bestAgree.horizon,
+      startOffset: bestAgree.startOffset
     };
   }
 
@@ -316,7 +381,7 @@ function patternDecision(snapshot, structureDirection) {
 function evaluate(snapshot) {
   const all = ticks();
   if (all.length < LONG) {
-    return { ready: false, structureReady: false, reason: `Need ${LONG} ticks (${all.length}/${LONG})`, phase: 'WARMING', rows: all };
+    return { ready: false, structureEvent: false, structureReady: false, reason: `Need ${LONG} ticks (${all.length}/${LONG})`, phase: 'WARMING', rows: all };
   }
 
   const r200 = all.slice(-LONG);
@@ -336,20 +401,27 @@ function evaluate(snapshot) {
   if (direction !== 'NEUTRAL' && regime200 !== 'NEUTRAL' && regime200 !== direction && Math.abs(m200.slopeNorm) >= .11) direction = 'NEUTRAL';
 
   const setup = structureSetup(r20, direction, m20.avgStep);
-  const structureReady = Boolean(direction !== 'NEUTRAL' && setup.ready && !chop.blocked && vol === 'HEALTHY');
-  const pattern = structureReady ? patternDecision(snapshot, direction) : { ok: false, status: 'WAIT', reason: 'Waiting for structure candidate' };
+  const environmentOk = Boolean(direction !== 'NEUTRAL' && !chop.blocked && vol === 'HEALTHY');
+  const structureEvent = Boolean(environmentOk && setup.event);
+  const structureReady = Boolean(structureEvent && setup.ready);
+  const pattern = structureReady
+    ? patternDecision(snapshot, direction)
+    : { ok: false, status: 'WAIT', reason: setup.timingClass === 'CHASE' ? 'Timing blocked: chase entry' : 'Waiting for PRIME BOS first break' };
   const ready = Boolean(structureReady && pattern.ok);
 
   let phase = 'WAIT_STRUCTURE';
   if (chop.blocked) phase = 'CHOP';
   else if (vol !== 'HEALTHY') phase = vol;
   else if (direction === 'NEUTRAL') phase = 'NO_DIRECTION';
-  else if (!setup.ready) phase = 'WAIT_RESUME';
+  else if (setup.event && setup.timingClass === 'CHASE') phase = 'CHASE_BLOCK';
+  else if (setup.timingClass === 'EARLY') phase = 'ARMED_EARLY';
+  else if (!setup.ready) phase = 'WAIT_BOS';
   else if (!pattern.ok) phase = `PATTERN_${pattern.status}`;
   else phase = 'AGREEMENT';
 
   return {
     ready,
+    structureEvent,
     structureReady,
     phase,
     rows: all,
@@ -368,7 +440,11 @@ function evaluate(snapshot) {
     pattern,
     duration: pattern.duration || 3,
     expectedOffset: Number(snapshot?.executionOffset ?? pattern.startOffset ?? 1),
-    reason: ready ? `AGREEMENT: ${direction} structure + ${pattern.reason}` : structureReady ? `STRUCTURE READY · ${pattern.reason}` : `${phase} · ${setup.structureText || ''}`
+    reason: ready
+      ? `AGREEMENT: ${direction} ${setup.pivotType} → BOS PRIME + ${pattern.reason}`
+      : structureReady
+        ? `PRIME BOS · ${pattern.reason}`
+        : `${phase} · ${setup.structureText || ''}`
   };
 }
 
@@ -379,9 +455,11 @@ function candidateKey(d) {
 function makeRow(d, snapshot) {
   const duration = Number(d.pattern?.duration || 3);
   const offset = Number(snapshot?.executionOffset ?? d.expectedOffset ?? 1);
+  const timingBlocked = d.setup?.timingClass === 'CHASE' || !d.setup?.ready;
+  const agreement = Boolean(d.setup?.ready && d.pattern?.ok);
   return {
-    id: `v7-${d.epoch}-${Date.now()}`,
-    cohort: 'v7-pattern-structure-agreement',
+    id: `v71-${d.epoch}-${Date.now()}`,
+    cohort: 'v7.1-hl-lh-bos-first-break',
     observedAt: Date.now(),
     signalEpoch: d.epoch,
     signalQuote: d.quote,
@@ -391,7 +469,13 @@ function makeRow(d, snapshot) {
     setupType: d.setup.type,
     setupId: d.setup.setupId,
     structureLevel: d.setup.level,
+    bosLevel: d.setup.bosLevel,
     pullbackSteps: d.setup.pullbackSteps,
+    timingClass: d.setup.timingClass,
+    breakDistanceSteps: d.setup.breakDistanceSteps,
+    pivotType: d.setup.pivotType,
+    pivotQuote: d.setup.pivotQuote,
+    pivotEpoch: d.setup.pivotEpoch,
     regime200: d.regime200,
     authority80: d.authority80,
     fast20: d.fast20,
@@ -409,9 +493,9 @@ function makeRow(d, snapshot) {
     duration,
     executionOffset: offset,
     expectedWindow: `T+${offset}→T+${offset + duration}`,
-    agreement: Boolean(d.pattern.ok),
-    status: d.pattern.ok ? 'AGREEMENT' : `BLOCK PATTERN ${d.pattern.status}`,
-    shadowPending: !d.pattern.ok
+    agreement,
+    status: timingBlocked ? 'BLOCK TIMING CHASE' : agreement ? 'AGREEMENT' : `BLOCK PATTERN ${d.pattern.status}`,
+    shadowPending: !agreement
   };
 }
 
@@ -466,12 +550,16 @@ function stats() {
   const wins = settled.filter(r => r.status === 'WON').length;
   const losses = settled.filter(r => r.status === 'LOST').length;
   const pnl = settled.reduce((s, r) => s + (+r.profit || 0), 0);
-  const blocked = ledger.filter(r => String(r.status).startsWith('BLOCK PATTERN') && ['WON', 'LOST'].includes(r.shadowOutcome));
-  const blockedWins = blocked.filter(r => r.shadowOutcome === 'WON').length;
-  const blockedLosses = blocked.filter(r => r.shadowOutcome === 'LOST').length;
-  const blockedSaved = blockedLosses;
-  const blockedMissed = blockedWins;
-  return { wins, losses, pnl, blockedWins, blockedLosses, blockedSaved, blockedMissed };
+
+  const patternBlocked = ledger.filter(r => String(r.status).startsWith('BLOCK PATTERN') && ['WON', 'LOST'].includes(r.shadowOutcome));
+  const timingBlocked = ledger.filter(r => String(r.status).startsWith('BLOCK TIMING') && ['WON', 'LOST'].includes(r.shadowOutcome));
+  const summarize = rows => ({
+    saved: rows.filter(r => r.shadowOutcome === 'LOST').length,
+    missed: rows.filter(r => r.shadowOutcome === 'WON').length
+  });
+  const pattern = summarize(patternBlocked);
+  const timing = summarize(timingBlocked);
+  return { wins, losses, pnl, pattern, timing };
 }
 
 function offsets() {
@@ -505,6 +593,7 @@ function traderConfig() {
     takeProfit: +$('ptTakeProfit').value,
     stopLoss: +$('ptStopLoss').value,
     maxTrades: +$('ptMaxTrades').value,
+    cooldownTicks: +($('ptCooldown')?.value || 0),
     duration: 3,
     durationUnit: 't',
     executionMethod: 'direct',
@@ -526,7 +615,7 @@ function auth() {
   selectedAccount = accounts.find(a => a.account_id === accountId) || null;
   if (!appId || !token) throw new Error('App ID and trade token are required.');
   if (!selectedAccount) throw new Error('Load and select a Deriv Options account.');
-  if (String(selectedAccount.account_type).toLowerCase() === 'real') throw new Error('v7 agreement trader is Demo-only.');
+  if (String(selectedAccount.account_type).toLowerCase() === 'real') throw new Error('v7.1 agreement trader is Demo-only.');
   return { appId, token, accountId };
 }
 
@@ -592,13 +681,18 @@ function maybeTrade(snapshot) {
   renderDecision(d);
   renderLedger();
   draw();
-  if (!d.structureReady) return;
+
+  // Only a real first-BOS event becomes an auditable candidate. EARLY/WAIT
+  // states are displayed live but are not spammed into the ledger.
+  if (!d.structureEvent) return;
 
   const row = addCandidate(d, snapshot);
   if (!row) return;
   renderLedger();
   draw();
 
+  // A first break that jumped too far is recorded and shadow-resolved, but not bought.
+  if (!d.setup.ready) return;
   if (!d.pattern.ok) return;
 
   const state = engine.snapshot();
@@ -617,14 +711,14 @@ function maybeTrade(snapshot) {
     patchRow(row.id, { status: 'ORDER SENT', shadowPending: false });
     engine.execute({
       direction: d.direction === 'BULL' ? 'CALL' : 'PUT',
-      structure: `v7-agreement-${d.setup.type.toLowerCase()}-${d.pattern.duration}t`,
+      structure: `v71-${d.setup.pivotType.toLowerCase()}-bos-first-break-${d.pattern.duration}t`,
       epoch: d.epoch,
       quote: d.quote,
       detectedPerf: perfNow(),
       detectedWallMs: Date.now(),
       patternMeta: { ...row, ledgerId: row.id }
     });
-    engine.log('success', `v7 AGREEMENT ${row.direction} · ${row.setupType} · pattern ${row.patternStrength?.toFixed?.(1) ?? '—'}% · ${row.duration}t.`);
+    engine.log('success', `v7.1 PRIME ${row.direction} · ${row.pivotType}→BOS · Δ${Number(row.breakDistanceSteps).toFixed(2)}x · pattern ${row.patternStrength?.toFixed?.(1) ?? '—'}% · ${row.duration}t.`);
   } catch (error) {
     patchRow(row.id, { status: 'ERROR', error: error.message, shadowPending: true });
     showError(error.message);
@@ -641,21 +735,40 @@ function renderDecision(d) {
   set('mtRegime200', d?.regime200 || '—');
   set('mtTrend80', d?.authority80 || '—');
   set('mtSession', d?.direction || 'NEUTRAL');
-  set('mtEntry20', d?.setup?.ready ? d.setup.type.replaceAll('_', ' ') : 'WAIT RESUME');
+  set('mtEntry20', d?.setup ? `${d.setup.timingClass} · ${d.setup.pivotType || '—'}→BOS` : 'WAIT');
   set('mtChop', d ? `${d.chop.blocked ? 'VETO' : 'CLEAR'} · ${(d.chop.score * 100).toFixed(0)}%` : '—');
   set('mtVolatility', d?.volatility || '—');
 
-  set('dbStructure', d?.structureReady ? `${d.direction} · ${d.setup.type.replaceAll('_', ' ')}` : `WAIT · ${d?.phase || '—'}`);
-  set('dbPattern', d?.structureReady ? `${d.pattern.status} · ${d.pattern.reason}` : 'WAITING FOR STRUCTURE');
+  const bosMeta = Number.isFinite(+d?.setup?.bosLevel)
+    ? `${d.setup.pivotType} ${Number(d.setup.pivotQuote).toFixed(2)} → BOS ${Number(d.setup.bosLevel).toFixed(2)} · Δ${Number(d.setup.breakDistanceSteps || 0).toFixed(2)}x`
+    : 'Waiting for HL/LH anchor and BOS level';
+
+  if (d?.setup?.timingClass === 'CHASE' && d?.structureEvent) {
+    set('dbStructure', `${d.direction} · CHASE BLOCK`);
+  } else if (d?.setup?.timingClass === 'EARLY') {
+    set('dbStructure', `${d.direction} · ARMED EARLY`);
+  } else if (d?.structureReady) {
+    set('dbStructure', `${d.direction} · PRIME ${d.setup.pivotType}→BOS`);
+  } else {
+    set('dbStructure', `WAIT · ${d?.phase || '—'}`);
+  }
+
+  set('dbPattern', d?.structureReady ? `${d.pattern.status} · ${d.pattern.reason}` : 'WAITING FOR PRIME BOS');
   set('dbAgreement', d?.ready ? 'YES' : 'NO');
   set('dbAction', d?.ready ? `${d.direction === 'BULL' ? 'CALL' : 'PUT'} · ${d.pattern.duration}T` : 'WAIT');
-  set('dbPatternMeta', d?.structureReady ? `${d.pattern.matchCount ?? 0} relatives · ${Number(d.pattern.avgSimilarity || 0).toFixed(1)}% avg similarity · threshold ${MIN_PATTERN_STRENGTH}%` : `Pattern gate: ${MIN_MATCHES}+ matches · ${MIN_AVG_SIMILARITY}%+ avg similarity · ${MIN_PATTERN_STRENGTH}%+ execution-aware edge`);
+  set('dbPatternMeta', d?.structureReady
+    ? `${bosMeta} · ${d.pattern.matchCount ?? 0} relatives · ${Number(d.pattern.avgSimilarity || 0).toFixed(1)}% avg sim · edge ≥${MIN_PATTERN_STRENGTH}%`
+    : `${bosMeta} · PRIME means first BOS break ≤${MAX_BREAK_EXTENSION_STEPS.toFixed(2)} average tick from level`);
 
   if ($('ptSignal')) {
     if (d?.ready) {
-      $('ptSignal').innerHTML = `<b class="${d.direction === 'BULL' ? 'positive' : 'negative'}">FIRE · ${d.direction === 'BULL' ? 'CALL' : 'PUT'} ${d.pattern.duration}T</b><span>Structure ${esc(d.setup.type)} + Pattern ${esc(d.pattern.reason)} · expected T+${d.expectedOffset}→T+${d.expectedOffset + d.pattern.duration}</span>`;
+      $('ptSignal').innerHTML = `<b class="${d.direction === 'BULL' ? 'positive' : 'negative'}">FIRE PRIME · ${d.direction === 'BULL' ? 'CALL' : 'PUT'} ${d.pattern.duration}T</b><span>${esc(d.setup.pivotType)} → BOS first break · Δ${Number(d.setup.breakDistanceSteps).toFixed(2)}x · Pattern ${esc(d.pattern.reason)}</span>`;
+    } else if (d?.structureEvent && d?.setup?.timingClass === 'CHASE') {
+      $('ptSignal').innerHTML = `<b>BLOCK · CHASE</b><span>Direction may be right, but first BOS tick already extended ${Number(d.setup.breakDistanceSteps).toFixed(2)}x. Do not buy the end of the push.</span>`;
     } else if (d?.structureReady) {
-      $('ptSignal').innerHTML = `<b>STRUCTURE READY · PATTERN ${esc(d.pattern.status)}</b><span>${esc(d.pattern.reason)} · no buy until both agree</span>`;
+      $('ptSignal').innerHTML = `<b>PRIME STRUCTURE · PATTERN ${esc(d.pattern.status)}</b><span>${esc(d.pattern.reason)} · no buy until Pattern agrees</span>`;
+    } else if (d?.setup?.timingClass === 'EARLY') {
+      $('ptSignal').innerHTML = `<b>ARMED · EARLY</b><span>${esc(d.setup.pivotType)} formed. Price is approaching BOS. Fire only on the first actual break.</span>`;
     } else {
       $('ptSignal').innerHTML = `<b>WAIT · ${esc(d?.phase || 'SEARCHING')}</b><span>${esc(d?.reason || 'Building structure')}</span>`;
     }
@@ -671,7 +784,7 @@ function renderLedger() {
   $('ptCohortWL').textContent = `${s.wins} / ${s.losses}`;
   $('ptCohortPnl').textContent = `${s.pnl >= 0 ? '+' : ''}$${s.pnl.toFixed(2)}`;
   $('ptBullWL').textContent = `${s.wins} / ${s.losses}`;
-  $('ptBearWL').textContent = `${s.blockedSaved} saved / ${s.blockedMissed} missed`;
+  $('ptBearWL').textContent = `P ${s.pattern.saved}/${s.pattern.missed} · T ${s.timing.saved}/${s.timing.missed}`;
 
   if ($('ptEntryOffset')) {
     const snap = window.SaniObservatory?.getSnapshot?.();
@@ -683,8 +796,9 @@ function renderLedger() {
     const tm = new Date(r.observedAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
     const p = Number.isFinite(+r.patternStrength) ? `${(+r.patternStrength).toFixed(1)}% ${r.patternBias || ''}` : r.patternStatus || '—';
     const result = Number.isFinite(+r.contractId) ? r.status : (r.shadowOutcome ? `${r.status} · shadow ${r.shadowOutcome}` : r.status);
-    return `<tr><td>${tm}</td><td>${esc(r.structureDirection)}</td><td>${esc(r.setupType)}</td><td>${esc(p)}</td><td>${r.patternMatchCount ?? '—'}</td><td>${Number.isFinite(+r.patternAvgSimilarity) ? (+r.patternAvgSimilarity).toFixed(1) + '%' : '—'}</td><td>${r.duration || '—'}T</td><td>${r.expectedWindow || '—'}</td><td>${esc(result)}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="10" class="empty">No v7 structure candidates yet.</td></tr>';
+    const delta = Number.isFinite(+r.breakDistanceSteps) ? (+r.breakDistanceSteps).toFixed(2) + 'x' : '—';
+    return `<tr><td>${tm}</td><td>${esc(r.structureDirection)}</td><td>${esc(r.pivotType || '—')}→BOS</td><td>${esc(r.timingClass || '—')}</td><td>${delta}</td><td>${esc(p)}</td><td>${r.patternMatchCount ?? '—'}</td><td>${Number.isFinite(+r.patternAvgSimilarity) ? (+r.patternAvgSimilarity).toFixed(1) + '%' : '—'}</td><td>${r.duration || '—'}T</td><td>${r.expectedWindow || '—'}</td><td>${esc(result)}</td><td>${r.contractId ? '#' + r.contractId : '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="12" class="empty">No v7.1 BOS candidates yet.</td></tr>';
 }
 
 function updateReplayControls() {
@@ -749,19 +863,56 @@ function draw() {
   const d = lastDiagnostics;
   ctx.fillStyle = 'rgba(245,247,250,.92)';
   ctx.font = '12px system-ui';
-  ctx.fillText(`STRUCTURE ${d?.direction || '—'} · 200 ${d?.regime200 || '—'} · 80 ${d?.authority80 || '—'} · PATTERN ${d?.pattern?.status || 'WAIT'} · ${replayOffset ? 'REPLAY' : 'LIVE'}`, 16, 20);
+  ctx.fillText(`STRUCTURE ${d?.direction || '—'} · ${d?.setup?.timingClass || 'WAIT'} · 200 ${d?.regime200 || '—'} · 80 ${d?.authority80 || '—'} · PATTERN ${d?.pattern?.status || 'WAIT'} · ${replayOffset ? 'REPLAY' : 'LIVE'}`, 16, 20);
+
+  // Live BOS map: anchor pivot + frozen break level. Hide this while replaying
+  // because lastDiagnostics belongs to live, not the replay window.
+  if (!replayOffset && d?.setup && Number.isFinite(+d.setup.bosLevel)) {
+    const levelY = yFor(+d.setup.bosLevel);
+    const pivotX = Number.isFinite(+d.setup.pivotEpoch) ? clamp(xFor(+d.setup.pivotEpoch), 14, w - 14) : w * .72;
+    const pivotY = Number.isFinite(+d.setup.pivotQuote) ? yFor(+d.setup.pivotQuote) : levelY;
+    ctx.save();
+    ctx.setLineDash([6, 5]);
+    ctx.strokeStyle = '#63b8ff';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(Math.max(14, pivotX), levelY); ctx.lineTo(w - 14, levelY); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = '#63b8ff';
+    ctx.font = '10px system-ui';
+    ctx.fillText(`BOS ${Number(d.setup.bosLevel).toFixed(2)}`, Math.min(w - 130, Math.max(18, pivotX + 8)), levelY - 6);
+
+    if (Number.isFinite(+d.setup.pivotQuote)) {
+      ctx.strokeStyle = d.direction === 'BULL' ? '#67d99a' : '#ff9b72';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath(); ctx.arc(pivotX, pivotY, 5, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = d.direction === 'BULL' ? '#67d99a' : '#ff9b72';
+      ctx.fillText(`${d.setup.pivotType} anchor`, pivotX + 8, pivotY + (d.direction === 'BULL' ? 15 : -9));
+    }
+
+    ctx.fillStyle = d.setup.timingClass === 'PRIME' ? '#67d99a' : d.setup.timingClass === 'CHASE' ? '#ff7474' : '#f3c567';
+    ctx.font = 'bold 11px system-ui';
+    ctx.fillText(`TIMING ${d.setup.timingClass}`, w - 150, 38);
+  }
 
   const visibleCandidates = ledger.filter(r => Number(r.signalEpoch) >= startEpoch && Number(r.signalEpoch) <= endEpoch);
   for (const r of visibleCandidates) {
     const x = xFor(Number(r.signalEpoch));
     const y = yFor(Number(r.signalQuote));
     const agree = Boolean(r.agreement);
-    ctx.strokeStyle = agree ? '#67d99a' : '#f3c567';
-    ctx.fillStyle = agree ? '#67d99a' : '#f3c567';
+    const timingBlocked = String(r.status).startsWith('BLOCK TIMING');
+    ctx.strokeStyle = agree ? '#67d99a' : timingBlocked ? '#ff7474' : '#f3c567';
+    ctx.fillStyle = agree ? '#67d99a' : timingBlocked ? '#ff7474' : '#f3c567';
     ctx.lineWidth = 1.6;
     ctx.strokeRect(x - 4, y - 4, 8, 8);
     ctx.font = '10px system-ui';
-    ctx.fillText(agree ? `A${r.duration}` : 'B', x + 6, y - 7);
+    ctx.fillText(agree ? `A${r.duration} P` : timingBlocked ? 'C CHASE' : 'C P', x + 6, y - 7);
+
+    if (Number.isFinite(+r.pivotQuote) && Number.isFinite(+r.pivotEpoch) && +r.pivotEpoch >= startEpoch && +r.pivotEpoch <= endEpoch) {
+      const px = xFor(+r.pivotEpoch);
+      const py = yFor(+r.pivotQuote);
+      ctx.fillStyle = 'rgba(160,190,255,.75)';
+      ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
+    }
 
     if (Number.isFinite(+r.entrySpot) && Number.isFinite(+r.entryTickTime)) {
       const ex = xFor(+r.entryTickTime);
@@ -778,6 +929,13 @@ function draw() {
     if (Number.isFinite(+r.exitSpot) && Number.isFinite(+r.exitTickTime)) {
       const xx = xFor(+r.exitTickTime);
       const xy = yFor(+r.exitSpot);
+      if (Number.isFinite(+r.entrySpot) && Number.isFinite(+r.entryTickTime)) {
+        const ex = xFor(+r.entryTickTime);
+        const ey = yFor(+r.entrySpot);
+        ctx.strokeStyle = r.status === 'WON' ? 'rgba(103,217,154,.65)' : 'rgba(255,116,116,.65)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(xx, xy); ctx.stroke();
+      }
       ctx.strokeStyle = r.status === 'WON' ? '#67d99a' : '#ff7474';
       ctx.beginPath(); ctx.arc(xx, xy, 5, 0, Math.PI * 2); ctx.stroke();
       ctx.fillStyle = r.status === 'WON' ? '#67d99a' : '#ff7474';
@@ -785,11 +943,11 @@ function draw() {
     }
   }
 
-  const recent = rows.slice(-24);
+  const recent = rows.slice(-28);
   const pp = pivots(recent.map(x => x.quote), 2);
   const label = (items, type) => {
     let prev;
-    for (const p of items.slice(-4)) {
+    for (const p of items.slice(-5)) {
       const text = prev === undefined ? type : type === 'H' ? (p.quote > prev ? 'HH' : 'LH') : (p.quote > prev ? 'HL' : 'LL');
       prev = p.quote;
       const t = recent[p.i];
@@ -802,17 +960,17 @@ function draw() {
   label(pp.highs, 'H');
   label(pp.lows, 'L');
 
-  if ($('masterCanvasCaption')) $('masterCanvasCaption').textContent = 'B=structure blocked by Pattern · A=Pattern+Structure agreement · E=actual Deriv entry · X=expiry · use replay controls to inspect older setups';
+  if ($('masterCanvasCaption')) $('masterCanvasCaption').textContent = 'HL/LH anchor → blue BOS line → PRIME first break. C=blocked candidate · A=Pattern+Structure agreement · E=Deriv entry · X=expiry · replay keeps older setups';
 }
 
 function exportCsv() {
-  const headers = ['cohort','observed_at','symbol','signal_epoch','signal_quote','structure_direction','setup_type','regime_200','authority_80','fast_20','slope_200','slope_80','chop_score','volatility','pattern_status','pattern_reason','pattern_matches','pattern_avg_similarity','pattern_bias','pattern_strength','pattern_opposing_strength','duration','execution_offset','expected_window','agreement','status','contract_id','profit','actual_window','latency','entry_spot','exit_spot','entry_tick_time','exit_tick_time','shadow_outcome','shadow_entry','shadow_exit'];
-  const rows = ledger.map(r => [r.cohort,new Date(r.observedAt).toISOString(),r.symbol,r.signalEpoch,r.signalQuote,r.structureDirection,r.setupType,r.regime200,r.authority80,r.fast20,r.slope200,r.slope80,r.chopScore,r.volatility,r.patternStatus,r.patternReason,r.patternMatchCount,r.patternAvgSimilarity,r.patternBias,r.patternStrength,r.patternOpposingStrength,r.duration,r.executionOffset,r.expectedWindow,r.agreement,r.status,r.contractId??'',r.profit??'',r.actualWindow??'',r.latencyClass??'',r.entrySpot??'',r.exitSpot??'',r.entryTickTime??'',r.exitTickTime??'',r.shadowOutcome??'',r.shadowEntry??'',r.shadowExit??'']);
+  const headers = ['cohort','observed_at','symbol','signal_epoch','signal_quote','structure_direction','pivot_type','pivot_quote','pivot_epoch','bos_level','timing_class','break_distance_steps','setup_type','regime_200','authority_80','fast_20','slope_200','slope_80','chop_score','volatility','pattern_status','pattern_reason','pattern_matches','pattern_avg_similarity','pattern_bias','pattern_strength','pattern_opposing_strength','duration','execution_offset','expected_window','agreement','status','contract_id','profit','actual_window','latency','entry_spot','exit_spot','entry_tick_time','exit_tick_time','shadow_outcome','shadow_entry','shadow_exit'];
+  const rows = ledger.map(r => [r.cohort,new Date(r.observedAt).toISOString(),r.symbol,r.signalEpoch,r.signalQuote,r.structureDirection,r.pivotType,r.pivotQuote,r.pivotEpoch,r.bosLevel,r.timingClass,r.breakDistanceSteps,r.setupType,r.regime200,r.authority80,r.fast20,r.slope200,r.slope80,r.chopScore,r.volatility,r.patternStatus,r.patternReason,r.patternMatchCount,r.patternAvgSimilarity,r.patternBias,r.patternStrength,r.patternOpposingStrength,r.duration,r.executionOffset,r.expectedWindow,r.agreement,r.status,r.contractId??'',r.profit??'',r.actualWindow??'',r.latencyClass??'',r.entrySpot??'',r.exitSpot??'',r.entryTickTime??'',r.exitTickTime??'',r.shadowOutcome??'',r.shadowEntry??'',r.shadowExit??'']);
   const csv = [headers, ...rows].map(row => row.map(v => `"${String(v ?? '').replaceAll('"','""')}"`).join(',')).join('\n');
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
   const a = document.createElement('a');
   a.href = url;
-  a.download = `master-v7-pattern-structure-${new Date().toISOString().replaceAll(':','-')}.csv`;
+  a.download = `master-v7.1-bos-timing-${new Date().toISOString().replaceAll(':','-')}.csv`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
@@ -857,18 +1015,19 @@ engine.onContract = function onAgreementContract(contract) {
   this.emit();
 };
 
-function installV7UI() {
-  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('Pattern + Structure Sniper v7'));
+function installV71UI() {
+  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('Pattern + Structure Sniper v7.1'));
+
   const hero = document.querySelector('.obsIntro');
   if (hero) {
     const eyebrow = hero.querySelector('.eyebrow');
-    if (eyebrow) eyebrow.textContent = 'STRUCTURE CANDIDATE → PATTERN AUDIT → AGREEMENT → TRADE';
+    if (eyebrow) eyebrow.textContent = 'HL/LH ANCHOR → BOS FIRST BREAK → PATTERN AUDIT → TRADE';
     const h2 = hero.querySelector('h2');
-    if (h2) h2.textContent = 'One decision. Two independent witnesses.';
+    if (h2) h2.textContent = 'Enter the start of the extension, not the end of it.';
     const p = hero.querySelector('p');
-    if (p) p.textContent = 'Structure only decides where and when a setup exists. Pattern Lab independently checks historical relatives over the exact execution-aware Deriv horizon. Demo buys happen only when both agree.';
+    if (p) p.textContent = 'v7.1 separates direction from timing. Structure finds the HL/LH anchor and freezes a BOS level. The signal fires on the first break tick only, blocks stretched chase entries, then Pattern Lab audits the execution-aware horizon before a Demo buy.';
     const badges = hero.querySelectorAll('.obsBadges span');
-    const texts = ['Demo only','200t context','80t authority','20t pullback resume','Pattern active gate','3/5/8/10t adaptive'];
+    const texts = ['Demo only','200t context','80t authority','HL/LH anchor','BOS first-break','Pattern active gate'];
     badges.forEach((el, i) => { if (texts[i]) el.textContent = texts[i]; });
   }
 
@@ -877,11 +1036,11 @@ function installV7UI() {
   const patternCard = patternLens?.closest('.card');
   if (patternCard) {
     const p = patternCard.querySelector('.muted');
-    if (p) p.textContent = 'These pattern relatives now actively audit each structure candidate. Fixed gate: 40+ matches, 88%+ average similarity, 55%+ execution-aware directional edge.';
+    if (p) p.textContent = 'Pattern audits PRIME BOS candidates only. Fixed gate: 40+ matches, 88%+ average similarity, 55%+ execution-aware directional edge.';
   }
 
   const scoreNote = [...document.querySelectorAll('p.muted')].find(p => p.textContent.includes('does not use these pattern scores'));
-  if (scoreNote) scoreNote.textContent = 'v7 uses these execution-aware scores only when a structure candidate exists. Pattern never creates a trade by itself.';
+  if (scoreNote) scoreNote.textContent = 'v7.1 uses execution-aware Pattern scores after a PRIME HL/LH→BOS candidate exists. Pattern never creates a trade by itself.';
 
   const canvasCard = $('masterCanvas')?.closest('.card');
   if (canvasCard && !$('replayBar')) {
@@ -891,6 +1050,10 @@ function installV7UI() {
     bar.innerHTML = '<div><b>Setup replay</b><span id="replayWindowText">LIVE · latest 220 ticks</span></div><div class="actions compact"><button id="replayOlder" type="button">← Older setups</button><button id="replayNewer" type="button">Newer →</button><button id="replayLive" type="button">Live</button></div>';
     canvasCard.insertBefore(bar, $('masterCanvas'));
   }
+  if (canvasCard) {
+    const note = canvasCard.querySelector('p.muted');
+    if (note) note.textContent = 'Anchor marks the latest HL/LH. The blue dashed line is the frozen BOS level. PRIME means the first actual break, before the move is stretched. C marks blocked candidates, A agreement, E Deriv entry, X expiry.';
+  }
 
   const masterSection = [...document.querySelectorAll('.card')].find(card => card.querySelector('#ptPnl'));
   if (masterSection && !$('decisionBoard')) {
@@ -898,58 +1061,63 @@ function installV7UI() {
     board.id = 'decisionBoard';
     board.className = 'decisionBoard';
     board.innerHTML = `
-      <div class="decisionCard"><span>1 · STRUCTURE</span><strong id="dbStructure">WAIT</strong><small>Where + when</small></div>
+      <div class="decisionCard"><span>1 · STRUCTURE + TIMING</span><strong id="dbStructure">WAIT</strong><small>HL/LH → BOS first break</small></div>
       <div class="decisionCard"><span>2 · PATTERN</span><strong id="dbPattern">WAIT</strong><small>Historical execution window</small></div>
-      <div class="decisionCard"><span>3 · AGREEMENT</span><strong id="dbAgreement">NO</strong><small>Both must point same way</small></div>
+      <div class="decisionCard"><span>3 · AGREEMENT</span><strong id="dbAgreement">NO</strong><small>Direction + timing + pattern</small></div>
       <div class="decisionCard action"><span>4 · ACTION</span><strong id="dbAction">WAIT</strong><small>Demo buy only here</small></div>
-      <div id="dbPatternMeta" class="decisionMeta">Pattern gate loading…</div>`;
-    const signal = $('ptSignal');
-    masterSection.insertBefore(board, signal);
+      <div id="dbPatternMeta" class="decisionMeta">Building HL/LH and BOS map…</div>`;
+    masterSection.insertBefore(board, $('ptSignal'));
   }
 
   const masterTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Master Trader v6'));
-  if (masterTitle) masterTitle.textContent = 'Pattern + Structure Sniper v7';
-  if ($('ptStart')) $('ptStart').textContent = 'Start v7 Agreement Trader';
+  if (masterTitle) masterTitle.textContent = 'Pattern + Structure Sniper v7.1 · BOS Timing';
+  if ($('ptStart')) $('ptStart').textContent = 'Start v7.1 Agreement Trader';
   if ($('ptCooldown')) $('ptCooldown').value = '0';
 
   const metrics = [...document.querySelectorAll('.metric span')];
   const replacements = new Map([
-    ['200t regime','200t context'],['80t trend','80t authority'],['Active session','Structure direction'],['20t entry','Structure setup'],['Bought v6','Bought v7'],['BULL W/L','Agreement W/L'],['BEAR W/L','Pattern blocks']
+    ['200t regime','200t context'],
+    ['80t trend','80t authority'],
+    ['Active session','Structure direction'],
+    ['20t entry','Entry timing'],
+    ['Bought v6','Bought v7.1'],
+    ['BULL W/L','Agreement W/L'],
+    ['BEAR W/L','Blocks P/T saved/missed']
   ]);
   for (const span of metrics) if (replacements.has(span.textContent.trim())) span.textContent = replacements.get(span.textContent.trim());
 
   const txTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('transactions'));
-  if (txTitle) txTitle.textContent = 'v7 actual agreement trades';
+  if (txTitle) txTitle.textContent = 'v7.1 actual PRIME agreement trades';
   const ledgerTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Setup Ledger'));
-  if (ledgerTitle) ledgerTitle.textContent = 'v7 Candidate Audit Trail';
+  if (ledgerTitle) ledgerTitle.textContent = 'v7.1 Candidate Audit Trail';
 
   const ledgerTable = $('ptLedgerRows')?.closest('table');
   if (ledgerTable) {
-    ledgerTable.querySelector('thead').innerHTML = '<tr><th>Time</th><th>Structure</th><th>Setup</th><th>Pattern</th><th>Matches</th><th>Similarity</th><th>Duration</th><th>Window</th><th>Decision / result</th><th>Contract</th></tr>';
+    ledgerTable.querySelector('thead').innerHTML = '<tr><th>Time</th><th>Dir</th><th>Anchor</th><th>Timing</th><th>BOS Δ</th><th>Pattern</th><th>Matches</th><th>Similarity</th><th>Duration</th><th>Window</th><th>Decision / result</th><th>Contract</th></tr>';
     ledgerTable.closest('.tableWrap')?.classList.add('auditHistory');
   }
 
   const roadmap = document.querySelector('.observatoryRoadmap');
   if (roadmap) roadmap.innerHTML = `
-    <div><b>1 · Structure candidate</b><span>200 gives context, 80 gives authority, and 20 ticks must show a real pullback/resumption break. No pattern trade exists before this.</span></div>
-    <div><b>2 · Freeze T0</b><span>The candidate tick is frozen before future ticks arrive. That prevents hindsight from changing the setup.</span></div>
-    <div><b>3 · Pattern audit</b><span>Historical relatives score the exact measured execution window. Pattern must have enough matches, similarity and directional edge.</span></div>
-    <div><b>4 · Agreement</b><span>Structure direction and Pattern direction must agree. Pattern chooses the strongest supported 3/5/8/10-tick duration.</span></div>
-    <div><b>5 · Demo execution</b><span>Only agreement reaches Deriv. One-open protection, measured entry offset and settlement telemetry remain active.</span></div>
-    <div><b>6 · Audit blocked setups</b><span>Pattern-blocked structure candidates are shadow-resolved from future public ticks so we can measure whether the gate saved losses or blocked winners.</span></div>`;
+    <div><b>1 · Direction authority</b><span>200 ticks are macro context. 80 ticks are the main direction authority. A strong conflicting 200-tick context can veto a weak 80-tick flip.</span></div>
+    <div><b>2 · HL/LH anchor</b><span>In BULL, wait for a Higher Low. In BEAR, wait for a Lower High. That pivot is the launch pad, not the entry itself.</span></div>
+    <div><b>3 · Freeze BOS</b><span>The micro break level is frozen from ticks that existed before the current move. The breakout cannot move its own goalpost.</span></div>
+    <div><b>4 · PRIME timing</b><span>Fire on the first tick that breaks BOS. If that first break is already more than ${MAX_BREAK_EXTENSION_STEPS.toFixed(2)} average tick beyond the level, label CHASE and block it.</span></div>
+    <div><b>5 · Pattern audit</b><span>At that frozen T0, historical relatives must support the same direction with 40+ matches, 88%+ similarity and 55%+ execution-aware edge.</span></div>
+    <div><b>6 · Demo execution + audit</b><span>Only PRIME + Pattern agreement reaches Deriv. Pattern blocks and chase blocks are shadow-resolved so we can measure what each filter saved or missed.</span></div>`;
 
   const style = document.createElement('style');
-  style.id = 'v7Style';
+  style.id = 'v71Style';
   style.textContent = `
     .decisionBoard{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:16px 0;min-height:126px}
     .decisionCard{background:#0f1115;border:1px solid #2a2e37;border-radius:14px;padding:14px;min-width:0}
     .decisionCard span,.decisionCard small{display:block;color:#9299a8;font-size:10px}.decisionCard strong{display:block;margin:7px 0;font-size:16px;line-height:1.25;overflow-wrap:anywhere}.decisionCard.action{border-color:#4a5260}
     .decisionMeta{grid-column:1/-1;color:#9299a8;font-size:11px;padding:0 4px;min-height:16px}
     .replayBar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:4px 0 10px;min-height:52px}.replayBar>div:first-child{display:flex;flex-direction:column;gap:3px}.replayBar span{color:#9299a8;font-size:11px}
-    .auditHistory{max-height:480px;min-height:280px;overflow:auto;scrollbar-gutter:stable}.logs{height:260px!important;max-height:260px!important}.observatoryCanvasCard{min-height:520px}
-    #masterCanvas{height:410px}.metricRow{align-items:stretch}.metric{min-height:68px}
-    @media(max-width:900px){.decisionBoard{grid-template-columns:1fr 1fr}.replayBar{align-items:flex-start;flex-direction:column}.observatoryCanvasCard{min-height:500px}}
-    @media(max-width:560px){.decisionBoard{grid-template-columns:1fr}.decisionMeta{grid-column:1}.observatoryCanvasCard{min-height:470px}#masterCanvas{height:360px}}
+    .auditHistory{height:420px;max-height:420px;overflow:auto;scrollbar-gutter:stable}.logs{height:250px!important;max-height:250px!important}.observatoryCanvasCard{min-height:540px}
+    #masterCanvas{height:430px}.metricRow{align-items:stretch}.metric{min-height:68px}
+    @media(max-width:900px){.decisionBoard{grid-template-columns:1fr 1fr}.replayBar{align-items:flex-start;flex-direction:column}.observatoryCanvasCard{min-height:510px}}
+    @media(max-width:560px){.decisionBoard{grid-template-columns:1fr}.decisionMeta{grid-column:1}.observatoryCanvasCard{min-height:480px}#masterCanvas{height:370px}}
   `;
   document.head.appendChild(style);
 
@@ -1007,9 +1175,9 @@ $('ptStart').onclick = () => {
   try {
     auth();
     traderConfig();
-    if (boughtCount() >= +($('ptMaxTrades').value || 100)) throw new Error('v7 cohort cap reached.');
+    if (boughtCount() >= +($('ptMaxTrades').value || 100)) throw new Error('v7.1 cohort cap reached.');
     engine.start();
-    engine.log('info', 'v7 armed: structure candidate → execution-aware Pattern audit → agreement-only Demo buy.');
+    engine.log('info', 'v7.1 armed: HL/LH anchor → frozen BOS → PRIME first break → Pattern audit → agreement-only Demo buy.');
   } catch (error) {
     showError(error.message);
   }
@@ -1028,7 +1196,7 @@ $('ptReset').onclick = () => {
 };
 
 $('ptClearLedger').onclick = () => {
-  if (confirm('Clear the fresh v7 Pattern + Structure cohort?')) {
+  if (confirm('Clear the fresh v7.1 BOS-timing cohort?')) {
     ledger = [];
     localStorage.removeItem(LEDGER_KEY);
     lastCandidateKey = '';
@@ -1070,16 +1238,17 @@ engine.subscribe(state => {
     const meta = trade.patternMeta || {};
     const expected = meta.expectedWindow || '—';
     const row = ledger.find(r => Number(r.contractId) === Number(trade.contractId));
-    return `<tr><td>#${trade.contractId}</td><td>${esc(meta.structureDirection || '—')}</td><td>${trade.direction}</td><td>${esc(`${meta.setupType || '—'} + PATTERN ${Number.isFinite(+meta.patternStrength) ? (+meta.patternStrength).toFixed(1) + '%' : '—'}`)}</td><td><span class="result ${trade.status}">${trade.status}</span></td><td>${trade.duration}t</td><td>${expected}</td><td>${row?.actualWindow || '—'}</td><td>${row?.latencyClass || '—'}</td><td class="${(trade.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${trade.profit === undefined ? '—' : `${trade.profit >= 0 ? '+' : ''}${Number(trade.profit).toFixed(2)}`}</td><td>${trade.sendToAckMs === undefined ? '—' : Number(trade.sendToAckMs).toFixed(0) + 'ms'}</td><td>${trade.entrySpot ?? '—'} → ${trade.exitSpot ?? '—'}</td></tr>`;
-  }).join('') : '<tr><td colspan="12" class="empty">No v7 agreement trades yet.</td></tr>';
+    const entryType = `${meta.pivotType || '—'}→BOS ${meta.timingClass || '—'} Δ${Number.isFinite(+meta.breakDistanceSteps) ? (+meta.breakDistanceSteps).toFixed(2) + 'x' : '—'} + PATTERN ${Number.isFinite(+meta.patternStrength) ? (+meta.patternStrength).toFixed(1) + '%' : '—'}`;
+    return `<tr><td>#${trade.contractId}</td><td>${esc(meta.structureDirection || '—')}</td><td>${trade.direction}</td><td>${esc(entryType)}</td><td><span class="result ${trade.status}">${trade.status}</span></td><td>${trade.duration}t</td><td>${expected}</td><td>${row?.actualWindow || '—'}</td><td>${row?.latencyClass || '—'}</td><td class="${(trade.profit ?? 0) >= 0 ? 'positive' : 'negative'}">${trade.profit === undefined ? '—' : `${trade.profit >= 0 ? '+' : ''}${Number(trade.profit).toFixed(2)}`}</td><td>${trade.sendToAckMs === undefined ? '—' : Number(trade.sendToAckMs).toFixed(0) + 'ms'}</td><td>${trade.entrySpot ?? '—'} → ${trade.exitSpot ?? '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="12" class="empty">No v7.1 PRIME agreement trades yet.</td></tr>';
 
-  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 60).map(log => `<div class="log ${log.level}"><time>${new Date(log.at).toLocaleTimeString()}</time><span>${esc(log.message === 'Engine armed. Waiting for fresh BOS.' ? 'v7 agreement engine armed.' : log.message)}</span></div>`).join('');
+  if (state.logs?.[0]) $('ptLogs').innerHTML = state.logs.slice(0, 60).map(log => `<div class="log ${log.level}"><time>${new Date(log.at).toLocaleTimeString()}</time><span>${esc(log.message === 'Engine armed. Waiting for fresh BOS.' ? 'v7.1 BOS-timing engine armed.' : log.message)}</span></div>`).join('');
   renderLedger();
   draw();
 });
 
 window.addEventListener('DOMContentLoaded', () => {
-  installV7UI();
+  installV71UI();
   $('ptAppId').value = localStorage.getItem('sani.deriv.appId') || '';
   $('ptToken').value = sessionStorage.getItem('sani.deriv.token') || '';
   renderLedger();
