@@ -2,251 +2,233 @@ const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[c]));
 const fmt = (v, n = 1) => Number.isFinite(+v) ? Number(v).toFixed(n) : '—';
 const money = v => `${Number(v || 0) >= 0 ? '+' : ''}$${Number(v || 0).toFixed(2)}`;
-
-let mode = 'LIVE';
+let latest = { analysis:null, signals:[], ticks:[], engine:null, batchSize:2, maxConcurrent:6 };
 let replayOffset = 0;
-let latest = { analysis: null, setups: [], ticks: [], engine: null };
-let replayListener = null;
+let replay = false;
 
 function installStyles() {
-  if ($('v73Styles')) return;
+  if ($('v8Styles')) return;
   const style = document.createElement('style');
-  style.id = 'v73Styles';
+  style.id = 'v8Styles';
   style.textContent = `
-    html{overflow-anchor:none}.v73ModeBar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0 14px}.v73Tabs{display:flex;gap:6px}.v73Tabs button.active{border-color:#f5f7fa;background:#f5f7fa;color:#0b0c0f}.v73ReplayTools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.v73ReplayTools span{font-size:11px;color:#9299a8}.v73Decision{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:12px 0}.v73Gate{border:1px solid #2b3039;border-radius:12px;background:#0f1115;padding:12px;min-height:86px}.v73Gate span,.v73Gate small{display:block;color:#9299a8;font-size:10px}.v73Gate strong{display:block;margin:7px 0;font-size:14px;overflow-wrap:anywhere}.v73Gate.pass{border-color:rgba(103,217,154,.45)}.v73Gate.block{border-color:rgba(255,116,116,.35)}.v73Why{border:1px solid #343a45;border-radius:12px;padding:12px 14px;background:#11141a;margin:8px 0 12px}.v73Why b{display:block;font-size:11px;margin-bottom:4px}.v73Why span{font-size:12px;color:#c6cbd4}.v73SetupCard{border:1px solid #2b3039;border-radius:14px;padding:14px;margin:12px 0;background:#0e1014}.v73SetupCard .head{display:flex;justify-content:space-between;align-items:center;gap:10px}.v73SetupCard .head strong{font-size:15px}.v73SetupGrid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-top:12px}.v73SetupGrid div{background:#12151b;border-radius:9px;padding:9px}.v73SetupGrid span{display:block;color:#9299a8;font-size:9px}.v73SetupGrid b{display:block;margin-top:4px;font-size:12px}.v73RichMetrics{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px;margin:10px 0 14px}.v73RichMetrics div{background:#101319;border:1px solid #252a33;border-radius:10px;padding:10px}.v73RichMetrics span{display:block;color:#9299a8;font-size:9px}.v73RichMetrics strong{display:block;margin-top:4px;font-size:13px}.v73State{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.auditHistory{height:430px;max-height:430px;overflow:auto;scrollbar-gutter:stable}.logs{height:240px!important;max-height:240px!important}.observatoryCanvasCard{min-height:520px}#masterCanvas{height:410px}.v73Legend{display:flex;gap:14px;flex-wrap:wrap;color:#9299a8;font-size:10px;margin-top:8px}.v73Legend b{color:#e5e8ee}.v73Legacy{opacity:.45}.v73ModeReplay .v73LiveOnly{opacity:.55}.v73ModeLive .v73ReplayOnly{display:none}
-    @media(max-width:1100px){.v73Decision{grid-template-columns:repeat(3,1fr)}.v73RichMetrics{grid-template-columns:repeat(4,1fr)}.v73SetupGrid{grid-template-columns:repeat(3,1fr)}}
-    @media(max-width:650px){.v73Decision{grid-template-columns:1fr 1fr}.v73RichMetrics{grid-template-columns:1fr 1fr}.v73SetupGrid{grid-template-columns:1fr 1fr}.v73ModeBar{align-items:flex-start;flex-direction:column}}
+    html{overflow-anchor:none}.observatoryShell{max-width:1500px}.v8HeroNote{font-size:12px;color:#9ba2ae}.v8Strip{display:grid;grid-template-columns:1.1fr 1fr 1fr 1fr 1fr 1fr;gap:8px;margin:12px 0}.v8Cell{background:#0d1015;border:1px solid #252b35;border-radius:12px;padding:11px 12px;min-height:70px}.v8Cell span{display:block;color:#858e9c;font-size:9px;text-transform:uppercase;letter-spacing:.08em}.v8Cell strong{display:block;margin-top:7px;font-size:14px;line-height:1.2;overflow-wrap:anywhere}.v8Cell.hot{border-color:rgba(103,217,154,.55)}.v8Cell.stop{border-color:rgba(255,116,116,.45)}.v8Action{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#10141a;border:1px solid #303744;border-radius:14px;padding:14px;margin:10px 0 14px}.v8Action strong{font-size:20px}.v8Action p{margin:4px 0 0;color:#9ba2ae;font-size:11px}.v8Stats{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:7px;margin:10px 0}.v8Stat{background:#0d1015;border:1px solid #222832;border-radius:10px;padding:9px}.v8Stat span{display:block;color:#828b99;font-size:9px}.v8Stat b{display:block;margin-top:5px;font-size:12px}.v8Replay{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:7px 0 10px}.v8Replay .tools{display:flex;gap:6px;align-items:center}.v8Replay small{color:#8d96a5}.v8Legend{display:flex;gap:12px;flex-wrap:wrap;color:#8d96a5;font-size:10px;margin-top:8px}.v8Legend b{color:#e9edf3}.v8Audit{height:390px;max-height:390px;overflow:auto;scrollbar-gutter:stable}.logs{height:220px!important;max-height:220px!important}.v8Collapsed>*:not(.sectionTitle){display:none!important}.v8Collapsible>.sectionTitle{cursor:pointer;user-select:none}.v8Collapsible>.sectionTitle:after{content:'▾';margin-left:auto;color:#7f8998}.v8Collapsed>.sectionTitle:after{content:'▸'}.v8Subtle{opacity:.75}.observatoryCanvasCard{min-height:500px}#masterCanvas{height:400px}.v8HideOld{display:none!important}
+    @media(max-width:1050px){.v8Strip{grid-template-columns:repeat(3,1fr)}.v8Stats{grid-template-columns:repeat(4,1fr)}}
+    @media(max-width:650px){.v8Strip{grid-template-columns:1fr 1fr}.v8Stats{grid-template-columns:1fr 1fr}.v8Action{align-items:flex-start;flex-direction:column}.v8Replay{align-items:flex-start;flex-direction:column}}
   `;
   document.head.appendChild(style);
 }
 
+function makeCollapsible(card, collapsed = true) {
+  if (!card || card.dataset.v8Collapse === '1') return;
+  card.dataset.v8Collapse = '1';
+  card.classList.add('v8Collapsible');
+  if (collapsed) card.classList.add('v8Collapsed');
+  card.querySelector(':scope > .sectionTitle')?.addEventListener('click', () => card.classList.toggle('v8Collapsed'));
+}
+
 function install() {
   installStyles();
-  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('Pattern + Structure Sniper v7.3'));
+  document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('SANI Pattern Campaign v8'));
   const intro = document.querySelector('.obsIntro');
   if (intro) {
-    intro.querySelector('.eyebrow').textContent = '200 + 80 → HL/LH → PRIME BOS → PATTERN 5T → EV → TRADE';
-    intro.querySelector('h2').textContent = 'One setup, one state machine, one auditable decision.';
-    intro.querySelector('p').textContent = 'v7.3 moves regime, structure and Pattern qualification into a dedicated tick-driven worker. The page only renders state and executes approved Demo orders. Every setup lifecycle is persisted from ARMED through shadow/live resolution.';
+    intro.querySelector('.eyebrow').textContent = 'PATTERN FIRST → STRUCTURE LOCATION → NEXT EXECUTABLE TICK → REPEAT';
+    intro.querySelector('h2').textContent = 'Recognize early. Decide fast. Milk the recurring edge.';
+    intro.querySelector('p').textContent = 'v8 removes 200/80/BOS as hard permission gates. Every fresh tick is matched against stored historical shapes. HH/HL/LH/LL describe where the pattern lives; they do not force us to wait. A qualified pattern can fire again on the next fresh recurrence.';
     const badges = intro.querySelectorAll('.obsBadges span');
-    ['Demo only','200+80 strict','PRIME BOS only','top-10 pattern vote','fixed 5T','worker engine'].forEach((t,i)=>{ if (badges[i]) badges[i].textContent=t; });
-  }
-
-  const patternLensTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Pattern lens'));
-  if (patternLensTitle) {
-    patternLensTitle.textContent = 'Pattern Observatory · research view';
-    const note = patternLensTitle.closest('.card')?.querySelector('p.muted');
-    if (note) note.textContent = 'This visible research lens is independent. v7.3 trading Pattern logic runs inside the worker with frozen 20-tick shape, 40+ relatives, 88%+ average similarity, 58%+ 5T edge, 7/10 top-match agreement and positive EV.';
-  }
-
-  const masterCard = $('masterCanvas')?.closest('.card');
-  if (masterCard && !$('v73ModeBar')) {
-    const bar = document.createElement('div');
-    bar.id = 'v73ModeBar';
-    bar.className = 'v73ModeBar';
-    bar.innerHTML = `<div class="v73Tabs"><button id="v73LiveTab" class="active" type="button">LIVE</button><button id="v73ReplayTab" type="button">REPLAY</button></div><div class="v73ReplayTools replayOnly"><span id="v73ReplayLabel">LIVE · latest 220 ticks</span><button id="v73Older" type="button">← Older</button><button id="v73Newer" type="button">Newer →</button><button id="v73Now" type="button">Back to live</button></div>`;
-    masterCard.insertBefore(bar, $('masterCanvas'));
-    const legend = document.createElement('div');
-    legend.className = 'v73Legend';
-    legend.innerHTML = '<span><b>HL/LH</b> anchor</span><span><b>BOS</b> frozen break level</span><span><b>P</b> PRIME candidate</span><span><b>C</b> CHASE blocked</span><span><b>A</b> approved</span><span><b>E</b> Deriv entry</span><span><b>X</b> expiry</span><span><b>OLD</b> previous cohort</span>';
-    masterCard.appendChild(legend);
+    ['Demo only','pattern-first','1T contract','execution-aware','repeated entries','2-contract pulse'].forEach((t,i)=>{ if (badges[i]) badges[i].textContent=t; });
   }
 
   const traderCard = [...document.querySelectorAll('.card')].find(card => card.querySelector('#ptPnl'));
-  if (traderCard && !$('v73Dashboard')) {
+  if (traderCard && !$('v8Dashboard')) {
     const dash = document.createElement('div');
-    dash.id = 'v73Dashboard';
+    dash.id = 'v8Dashboard';
     dash.innerHTML = `
-      <div class="v73Decision">
-        <div id="v73GateContext" class="v73Gate"><span>1 · CONTEXT</span><strong id="v73Context">WAIT</strong><small>200 + 80 must agree</small></div>
-        <div id="v73GateStructure" class="v73Gate"><span>2 · STRUCTURE</span><strong id="v73Structure">WAIT</strong><small>HL/LH → PRIME BOS</small></div>
-        <div id="v73GatePattern" class="v73Gate"><span>3 · PATTERN</span><strong id="v73Pattern">WAIT</strong><small>40 / 88 / 58 / top10</small></div>
-        <div id="v73GateEV" class="v73Gate"><span>4 · EV</span><strong id="v73EV">WAIT</strong><small>positive expectancy</small></div>
-        <div id="v73GateAction" class="v73Gate"><span>5 · ACTION</span><strong id="v73Action">WAIT</strong><small>fixed 5T Demo only</small></div>
+      <div class="v8Strip">
+        <div id="v8PatternCell" class="v8Cell"><span>Pattern family</span><strong id="v8Family">SEARCHING</strong></div>
+        <div class="v8Cell"><span>Structure location</span><strong id="v8Structure">—</strong></div>
+        <div class="v8Cell"><span>Historical edge</span><strong id="v8Edge">—</strong></div>
+        <div class="v8Cell"><span>Nearest vote</span><strong id="v8Top10">—</strong></div>
+        <div class="v8Cell"><span>Campaign</span><strong id="v8Campaign">NONE</strong></div>
+        <div class="v8Cell"><span>Decision speed</span><strong id="v8DecisionMs">— ms</strong></div>
       </div>
-      <div class="v73Why"><b>WHY NOT?</b><span id="v73WhyText">Waiting for worker analysis.</span></div>
-      <div class="v73SetupCard">
-        <div class="head"><strong>Active Setup Card</strong><span id="v73State" class="v73State">WARMING</span></div>
-        <div class="v73SetupGrid">
-          <div><span>Direction</span><b id="v73SetupDir">—</b></div><div><span>Anchor</span><b id="v73Anchor">—</b></div><div><span>BOS</span><b id="v73Bos">—</b></div><div><span>Timing</span><b id="v73Timing">—</b></div><div><span>Pattern</span><b id="v73PatternDetail">—</b></div><div><span>Window</span><b id="v73Window">T+1→T+6</b></div>
-        </div>
-      </div>
-      <div class="v73RichMetrics">
-        <div><span>Setups opened</span><strong id="v73SetupN">0</strong></div><div><span>PRIME BOS</span><strong id="v73PrimeN">0</strong></div><div><span>Pattern passed</span><strong id="v73PatternPass">0</strong></div><div><span>Top10 passed</span><strong id="v73Top10Pass">0</strong></div><div><span>Actual WR</span><strong id="v73ActualWR">—</strong></div><div><span>Shadow WR</span><strong id="v73ShadowWR">—</strong></div><div><span>Blocks saved/missed</span><strong id="v73SavedMissed">0 / 0</strong></div><div><span>Actual P/L</span><strong id="v73ActualPnl">+$0.00</strong></div>
+      <div id="v8Action" class="v8Action"><div><strong id="v8ActionText">WATCH</strong><p id="v8Why">Building the pattern library.</p></div><div><b id="v8Pulse">0 contracts</b><p>fresh qualifying pulse</p></div></div>
+      <div class="v8Stats">
+        <div class="v8Stat"><span>Qualified pulses</span><b id="v8Qualified">0</b></div>
+        <div class="v8Stat"><span>CALL pulses</span><b id="v8Calls">0</b></div>
+        <div class="v8Stat"><span>PUT pulses</span><b id="v8Puts">0</b></div>
+        <div class="v8Stat"><span>Actual contracts</span><b id="v8Contracts">0</b></div>
+        <div class="v8Stat"><span>Actual W/L</span><b id="v8WL">0 / 0</b></div>
+        <div class="v8Stat"><span>Actual P/L</span><b id="v8Pnl">+$0.00</b></div>
+        <div class="v8Stat"><span>Shadow W/L</span><b id="v8Shadow">0 / 0</b></div>
+        <div class="v8Stat"><span>Open / max</span><b id="v8Exposure">0 / 6</b></div>
       </div>`;
-    const signal = $('ptSignal');
-    traderCard.insertBefore(dash, signal);
+    traderCard.insertBefore(dash, $('ptSignal'));
   }
 
-  const title = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Master Trader'));
-  if (title) title.textContent = 'Pattern + Structure Sniper v7.3 · Worker Engine';
-  if ($('ptStart')) $('ptStart').textContent = 'Start v7.3 Sniper';
+  const masterCard = $('masterCanvas')?.closest('.card');
+  if (masterCard && !$('v8Replay')) {
+    const bar = document.createElement('div');
+    bar.id = 'v8Replay'; bar.className = 'v8Replay';
+    bar.innerHTML = '<div><b>Pattern campaign chart</b><br><small id="v8ReplayLabel">LIVE · latest 220 ticks</small></div><div class="tools"><button id="v8Older" type="button">← Older</button><button id="v8Newer" type="button">Newer →</button><button id="v8Live" type="button">Live</button></div>';
+    masterCard.insertBefore(bar, $('masterCanvas'));
+    const legend = document.createElement('div'); legend.className = 'v8Legend'; legend.innerHTML = '<span><b>LL/HL/HH/LH</b> structure address</span><span><b>C×2</b> CALL pulse</span><span><b>P×2</b> PUT pulse</span><span><b>E</b> actual entry</span><span><b>X</b> expiry</span>';
+    masterCard.appendChild(legend);
+  }
+
+  $('v8Older')?.addEventListener('click', () => { replay = true; replayOffset += 180; renderChart(); });
+  $('v8Newer')?.addEventListener('click', () => { replayOffset = Math.max(0, replayOffset - 180); if (!replayOffset) replay=false; renderChart(); });
+  $('v8Live')?.addEventListener('click', () => { replay=false; replayOffset=0; renderChart(); });
+
+  const title = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Master Trader') || x.textContent.includes('Pattern + Structure'));
+  if (title) title.textContent = 'Pattern Campaign v8 · Demo Execution';
+  if ($('ptStart')) $('ptStart').textContent = 'Start v8 Campaign';
+
+  const cooldownLabel = $('ptCooldown')?.closest('label');
+  if (cooldownLabel) cooldownLabel.childNodes[0].textContent = 'Batch contracts / pulse';
+  if ($('ptCooldown')) { $('ptCooldown').min='1'; $('ptCooldown').max='3'; $('ptCooldown').step='1'; $('ptCooldown').value='2'; }
+  const maxLabel = $('ptMaxTrades')?.closest('label'); if (maxLabel) maxLabel.childNodes[0].textContent = 'Persistent max contracts';
+
+  const metricLabels = [...document.querySelectorAll('.metric span')];
+  const names = ['Pattern context','Pattern location','Campaign direction','Pattern state','Structure feature','Execution mode','Measured entry','Bought contracts','Cohort signals','Actual W/L','Actual P/L','CALL pulses','PUT pulses','Qualified pulses','Observed / blocked'];
+  metricLabels.slice(4, 19).forEach((el,i)=>{ if(names[i]) el.textContent=names[i]; });
+
   const tx = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('transactions'));
-  if (tx) tx.textContent = 'v7.3 actual PRIME agreement trades · fixed 5T';
-  const ledgerTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Setup Ledger') || x.textContent.includes('Candidate Audit'));
-  if (ledgerTitle) ledgerTitle.textContent = 'v7.3 Full Setup Lifecycle Audit';
+  if (tx) tx.textContent = 'v8 Actual 1-Tick Contracts';
+  const ledgerTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Setup Ledger') || x.textContent.includes('Lifecycle') || x.textContent.includes('Candidate Audit'));
+  if (ledgerTitle) ledgerTitle.textContent = 'v8 Pattern Pulse Audit';
   const ledgerTable = $('ptLedgerRows')?.closest('table');
   if (ledgerTable) {
-    ledgerTable.querySelector('thead').innerHTML = '<tr><th>Time</th><th>State</th><th>Dir</th><th>Anchor</th><th>BOS</th><th>Timing</th><th>Pattern</th><th>Top10</th><th>EV</th><th>Actual</th><th>Shadow</th><th>Why</th></tr>';
-    ledgerTable.closest('.tableWrap')?.classList.add('auditHistory');
+    ledgerTable.querySelector('thead').innerHTML = '<tr><th>Time</th><th>Action</th><th>Family</th><th>Location</th><th>Edge</th><th>Top10</th><th>80</th><th>200</th><th>Speed</th><th>Actual</th><th>Shadow</th><th>Why</th></tr>';
+    ledgerTable.closest('.tableWrap')?.classList.add('v8Audit');
+  }
+  if ($('ptExportLedger')) $('ptExportLedger').textContent = 'Export v8 CSV';
+  if ($('ptClearLedger')) $('ptClearLedger').textContent = 'Clear v8 cohort';
+
+  const patternTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Pattern lens') || x.textContent.includes('Pattern Observatory'));
+  if (patternTitle) patternTitle.textContent = 'Visible Pattern Research';
+
+  // Keep the trading cockpit open. Research/detail cards start folded and stay easy to reveal.
+  const cards = [...document.querySelectorAll('.card')];
+  for (const card of cards) {
+    if (card === traderCard || card === masterCard) continue;
+    if (card.querySelector('#ptPnl')) continue;
+    makeCollapsible(card, true);
   }
 
-  $('v73LiveTab')?.addEventListener('click', () => setMode('LIVE'));
-  $('v73ReplayTab')?.addEventListener('click', () => setMode('REPLAY'));
-  $('v73Older')?.addEventListener('click', () => { replayOffset += 180; notifyReplay(); });
-  $('v73Newer')?.addEventListener('click', () => { replayOffset = Math.max(0, replayOffset - 180); notifyReplay(); });
-  $('v73Now')?.addEventListener('click', () => { replayOffset = 0; setMode('LIVE'); });
+  const roadmap = document.querySelector('.observatoryRoadmap');
+  if (roadmap) roadmap.innerHTML = `
+    <div><b>1 · Recognize</b><span>Every fresh tick is compared with historical 8/12/20-tick shapes. No 200/80 permission gate.</span></div>
+    <div><b>2 · Locate</b><span>HH, HL, LH, LL, second HH/LL and high/low zone are attached as the pattern address.</span></div>
+    <div><b>3 · Calculate</b><span>Historical relatives are scored on the exact measured next executable 1-tick window.</span></div>
+    <div><b>4 · Enter</b><span>If the family clears the live evidence floor, execute immediately. Default pulse is two Demo contracts.</span></div>
+    <div><b>5 · Repeat</b><span>A new qualifying tick can fire again in the same direction. We do not wait for a fresh trend or BOS.</span></div>
+    <div><b>6 · Flip</b><span>When a strong opposite pattern family appears, the campaign direction flips with the new evidence.</span></div>`;
 }
 
-function setMode(next) {
-  mode = next === 'REPLAY' ? 'REPLAY' : 'LIVE';
-  if (mode === 'LIVE') replayOffset = 0;
-  document.body.classList.toggle('v73ModeReplay', mode === 'REPLAY');
-  document.body.classList.toggle('v73ModeLive', mode === 'LIVE');
-  $('v73LiveTab')?.classList.toggle('active', mode === 'LIVE');
-  $('v73ReplayTab')?.classList.toggle('active', mode === 'REPLAY');
-  notifyReplay();
-}
-function notifyReplay() { replayListener?.({ mode, replayOffset }); renderChart(latest.ticks, latest.setups, latest.analysis, latest.engine); }
-function onReplay(fn) { replayListener = fn; }
+function set(id, value) { if ($(id)) $(id).textContent = value; }
 
-function why(analysis) {
-  if (!analysis) return 'Waiting for worker analysis.';
-  if (analysis.state === 'WARMING') return analysis.reason || 'Building 200-tick context.';
-  if (analysis.regime200 === 'NEUTRAL') return '200t context is NEUTRAL.';
-  if (analysis.authority80 === 'NEUTRAL') return '80t authority is NEUTRAL.';
-  if (analysis.regime200 !== analysis.authority80) return `200t ${analysis.regime200} conflicts with 80t ${analysis.authority80}.`;
-  if (analysis.chop?.blocked) return `CHOP veto ${(analysis.chop.score * 100).toFixed(0)}%.`;
-  if (analysis.volatility && analysis.volatility !== 'HEALTHY') return `Volatility is ${analysis.volatility}.`;
-  return analysis.reason || 'Waiting for a fresh PRIME setup.';
-}
-function passClass(el, pass, block = false) { if (!el) return; el.classList.toggle('pass', Boolean(pass)); el.classList.toggle('block', Boolean(block)); }
-
-function renderDecision(analysis, setups) {
-  const fresh = setups.filter(x => !x.legacy);
-  const current = fresh.find(x => !['WON','LOST','FLAT'].includes(x.actual?.outcome) && !['WON','LOST','FLAT'].includes(x.shadow?.outcome)) || fresh[0];
-  const aligned = analysis && analysis.regime200 !== 'NEUTRAL' && analysis.regime200 === analysis.authority80;
-  $('v73Context').textContent = aligned ? `${analysis.direction} LOCKED` : 'WAIT';
-  passClass($('v73GateContext'), aligned, Boolean(analysis && !aligned));
-  const timing = current?.timingClass || (analysis?.activeSetup ? 'ARMED' : 'WAIT');
-  const prime = timing === 'PRIME';
-  $('v73Structure').textContent = current?.pivotType ? `${current.pivotType}→BOS · ${timing}` : analysis?.activeSetup ? `${analysis.activeSetup.pivotType} ARMED` : 'WAIT';
-  passClass($('v73GateStructure'), prime, timing === 'CHASE');
-  const pat = current?.pattern;
-  $('v73Pattern').textContent = pat ? `${pat.status} · ${fmt(pat.expectedEdge)}%` : 'WAIT';
-  passClass($('v73GatePattern'), Boolean(pat?.ok), Boolean(pat && !pat.ok));
-  $('v73EV').textContent = pat && Number.isFinite(+pat.ev) ? `${pat.ev >= 0 ? '+' : ''}${(pat.ev * 100).toFixed(1)}%` : 'WAIT';
-  passClass($('v73GateEV'), Boolean(pat?.gates?.ev), Boolean(pat && !pat?.gates?.ev));
-  const approved = current?.decision?.approved || current?.state === 'APPROVED';
-  $('v73Action').textContent = approved ? `${current.direction === 'BULL' ? 'CALL' : 'PUT'} · 5T` : 'WAIT';
-  passClass($('v73GateAction'), approved, Boolean(current && current.state?.includes('BLOCK')));
-  $('v73WhyText').textContent = current?.decision?.why || current?.lastReason || why(analysis);
-  $('v73State').textContent = current?.state || analysis?.state || 'WARMING';
-  const active = analysis?.activeSetup || current;
-  $('v73SetupDir').textContent = active?.direction || '—';
-  $('v73Anchor').textContent = active?.pivotType ? `${active.pivotType} ${fmt(active.pivotQuote,2)}` : '—';
-  $('v73Bos').textContent = Number.isFinite(+active?.bosLevel) ? fmt(active.bosLevel,2) : '—';
-  $('v73Timing').textContent = current?.timingClass || (analysis?.activeSetup ? 'ARMED' : '—');
-  $('v73PatternDetail').textContent = pat ? `${fmt(pat.expectedEdge)}% · ${pat.top10Agree || 0}/${pat.top10Total || 10}` : '—';
-  $('v73Window').textContent = `T+${pat?.executionOffset || 1}→T+${(pat?.executionOffset || 1) + 5}`;
-  if ($('ptSignal')) $('ptSignal').innerHTML = approved
-    ? `<b class="${current.direction === 'BULL' ? 'positive' : 'negative'}">FIRE · ${current.direction === 'BULL' ? 'CALL' : 'PUT'} 5T</b><span>200+80 aligned · ${esc(current.pivotType)}→BOS PRIME · Pattern ${fmt(pat?.expectedEdge)}% · top10 ${pat?.top10Agree || 0}/10 · EV ${(Number(pat?.ev || 0)*100).toFixed(1)}%</span>`
-    : `<b>WAIT · ${esc(analysis?.state || current?.state || 'SEARCHING')}</b><span>${esc($('v73WhyText').textContent)}</span>`;
+function summarize(signals) {
+  const fresh = signals.filter(x => !x.legacy);
+  const approved = fresh.filter(x => x.approved);
+  const actual = fresh.flatMap(x => x.actualTrades || []);
+  const settled = actual.filter(t => ['WON','LOST'].includes(t.outcome));
+  const wins = settled.filter(t => t.outcome === 'WON').length, losses = settled.filter(t => t.outcome === 'LOST').length;
+  const pnl = settled.reduce((s,t)=>s+(+t.profit||0),0);
+  const shadow = fresh.filter(x => ['WON','LOST'].includes(x.shadow?.outcome));
+  return { fresh, approved, actual, wins, losses, pnl, shadowWins:shadow.filter(x=>x.shadow.outcome==='WON').length, shadowLosses:shadow.filter(x=>x.shadow.outcome==='LOST').length };
 }
 
-function metrics(setups) {
-  setups = setups.filter(s => !s.legacy);
-  const actual = setups.filter(s => ['WON','LOST'].includes(s.actual?.outcome));
-  const shadow = setups.filter(s => ['WON','LOST'].includes(s.shadow?.outcome));
-  const blocked = setups.filter(s => s.decision && !s.decision.approved && ['WON','LOST'].includes(s.shadow?.outcome));
-  const aw = actual.filter(s => s.actual.outcome === 'WON').length;
-  const sw = shadow.filter(s => s.shadow.outcome === 'WON').length;
-  const saved = blocked.filter(s => s.shadow.outcome === 'LOST').length;
-  const missed = blocked.filter(s => s.shadow.outcome === 'WON').length;
-  const pnl = actual.reduce((sum,s)=>sum+Number(s.actual?.profit||0),0);
-  return { actual, shadow, aw, sw, saved, missed, pnl };
-}
-function renderMetrics(setups) {
-  const m = metrics(setups);
-  const fresh = setups.filter(s => !s.legacy);
-  $('v73SetupN').textContent = String(fresh.length);
-  $('v73PrimeN').textContent = String(fresh.filter(s => s.timingClass === 'PRIME').length);
-  $('v73PatternPass').textContent = String(fresh.filter(s => s.pattern?.ok).length);
-  $('v73Top10Pass').textContent = String(fresh.filter(s => s.pattern?.gates?.top10).length);
-  $('v73ActualWR').textContent = m.actual.length ? `${(m.aw/m.actual.length*100).toFixed(1)}% (${m.aw}/${m.actual.length})` : '—';
-  $('v73ShadowWR').textContent = m.shadow.length ? `${(m.sw/m.shadow.length*100).toFixed(1)}% (${m.sw}/${m.shadow.length})` : '—';
-  $('v73SavedMissed').textContent = `${m.saved} / ${m.missed}`;
-  $('v73ActualPnl').textContent = money(m.pnl);
+function renderDashboard() {
+  const { analysis, signals, engine, batchSize, maxConcurrent } = latest;
+  const s = summarize(signals);
+  const p = analysis?.pattern;
+  const st = analysis?.structure;
+  set('v8Family', p?.familyId || 'SEARCHING');
+  set('v8Structure', st ? `${st.tag} · ${st.phase}` : '—');
+  set('v8Edge', p ? `${fmt(p.edge)}% · ${p.matchCount||0} matches` : '—');
+  set('v8Top10', p ? `${p.top10Agree||0}/${p.top10Total||0}` : '—');
+  set('v8Campaign', analysis?.campaign?.direction && analysis.campaign.direction !== 'NONE' ? `${analysis.campaign.direction} · ${analysis.campaign.pulses} pulses` : 'NONE');
+  set('v8DecisionMs', `${fmt(analysis?.decisionMs,2)} ms`);
+  set('v8ActionText', analysis?.state === 'ENTER' ? `${p?.direction === 'UP' ? 'CALL' : 'PUT'} NOW` : 'WATCH');
+  set('v8Why', analysis?.reason || 'Building pattern memory.');
+  set('v8Pulse', analysis?.state === 'ENTER' ? `${batchSize} contracts` : '0 contracts');
+  $('v8Action')?.classList.toggle('positive', analysis?.state === 'ENTER' && p?.direction === 'UP');
+  $('v8Action')?.classList.toggle('negative', analysis?.state === 'ENTER' && p?.direction === 'DOWN');
+  $('v8PatternCell')?.classList.toggle('hot', Boolean(p?.ok));
+  set('v8Qualified', s.approved.length);
+  set('v8Calls', s.approved.filter(x=>x.tradeDirection==='CALL').length);
+  set('v8Puts', s.approved.filter(x=>x.tradeDirection==='PUT').length);
+  set('v8Contracts', s.actual.filter(t=>t.contractId).length);
+  set('v8WL', `${s.wins} / ${s.losses}`);
+  set('v8Pnl', money(s.pnl));
+  set('v8Shadow', `${s.shadowWins} / ${s.shadowLosses}`);
+  set('v8Exposure', `${Number(engine?.openContracts||0)} / ${maxConcurrent}`);
+
+  set('mtRegime200', analysis?.context200 || 'FEATURE');
+  set('mtTrend80', analysis?.context80 || 'FEATURE');
+  set('mtSession', analysis?.campaign?.direction || 'NONE');
+  set('mtEntry20', p?.familyId || 'SEARCH');
+  set('mtChop', st?.tag || '—');
+  set('mtVolatility', 'PATTERN-FIRST');
+  set('ptEntryOffset', `T+${Number(analysis?.config?.executionOffset || 1)}`);
+  set('ptBought', s.actual.filter(t=>t.contractId).length);
+  set('ptCohortN', s.fresh.length);
+  set('ptCohortWL', `${s.wins} / ${s.losses}`);
+  set('ptCohortPnl', money(s.pnl));
+  set('ptBullWL', String(s.approved.filter(x=>x.tradeDirection==='CALL').length));
+  set('ptBearWL', String(s.approved.filter(x=>x.tradeDirection==='PUT').length));
+  set('ptQualified', String(s.approved.length));
+  set('ptSkipped', String(s.fresh.length - s.approved.length));
+
+  if ($('ptSignal')) $('ptSignal').innerHTML = analysis?.state === 'ENTER'
+    ? `<b class="${p?.direction==='UP'?'positive':'negative'}">${p?.direction==='UP'?'CALL':'PUT'} · FIRE ${batchSize}</b><span>${esc(p?.familyId||'pattern')} · ${fmt(p?.edge)}% · ${esc(st?.tag||'')} · decision ${fmt(analysis?.decisionMs,2)}ms</span>`
+    : `<b>WATCH</b><span>${esc(analysis?.reason || 'Waiting for a statistically qualified pattern.')}</span>`;
 }
 
-function renderLedger(setups) {
-  setups = setups.filter(s => !s.legacy);
-  const rows = setups.slice(0, 300);
-  $('ptQualified').textContent = String(setups.length);
-  $('ptSkipped').textContent = String(setups.filter(s => s.decision && !s.decision.approved).length);
-  $('ptBought').textContent = String(setups.filter(s => s.actual?.contractId).length);
-  const actual = setups.filter(s => ['WON','LOST'].includes(s.actual?.outcome));
-  const wins = actual.filter(s => s.actual.outcome === 'WON').length;
-  const losses = actual.filter(s => s.actual.outcome === 'LOST').length;
-  const pnl = actual.reduce((a,s)=>a+Number(s.actual?.profit||0),0);
-  $('ptCohortN').textContent = String(actual.length);
-  $('ptCohortWL').textContent = `${wins} / ${losses}`;
-  $('ptCohortPnl').textContent = money(pnl);
-  $('ptLedgerRows').innerHTML = rows.length ? rows.map(s => {
-    const tm = new Date(s.createdAt || s.openedAt || Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    const pat = s.pattern ? `${fmt(s.pattern.expectedEdge)}% ${s.pattern.expected || ''}` : '—';
-    const top = s.pattern ? `${s.pattern.top10Agree || 0}/${s.pattern.top10Total || 10}` : '—';
-    const ev = Number.isFinite(+s.pattern?.ev) ? `${(s.pattern.ev*100).toFixed(1)}%` : '—';
-    return `<tr><td>${tm}</td><td>${esc(s.state || '—')}</td><td>${esc(s.direction || '—')}</td><td>${s.pivotType ? `${esc(s.pivotType)} ${fmt(s.pivotQuote,2)}` : '—'}</td><td>${fmt(s.bosLevel,2)}</td><td>${esc(s.timingClass || '—')}</td><td>${esc(pat)}</td><td>${top}</td><td>${ev}</td><td>${esc(s.actual?.outcome || '—')}</td><td>${esc(s.shadow?.outcome || '—')}</td><td>${esc(s.decision?.why || s.lastReason || '—')}</td></tr>`;
-  }).join('') : '<tr><td colspan="12" class="empty">No v7.3 setup lifecycles yet.</td></tr>';
+function renderLedger() {
+  if (!$('ptLedgerRows')) return;
+  const rows = latest.signals.slice(0,250);
+  $('ptLedgerRows').innerHTML = rows.length ? rows.map(r => {
+    const actual = (r.actualTrades||[]);
+    const aw = actual.filter(t=>t.outcome==='WON').length, al = actual.filter(t=>t.outcome==='LOST').length;
+    const ap = actual.reduce((s,t)=>s+(+t.profit||0),0);
+    const act = actual.length ? `${aw}W/${al}L ${money(ap)}` : (r.executionState || '—');
+    return `<tr class="${r.legacy?'v73Legacy':''}"><td>${new Date(r.createdAt||Date.now()).toLocaleTimeString()}</td><td>${r.approved?esc(r.tradeDirection):'WATCH'}</td><td>${esc(r.pattern?.familyId||'—')}</td><td>${esc(r.structure?.tag||'—')} ${esc(r.structure?.phase||'')}</td><td>${Number.isFinite(+r.pattern?.edge)?fmt(r.pattern.edge)+'%':'—'}</td><td>${r.pattern?`${r.pattern.top10Agree||0}/${r.pattern.top10Total||0}`:'—'}</td><td>${esc(r.context80||'—')}</td><td>${esc(r.context200||'—')}</td><td>${Number.isFinite(+r.decisionMs)?fmt(r.decisionMs,2)+'ms':'—'}</td><td>${act}</td><td>${r.shadow?.outcome||'—'}</td><td>${esc(r.why||'—')}</td></tr>`;
+  }).join('') : '<tr><td colspan="12" class="empty">No v8 pattern pulses yet.</td></tr>';
 }
 
-function canvasScale(ctx, canvas) {
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
-  const rect = canvas.getBoundingClientRect();
-  const width = Math.max(300, rect.width || 1400), height = Math.max(260, rect.height || 410);
-  if (canvas.width !== Math.round(width*dpr) || canvas.height !== Math.round(height*dpr)) { canvas.width=Math.round(width*dpr); canvas.height=Math.round(height*dpr); }
-  ctx.setTransform(dpr,0,0,dpr,0,0); return {width,height};
+function renderTrades() {
+  if (!$('ptTradeRows')) return;
+  const rows = latest.signals.filter(x=>!x.legacy).flatMap(s => (s.actualTrades||[]).map(t=>({s,t}))).sort((a,b)=>(b.t.contractId||0)-(a.t.contractId||0)).slice(0,100);
+  $('ptTradeRows').innerHTML = rows.length ? rows.map(({s,t}) => `<tr><td>#${t.contractId||'—'}</td><td>${esc(s.campaign?.direction||s.tradeDirection||'—')}</td><td>${esc(s.tradeDirection||'—')}</td><td>${esc(s.pattern?.familyId||'—')} · ${esc(s.structure?.tag||'—')}</td><td><span class="result ${String(t.outcome||'').toLowerCase()}">${esc(t.outcome||'OPEN')}</span></td><td>1t</td><td>T+${s.executionOffset||1}→T+${(s.executionOffset||1)+1}</td><td>${esc(t.window||'—')}</td><td>${esc(t.latency||'—')}</td><td class="${(+t.profit||0)>=0?'positive':'negative'}">${Number.isFinite(+t.profit)?money(t.profit):'—'}</td><td>${Number.isFinite(+t.buyAckMs)?fmt(t.buyAckMs,0)+'ms':'—'}</td><td>${t.entrySpot??'—'} → ${t.exitSpot??'—'}</td></tr>`).join('') : '<tr><td colspan="12" class="empty">No v8 actual contracts yet.</td></tr>';
 }
-function renderChart(ticks, setups, analysis) {
+
+function scaleCanvas(ctx, canvas) {
+  const dpr = Math.max(1, devicePixelRatio || 1), rect = canvas.getBoundingClientRect(), w = Math.max(300, rect.width || canvas.width), h = Math.max(220, rect.height || canvas.height);
+  if (canvas.width !== Math.round(w*dpr) || canvas.height !== Math.round(h*dpr)) { canvas.width=Math.round(w*dpr); canvas.height=Math.round(h*dpr); }
+  ctx.setTransform(dpr,0,0,dpr,0,0); return {w,h};
+}
+
+function renderChart() {
   const canvas = $('masterCanvas'); if (!canvas) return;
-  const all = Array.isArray(ticks) ? ticks : [];
-  const maxOffset = Math.max(0, all.length - Math.min(220, all.length));
-  replayOffset = Math.min(replayOffset, maxOffset);
-  const end = Math.max(0, all.length - replayOffset), start = Math.max(0, end - 220), rows = all.slice(start,end);
-  $('v73ReplayLabel').textContent = mode === 'LIVE' ? 'LIVE · latest 220 ticks' : `${replayOffset} ticks behind live`;
-  const ctx = canvas.getContext('2d'), {width,height}=canvasScale(ctx,canvas); ctx.clearRect(0,0,width,height);
-  ctx.strokeStyle='rgba(146,153,168,.10)';
-  for(let x=0;x<=width;x+=width/8){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,height);ctx.stroke();}
-  for(let y=0;y<=height;y+=height/5){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(width,y);ctx.stroke();}
+  const all = latest.ticks || [];
+  const maxOffset = Math.max(0, all.length - Math.min(220, all.length)); replayOffset = Math.min(replayOffset,maxOffset);
+  const end = Math.max(0, all.length - replayOffset), start = Math.max(0,end-220), rows = all.slice(start,end);
+  set('v8ReplayLabel', replayOffset ? `${replayOffset} ticks behind live` : 'LIVE · latest 220 ticks');
+  const ctx = canvas.getContext('2d'), {w,h}=scaleCanvas(ctx,canvas); ctx.clearRect(0,0,w,h);
+  ctx.strokeStyle='rgba(146,153,168,.10)'; for(let x=0;x<=w;x+=w/8){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke()} for(let y=0;y<=h;y+=h/5){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke()}
   if(rows.length<2)return;
-  const prices=rows.map(t=>t.quote), min=Math.min(...prices), max=Math.max(...prices), span=max-min||1;
-  const startEpoch=rows[0].epoch,endEpoch=rows.at(-1).epoch;
-  const xFor=e=>14+(e-startEpoch)/Math.max(1,endEpoch-startEpoch)*(width-28);
-  const yFor=p=>height-22-(p-min)/span*(height-44);
-  ctx.strokeStyle='rgba(215,220,229,.78)';ctx.lineWidth=1.6;ctx.beginPath();rows.forEach((t,i)=>{const x=14+i/(rows.length-1)*(width-28),y=yFor(t.quote);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();
-  ctx.fillStyle='rgba(245,247,250,.92)';ctx.font='12px system-ui';ctx.fillText(`${mode} · STATE ${analysis?.state||'—'} · 200 ${analysis?.regime200||'—'} · 80 ${analysis?.authority80||'—'} · fixed 5T`,16,20);
-  const visible=setups.filter(s=>Number(s.signalEpoch||s.createdEpoch||s.pivotEpoch)>=startEpoch&&Number(s.signalEpoch||s.createdEpoch||s.pivotEpoch)<=endEpoch);
-  for(const s of visible){
-    const pivotEpoch=Number(s.pivotEpoch), pivotQuote=Number(s.pivotQuote), bos=Number(s.bosLevel), signalEpoch=Number(s.signalEpoch);
-    if(Number.isFinite(bos)){ctx.strokeStyle=s.legacy?'rgba(100,150,220,.22)':'rgba(80,160,255,.48)';ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(14,yFor(bos));ctx.lineTo(width-14,yFor(bos));ctx.stroke();ctx.setLineDash([]);}
-    if(Number.isFinite(pivotEpoch)&&Number.isFinite(pivotQuote)){ctx.fillStyle=s.legacy?'rgba(200,205,215,.35)':'#79aefc';ctx.font='10px system-ui';ctx.fillText(s.pivotType||'PIVOT',xFor(pivotEpoch)+3,yFor(pivotQuote)+(s.pivotType==='HL'?13:-8));}
-    if(Number.isFinite(signalEpoch)){
-      const x=xFor(signalEpoch), y=yFor(Number(s.signalQuote||bos));
-      ctx.fillStyle=s.legacy?'rgba(220,220,220,.38)':s.decision?.approved?'#67d99a':s.timingClass==='CHASE'?'#ff7474':'#f3c567';
-      ctx.font='10px system-ui';ctx.fillText(s.legacy?'OLD':s.decision?.approved?'A':s.timingClass==='CHASE'?'C':'P',x+4,y-7);ctx.strokeStyle=ctx.fillStyle;ctx.strokeRect(x-4,y-4,8,8);
-    }
-    if(Number.isFinite(+s.actual?.entryEpoch)&&Number.isFinite(+s.actual?.entrySpot)){const x=xFor(+s.actual.entryEpoch),y=yFor(+s.actual.entrySpot);ctx.fillStyle='#67d99a';ctx.beginPath();ctx.moveTo(x,y-9);ctx.lineTo(x-6,y+5);ctx.lineTo(x+6,y+5);ctx.closePath();ctx.fill();ctx.fillText('E',x+7,y-6);}
-    if(Number.isFinite(+s.actual?.exitEpoch)&&Number.isFinite(+s.actual?.exitSpot)){const x=xFor(+s.actual.exitEpoch),y=yFor(+s.actual.exitSpot);ctx.strokeStyle=s.actual.outcome==='WON'?'#67d99a':'#ff7474';ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.stroke();ctx.fillStyle=ctx.strokeStyle;ctx.fillText('X',x+7,y-6);}
-  }
-  if ($('masterCanvasCaption')) $('masterCanvasCaption').textContent = mode==='LIVE' ? 'LIVE worker state · setup lifecycle is persisted before BOS and after decision' : 'REPLAY · previous v7.3 plus imported old cohort setups';
+  const prices=rows.map(x=>x.quote), min=Math.min(...prices), max=Math.max(...prices), span=max-min||1, startEpoch=rows[0].epoch, endEpoch=rows.at(-1).epoch;
+  const xFor=e=>14+(e-startEpoch)/Math.max(1,endEpoch-startEpoch)*(w-28), yFor=q=>h-20-(q-min)/span*(h-42);
+  ctx.strokeStyle='rgba(215,220,229,.78)';ctx.lineWidth=1.5;ctx.beginPath();rows.forEach((t,i)=>{const x=14+i/(rows.length-1)*(w-28),y=yFor(t.quote);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();
+  const visible=(latest.signals||[]).filter(s=>Number(s.signalEpoch)>=startEpoch&&Number(s.signalEpoch)<=endEpoch);
+  for(const s of visible){const x=xFor(+s.signalEpoch),y=yFor(+s.signalQuote);if(s.approved){ctx.fillStyle=s.tradeDirection==='CALL'?'#67d99a':'#ff7474';ctx.font='bold 10px system-ui';ctx.fillText(`${s.tradeDirection==='CALL'?'C':'P'}×${s.requestedBatch||2}`,x+4,y-7)} if(Number.isFinite(+s.structure?.pivotEpoch)&&Number.isFinite(+s.structure?.pivotQuote)&&+s.structure.pivotEpoch>=startEpoch&&+s.structure.pivotEpoch<=endEpoch){ctx.fillStyle='rgba(126,165,215,.9)';ctx.font='10px system-ui';ctx.fillText(s.structure.tag||s.structure.pivotType,xFor(+s.structure.pivotEpoch)+3,yFor(+s.structure.pivotQuote)-6)} for(const t of s.actualTrades||[]){if(Number.isFinite(+t.entryEpoch)&&Number.isFinite(+t.entrySpot)){const ex=xFor(+t.entryEpoch),ey=yFor(+t.entrySpot);ctx.fillStyle=s.tradeDirection==='CALL'?'#67d99a':'#ff7474';ctx.fillText('E',ex,ey-5)} if(Number.isFinite(+t.exitEpoch)&&Number.isFinite(+t.exitSpot)){const xx=xFor(+t.exitEpoch),xy=yFor(+t.exitSpot);ctx.fillStyle=t.outcome==='WON'?'#67d99a':'#ff7474';ctx.fillText('X',xx,xy+12)}}}
+  ctx.fillStyle='rgba(245,247,250,.9)';ctx.font='12px system-ui';ctx.fillText(`${replayOffset?'REPLAY':'LIVE'} · ${latest.analysis?.pattern?.familyId||'SEARCHING'} · ${latest.analysis?.structure?.tag||'—'} · ${latest.analysis?.state||'WARMING'}`,16,20);
 }
-function renderEngine(state, setups) {
-  if (!state) return;
-  $('ptStatus').textContent = state.safeBlocked ? 'SAFE PAUSE' : state.connected ? (state.running ? 'TRADING' : 'CONNECTED') : 'DISCONNECTED';
-  $('ptPnl').textContent = money(state.sessionPnL); $('ptPnl').className = Number(state.sessionPnL||0)>=0?'positive':'negative'; $('ptWL').textContent = `${state.wins||0} / ${state.losses||0}`; $('ptOpen').textContent = String(Number(state.openContracts||0)+(state.pendingTrade?1:0));
-  if ($('ptTradeRows')) $('ptTradeRows').innerHTML = state.trades?.length ? state.trades.map(t=>{ const s=setups.find(x=>Number(x.actual?.contractId)===Number(t.contractId)); return `<tr><td>#${t.contractId}</td><td>${esc(s?.direction||'—')}</td><td>${esc(t.direction)}</td><td>${esc(`${s?.pivotType||'—'}→BOS PRIME + Pattern`)}</td><td><span class="result ${t.status}">${esc(t.status)}</span></td><td>${t.duration}t</td><td>${s?`T+${s.executionOffset||1}→T+${(s.executionOffset||1)+5}`:'—'}</td><td>${s?.actual?.window||'—'}</td><td>${s?.actual?.latency||'—'}</td><td class="${Number(t.profit||0)>=0?'positive':'negative'}">${t.profit===undefined?'—':`${Number(t.profit)>=0?'+':''}${Number(t.profit).toFixed(2)}`}</td><td>${t.sendToAckMs===undefined?'—':Number(t.sendToAckMs).toFixed(0)+'ms'}</td><td>${t.entrySpot??'—'} → ${t.exitSpot??'—'}</td></tr>`; }).join('') : '<tr><td colspan="12" class="empty">No v7.3 actual trades yet.</td></tr>';
-  if ($('ptLogs') && state.logs?.length) $('ptLogs').innerHTML=state.logs.slice(0,60).map(l=>`<div class="log ${l.level}"><time>${new Date(l.at).toLocaleTimeString()}</time><span>${esc(l.message==='Engine armed. Waiting for fresh BOS.'?'v7.3 worker sniper armed.':l.message)}</span></div>`).join('');
+
+function render(data = {}) {
+  latest = { ...latest, ...data, signals:data.signals || latest.signals || [] };
+  renderDashboard(); renderLedger(); renderTrades(); renderChart();
 }
-function render(data) { latest = { ...latest, ...data }; renderDecision(latest.analysis, latest.setups || []); renderMetrics(latest.setups || []); renderLedger(latest.setups || []); renderChart(latest.ticks || [], latest.setups || [], latest.analysis); renderEngine(latest.engine, latest.setups || []); }
-export const V73UI = { install, render, onReplay, setMode };
+
+export const V73UI = { install, render };
