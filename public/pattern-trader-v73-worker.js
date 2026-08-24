@@ -1,154 +1,119 @@
 const CFG = {
-  LONG: 200,
-  AUTH: 80,
-  FAST: 20,
-  PATTERN: 20,
+  VERSION: 'v8-pattern-first',
   MAX_TICKS: 10000,
+  PATTERN_LENGTHS: [8, 12, 20],
   MAX_MATCHES: 80,
-  MIN_MATCHES: 40,
-  SIM_FLOOR: 0.82,
-  MIN_AVG_SIMILARITY: 88,
-  MIN_EDGE: 58,
-  TOP10_MIN_AGREE: 7,
-  FIXED_DURATION: 5,
-  PAYOUT_NET_WIN: 0.92,
-  MIN_EV: 0.05,
-  MAX_BREAK_EXTENSION_STEPS: 1.10,
-  EARLY_ARM_STEPS: 0.50,
-  CHOP_BLOCK: 0.82,
+  MIN_MATCHES: 24,
+  SIM_FLOOR: 0.80,
+  MIN_AVG_SIMILARITY: 84,
+  MIN_EDGE: 56,
+  TOP10_MIN_AGREE: 6,
+  FIXED_DURATION: 1,
   executionOffset: 1
 };
 
-const STATES = Object.freeze({
-  WARMING: 'WARMING',
-  WAIT_CONTEXT: 'WAIT_CONTEXT',
-  WAIT_STRUCTURE: 'WAIT_STRUCTURE',
-  ARMED: 'ARMED',
-  PRIME_BOS: 'PRIME_BOS',
-  CHASE_BLOCK: 'CHASE_BLOCK',
-  PATTERN_AUDIT: 'PATTERN_AUDIT',
-  APPROVED: 'APPROVED',
-  PATTERN_BLOCK: 'PATTERN_BLOCK',
-  INVALIDATED: 'INVALIDATED'
-});
-
 let ticks = [];
-let activeSetup = null;
-let state = STATES.WARMING;
 let lastAnalysis = null;
-const pendingShadow = new Map();
+let campaign = { direction: 'NONE', sinceEpoch: 0, pulses: 0 };
+const pendingShadows = new Map();
 
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const mean = a => a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function perfNow() { return globalThis.performance?.now?.() ?? Date.now(); }
+function emit(type, payload = {}) { postMessage({ type, ...payload }); }
 
 function dedupe(rows) {
   const out = [];
-  let lastKey = '';
+  let last = '';
   for (const raw of rows || []) {
     const epoch = Number(raw?.epoch), quote = Number(raw?.quote);
     if (!Number.isFinite(epoch) || !Number.isFinite(quote)) continue;
     const key = `${epoch}:${quote}`;
-    if (key === lastKey) continue;
+    if (key === last) continue;
     out.push({ epoch, quote });
-    lastKey = key;
+    last = key;
   }
   return out.sort((a, b) => a.epoch - b.epoch).slice(-CFG.MAX_TICKS);
 }
 
-function avgStep(p) {
-  if (p.length < 2) return 0;
+function avgStep(rows) {
+  if (!rows || rows.length < 2) return 0;
   let sum = 0;
-  for (let i = 1; i < p.length; i++) sum += Math.abs(p[i] - p[i - 1]);
-  return sum / (p.length - 1);
+  for (let i = 1; i < rows.length; i++) sum += Math.abs(rows[i].quote - rows[i - 1].quote);
+  return sum / (rows.length - 1);
 }
 
-function efficiency(p) {
-  if (p.length < 2) return 0;
-  let path = 0;
-  for (let i = 1; i < p.length; i++) path += Math.abs(p[i] - p[i - 1]);
-  return path ? Math.abs(p.at(-1) - p[0]) / path : 0;
-}
-
-function turnRate(p) {
-  const signs = [];
-  for (let i = 1; i < p.length; i++) {
-    const d = p[i] - p[i - 1];
-    if (d) signs.push(Math.sign(d));
-  }
-  if (signs.length < 2) return 0;
-  let turns = 0;
-  for (let i = 1; i < signs.length; i++) if (signs[i] !== signs[i - 1]) turns++;
-  return turns / (signs.length - 1);
-}
-
-function linearSlope(p) {
-  const n = p.length;
+function linearSlope(rows) {
+  const n = rows.length;
   if (n < 2) return 0;
-  const xm = (n - 1) / 2, ym = mean(p);
+  const xm = (n - 1) / 2;
+  const ym = mean(rows.map(x => x.quote));
   let num = 0, den = 0;
   for (let i = 0; i < n; i++) {
     const dx = i - xm;
-    num += dx * (p[i] - ym);
+    num += dx * (rows[i].quote - ym);
     den += dx * dx;
   }
   return den ? num / den : 0;
 }
 
-function pivots(p, radius = 1) {
+function softDirection(rows) {
+  if (!rows || rows.length < 4) return 'NEUTRAL';
+  const step = avgStep(rows) || 1;
+  const slope = linearSlope(rows) / step;
+  const net = rows.at(-1).quote - rows[0].quote;
+  if (slope > .035 && net > 0) return 'BULL';
+  if (slope < -.035 && net < 0) return 'BEAR';
+  return 'NEUTRAL';
+}
+
+function pivots(rows, radius = 1) {
   const highs = [], lows = [];
-  for (let i = radius; i < p.length - radius; i++) {
-    const left = p.slice(i - radius, i), right = p.slice(i + 1, i + radius + 1);
-    if (left.every(v => p[i] >= v) && right.every(v => p[i] >= v) && [...left, ...right].some(v => p[i] > v)) highs.push({ i, quote: p[i] });
-    if (left.every(v => p[i] <= v) && right.every(v => p[i] <= v) && [...left, ...right].some(v => p[i] < v)) lows.push({ i, quote: p[i] });
+  for (let i = radius; i < rows.length - radius; i++) {
+    const q = rows[i].quote;
+    const left = rows.slice(i - radius, i).map(x => x.quote);
+    const right = rows.slice(i + 1, i + radius + 1).map(x => x.quote);
+    if (left.every(v => q >= v) && right.every(v => q >= v) && [...left, ...right].some(v => q > v)) highs.push({ i, quote: q, epoch: rows[i].epoch });
+    if (left.every(v => q <= v) && right.every(v => q <= v) && [...left, ...right].some(v => q < v)) lows.push({ i, quote: q, epoch: rows[i].epoch });
   }
   return { highs, lows };
 }
 
-function swingStructure(p) {
-  const { highs, lows } = pivots(p, 2);
-  const h = highs.slice(-2), l = lows.slice(-2);
-  if (h.length < 2 || l.length < 2) return 'MIXED';
-  if (h[1].quote > h[0].quote && l[1].quote > l[0].quote) return 'BULL';
-  if (h[1].quote < h[0].quote && l[1].quote < l[0].quote) return 'BEAR';
-  return 'MIXED';
-}
+function structureTagAt(index) {
+  const start = Math.max(0, index - 34);
+  const rows = ticks.slice(start, index + 1);
+  if (rows.length < 8) return { tag: 'MIXED', pivotType: '—', pivotQuote: NaN, pivotEpoch: NaN, phase: 'UNKNOWN' };
+  const { highs, lows } = pivots(rows, 1);
+  const lh = highs.slice(-3), ll = lows.slice(-3);
+  const lastH = lh.at(-1), prevH = lh.at(-2), prev2H = lh.at(-3);
+  const lastL = ll.at(-1), prevL = ll.at(-2), prev2L = ll.at(-3);
 
-function metrics(rows) {
-  const p = rows.map(x => x.quote);
-  const step = avgStep(p);
-  return {
-    avgStep: step,
-    slopeNorm: step ? linearSlope(p) / step : 0,
-    efficiency: efficiency(p),
-    turnRate: turnRate(p),
-    net: p.at(-1) - p[0],
-    structure: swingStructure(p)
-  };
-}
+  const hType = lastH && prevH ? (lastH.quote > prevH.quote ? 'HH' : 'LH') : 'H';
+  const lType = lastL && prevL ? (lastL.quote > prevL.quote ? 'HL' : 'LL') : 'L';
+  let pivotType = '—', pivotQuote = NaN, pivotEpoch = NaN;
+  if (lastH && lastL) {
+    if (lastH.epoch > lastL.epoch) { pivotType = hType; pivotQuote = lastH.quote; pivotEpoch = lastH.epoch; }
+    else { pivotType = lType; pivotQuote = lastL.quote; pivotEpoch = lastL.epoch; }
+  } else if (lastH) { pivotType = hType; pivotQuote = lastH.quote; pivotEpoch = lastH.epoch; }
+  else if (lastL) { pivotType = lType; pivotQuote = lastL.quote; pivotEpoch = lastL.epoch; }
 
-function directionFromMetrics(m, slopeFloor, efficiencyFloor) {
-  if (Math.abs(m.slopeNorm) < slopeFloor || m.efficiency < efficiencyFloor) return 'NEUTRAL';
-  if (m.slopeNorm > 0 && m.net > 0) return 'BULL';
-  if (m.slopeNorm < 0 && m.net < 0) return 'BEAR';
-  return 'NEUTRAL';
-}
+  let tag = pivotType;
+  if (pivotType === 'LL' && prev2L && prevL && lastL && prev2L.quote > prevL.quote && prevL.quote > lastL.quote) tag = 'LL2';
+  if (pivotType === 'HH' && prev2H && prevH && lastH && prev2H.quote < prevH.quote && prevH.quote < lastH.quote) tag = 'HH2';
 
-function chopState(m80, m20) {
-  const score = (
-    clamp((.12 - m80.efficiency) / .12, 0, 1) +
-    clamp((m80.turnRate - .58) / .25, 0, 1) +
-    clamp((.05 - Math.abs(m80.slopeNorm)) / .05, 0, 1) +
-    clamp((m20.turnRate - .78) / .15, 0, 1)
-  ) / 4;
-  return { score, blocked: score >= CFG.CHOP_BLOCK };
-}
-
-function volatilityState(m200, m80, m20) {
-  const shortVsMid = m80.avgStep ? m20.avgStep / m80.avgStep : 1;
-  const midVsLong = m200.avgStep ? m80.avgStep / m200.avgStep : 1;
-  if (shortVsMid < .28 || midVsLong < .38) return 'DEAD';
-  if (shortVsMid > 2.8 || m20.turnRate > .96) return 'CHAOTIC';
-  return 'HEALTHY';
+  const current = rows.at(-1).quote;
+  const step = avgStep(rows.slice(-20)) || 1;
+  let phase = 'MID';
+  if (lastL && Math.abs(current - lastL.quote) <= step * 1.5) phase = 'NEAR_LOW';
+  if (lastH && Math.abs(current - lastH.quote) <= step * 1.5) phase = 'NEAR_HIGH';
+  if (lastL && lastH) {
+    const span = Math.abs(lastH.quote - lastL.quote) || step;
+    const pos = (current - Math.min(lastL.quote, lastH.quote)) / span;
+    if (pos <= .20) phase = 'LOW_ZONE';
+    else if (pos >= .80) phase = 'HIGH_ZONE';
+  }
+  return { tag, pivotType, pivotQuote, pivotEpoch, phase, highType: hType, lowType: lType };
 }
 
 function normalizeShape(quotes) {
@@ -163,18 +128,18 @@ function normalizeShape(quotes) {
 function cosine(a, b) {
   let dot = 0, aa = 0, bb = 0;
   const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; aa += a[i] * a[i]; bb += b[i] * b[i]; }
+  for (let i = 0; i < n; i++) {
+    dot += a[i] * b[i]; aa += a[i] * a[i]; bb += b[i] * b[i];
+  }
   return aa && bb ? dot / Math.sqrt(aa * bb) : 0;
 }
 
-function patternAudit(signalIndex, direction) {
-  const n = CFG.PATTERN;
+function auditLength(signalIndex, n, structure) {
   const currentStart = signalIndex - n + 1;
-  const expected = direction === 'BULL' ? 'UP' : 'DOWN';
-  if (currentStart < 1) return { ok: false, status: 'WEAK', reason: 'Not enough pattern history', expected };
+  if (currentStart < 2) return null;
   const currentShape = normalizeShape(ticks.slice(currentStart, signalIndex + 1).map(t => t.quote));
-  const candidates = [];
   const lookahead = CFG.executionOffset + CFG.FIXED_DURATION;
+  const candidates = [];
 
   for (let start = 0; start + n - 1 + lookahead < currentStart; start++) {
     const end = start + n - 1;
@@ -184,191 +149,136 @@ function patternAudit(signalIndex, direction) {
     const entry = ticks[end + CFG.executionOffset]?.quote;
     const exit = ticks[end + CFG.executionOffset + CFG.FIXED_DURATION]?.quote;
     if (!Number.isFinite(entry) || !Number.isFinite(exit) || entry === exit) continue;
-    candidates.push({ end, similarity, outcome: exit > entry ? 'UP' : 'DOWN', epoch: ticks[end].epoch });
+    const histStructure = structureTagAt(end);
+    const sameTag = histStructure.tag === structure.tag;
+    const samePhase = histStructure.phase === structure.phase;
+    const weighted = similarity + (sameTag ? .025 : 0) + (samePhase ? .010 : 0);
+    candidates.push({ end, similarity, weighted, outcome: exit > entry ? 'UP' : 'DOWN', epoch: ticks[end].epoch, tag: histStructure.tag, phase: histStructure.phase });
   }
 
-  candidates.sort((a, b) => b.similarity - a.similarity);
+  candidates.sort((a, b) => b.weighted - a.weighted);
   const matches = [];
   for (const c of candidates) {
     if (matches.some(x => Math.abs(x.end - c.end) < Math.max(3, Math.floor(n / 3)))) continue;
     matches.push(c);
     if (matches.length >= CFG.MAX_MATCHES) break;
   }
+  if (!matches.length) return null;
 
-  const matchCount = matches.length;
-  const avgSimilarity = matchCount ? mean(matches.map(x => x.similarity)) * 100 : 0;
   const up = matches.filter(x => x.outcome === 'UP').length;
   const down = matches.filter(x => x.outcome === 'DOWN').length;
   const decided = up + down;
-  const bias = !decided ? 'NONE' : up > down ? 'UP' : down > up ? 'DOWN' : 'EVEN';
-  const edge = decided ? Math.max(up, down) / decided * 100 : 0;
+  const direction = up === down ? 'EVEN' : up > down ? 'UP' : 'DOWN';
+  const directionCount = Math.max(up, down);
+  const edge = decided ? directionCount / decided * 100 : 0;
+  const avgSimilarity = mean(matches.map(x => x.similarity)) * 100;
   const top10 = matches.slice(0, 10);
-  const top10Agree = top10.filter(x => x.outcome === expected).length;
-  const top10Total = top10.length;
-  const expectedCount = expected === 'UP' ? up : down;
-  const expectedEdge = decided ? expectedCount / decided * 100 : 0;
-  const p = expectedEdge / 100;
-  const ev = p * CFG.PAYOUT_NET_WIN - (1 - p);
-  const gates = {
-    matches: matchCount >= CFG.MIN_MATCHES,
-    similarity: avgSimilarity >= CFG.MIN_AVG_SIMILARITY,
-    direction: bias === expected,
-    edge: expectedEdge >= CFG.MIN_EDGE,
-    top10: top10Total >= 10 && top10Agree >= CFG.TOP10_MIN_AGREE,
-    ev: ev >= CFG.MIN_EV
-  };
-  const ok = Object.values(gates).every(Boolean);
-  const failed = Object.entries(gates).filter(([, pass]) => !pass).map(([k]) => k.toUpperCase());
+  const top10Agree = direction === 'UP' ? top10.filter(x => x.outcome === 'UP').length : direction === 'DOWN' ? top10.filter(x => x.outcome === 'DOWN').length : 0;
+  const sameTagCount = matches.filter(x => x.tag === structure.tag).length;
+  const samePhaseCount = matches.filter(x => x.phase === structure.phase).length;
+  const quality = edge + Math.min(4, sameTagCount * .15) + Math.min(2, samePhaseCount * .08) + Math.max(0, avgSimilarity - 84) * .08;
+  const ok = decided >= CFG.MIN_MATCHES && avgSimilarity >= CFG.MIN_AVG_SIMILARITY && edge >= CFG.MIN_EDGE && top10.length >= 10 && top10Agree >= CFG.TOP10_MIN_AGREE && direction !== 'EVEN';
+
   return {
+    length: n,
     ok,
-    status: ok ? 'AGREE' : bias !== expected && bias !== 'NONE' ? 'DISAGREE' : 'WEAK',
-    reason: ok ? `${expected} ${expectedEdge.toFixed(1)}% · top10 ${top10Agree}/10 · EV ${(ev * 100).toFixed(1)}%` : `${failed.join(' + ')} blocked`,
-    expected, bias, edge, expectedEdge, matchCount, avgSimilarity, top10Agree, top10Total, ev, gates,
-    nearest: matches.slice(0, 10).map(x => ({ similarity: x.similarity * 100, outcome: x.outcome, epoch: x.epoch })),
-    duration: CFG.FIXED_DURATION,
-    executionOffset: CFG.executionOffset
+    direction,
+    edge,
+    up,
+    down,
+    matchCount: decided,
+    avgSimilarity,
+    top10Agree,
+    top10Total: top10.length,
+    sameTagCount,
+    samePhaseCount,
+    quality,
+    nearest: top10.map(x => ({ similarity: x.similarity * 100, outcome: x.outcome, epoch: x.epoch, tag: x.tag, phase: x.phase }))
   };
 }
 
-function contextSnapshot() {
-  if (ticks.length < CFG.LONG) return null;
-  const r200 = ticks.slice(-CFG.LONG), r80 = ticks.slice(-CFG.AUTH), r20 = ticks.slice(-CFG.FAST);
-  const m200 = metrics(r200), m80 = metrics(r80), m20 = metrics(r20);
-  const regime200 = directionFromMetrics(m200, .045, .06);
-  const authority80 = directionFromMetrics(m80, .065, .055);
-  const fast20 = directionFromMetrics(m20, .05, .05);
-  const direction = regime200 !== 'NEUTRAL' && regime200 === authority80 ? regime200 : 'NEUTRAL';
-  const chop = chopState(m80, m20);
-  const volatility = volatilityState(m200, m80, m20);
-  return { regime200, authority80, fast20, direction, chop, volatility, m200, m80, m20 };
+function patternDecision(signalIndex, structure) {
+  const audits = CFG.PATTERN_LENGTHS.map(n => auditLength(signalIndex, n, structure)).filter(Boolean);
+  if (!audits.length) return { ok: false, reason: 'No historical pattern family yet', audits: [] };
+  audits.sort((a, b) => Number(b.ok) - Number(a.ok) || b.quality - a.quality || b.edge - a.edge);
+  const best = audits[0];
+  const familyId = best ? `${best.length}T-${structure.tag}-${structure.phase}-${best.direction}` : 'NONE';
+  return {
+    ...best,
+    familyId,
+    audits,
+    reason: best.ok
+      ? `${familyId} · ${best.edge.toFixed(1)}% · ${best.matchCount} relatives · top10 ${best.top10Agree}/${best.top10Total}`
+      : `${familyId} weak · ${best.edge.toFixed(1)}% · ${best.matchCount} relatives · top10 ${best.top10Agree}/${best.top10Total}`
+  };
 }
 
-function findArmedSetup(ctx) {
-  if (!ctx || ctx.direction === 'NEUTRAL' || ctx.chop.blocked || ctx.volatility !== 'HEALTHY') return null;
-  const rows20 = ticks.slice(-CFG.FAST);
-  if (rows20.length < 14) return null;
-  const p = rows20.map(x => x.quote);
-  const unit = ctx.m20.avgStep || avgStep(p) || 1;
-  const shelf = p.slice(-8, -2);
-  const context = p.slice(-14, -2);
-  const recentP = p.slice(-16);
-  const recentRows = rows20.slice(-16);
-  const pp = pivots(recentP, 1);
-  const signalEpoch = rows20.at(-1).epoch;
-
-  if (ctx.direction === 'BULL') {
-    const level = Math.max(...shelf);
-    const lows = pp.lows.slice(-2);
-    const lastLow = lows.at(-1), prevLow = lows.length > 1 ? lows.at(-2) : null;
-    const pivotQuote = lastLow?.quote ?? Math.min(...context);
-    const pivotEpoch = lastLow ? recentRows[lastLow.i]?.epoch : rows20.at(-3)?.epoch;
-    const hl = !prevLow || !lastLow || lastLow.quote >= prevLow.quote - unit * .20;
-    const pullbackSteps = (Math.max(...context) - Math.min(...context)) / unit;
-    if (!hl || pullbackSteps < .65 || !Number.isFinite(level) || !Number.isFinite(pivotQuote)) return null;
-    return { id: `B:${pivotEpoch}:${Math.round(level * 100)}:${Math.round(pivotQuote * 100)}`, direction: 'BULL', pivotType: 'HL', pivotQuote, pivotEpoch, bosLevel: level, avgStep: unit, pullbackSteps, createdEpoch: signalEpoch };
-  }
-
-  const level = Math.min(...shelf);
-  const highs = pp.highs.slice(-2);
-  const lastHigh = highs.at(-1), prevHigh = highs.length > 1 ? highs.at(-2) : null;
-  const pivotQuote = lastHigh?.quote ?? Math.max(...context);
-  const pivotEpoch = lastHigh ? recentRows[lastHigh.i]?.epoch : rows20.at(-3)?.epoch;
-  const lh = !prevHigh || !lastHigh || lastHigh.quote <= prevHigh.quote + unit * .20;
-  const pullbackSteps = (Math.max(...context) - Math.min(...context)) / unit;
-  if (!lh || pullbackSteps < .65 || !Number.isFinite(level) || !Number.isFinite(pivotQuote)) return null;
-  return { id: `S:${pivotEpoch}:${Math.round(level * 100)}:${Math.round(pivotQuote * 100)}`, direction: 'BEAR', pivotType: 'LH', pivotQuote, pivotEpoch, bosLevel: level, avgStep: unit, pullbackSteps, createdEpoch: signalEpoch };
-}
-
-function emit(type, payload = {}) { postMessage({ type, ...payload }); }
-function lifecycleEvent(setup, nextState, reason, extra = {}) {
-  emit('SETUP_EVENT', { event: { setupId: setup.id, state: nextState, reason, at: Date.now(), epoch: ticks.at(-1)?.epoch, quote: ticks.at(-1)?.quote, ...extra }, setup: { ...setup } });
-}
-function scheduleShadow(setup, signalIndex, audit, timingClass, approved) {
-  pendingShadow.set(setup.id, { setupId: setup.id, signalIndex, signalEpoch: ticks[signalIndex]?.epoch, direction: setup.direction, duration: CFG.FIXED_DURATION, executionOffset: CFG.executionOffset, audit, timingClass, approved });
-}
 function resolveShadows() {
-  for (const [id, row] of pendingShadow.entries()) {
-    const startIndex = row.signalIndex + row.executionOffset;
-    const endIndex = startIndex + row.duration;
-    if (endIndex >= ticks.length) continue;
-    const entry = ticks[startIndex]?.quote, exit = ticks[endIndex]?.quote;
+  for (const [id, row] of pendingShadows.entries()) {
+    const start = row.signalIndex + row.executionOffset;
+    const end = start + row.duration;
+    if (end >= ticks.length) continue;
+    const entry = ticks[start]?.quote, exit = ticks[end]?.quote;
     if (!Number.isFinite(entry) || !Number.isFinite(exit)) continue;
-    const won = row.direction === 'BULL' ? exit > entry : exit < entry;
-    emit('SHADOW_RESULT', { setupId: id, shadow: { outcome: entry === exit ? 'FLAT' : won ? 'WON' : 'LOST', entry, exit, entryEpoch: ticks[startIndex]?.epoch, exitEpoch: ticks[endIndex]?.epoch, duration: row.duration, executionOffset: row.executionOffset } });
-    pendingShadow.delete(id);
+    const won = row.tradeDirection === 'CALL' ? exit > entry : exit < entry;
+    emit('SHADOW_RESULT', { signalId: id, shadow: { outcome: entry === exit ? 'FLAT' : won ? 'WON' : 'LOST', entry, exit, entryEpoch: ticks[start]?.epoch, exitEpoch: ticks[end]?.epoch, duration: row.duration, executionOffset: row.executionOffset } });
+    pendingShadows.delete(id);
   }
 }
 
 function evaluateTick() {
+  const started = perfNow();
   resolveShadows();
+  const signalIndex = ticks.length - 1;
   const last = ticks.at(-1);
   if (!last) return;
-  if (ticks.length < CFG.LONG) {
-    lastAnalysis = { state: STATES.WARMING, reason: `Need ${CFG.LONG} ticks (${ticks.length}/${CFG.LONG})`, tick: last, config: CFG };
+  if (ticks.length < 80) {
+    lastAnalysis = { version: CFG.VERSION, state: 'WARMING', reason: `Need 80 ticks (${ticks.length}/80)`, tick: last, decisionMs: perfNow() - started, config: CFG };
     emit('ANALYSIS', { analysis: lastAnalysis });
     return;
   }
 
-  const ctx = contextSnapshot();
-  lastAnalysis = { ...ctx, tick: last, state, config: CFG, activeSetup: activeSetup ? { ...activeSetup } : null };
-  const contextOk = ctx.direction !== 'NEUTRAL' && !ctx.chop.blocked && ctx.volatility === 'HEALTHY';
-  if (!contextOk) {
-    if (activeSetup) { lifecycleEvent(activeSetup, STATES.INVALIDATED, ctx.direction === 'NEUTRAL' ? '200/80 alignment lost' : ctx.chop.blocked ? 'CHOP veto' : `Volatility ${ctx.volatility}`); activeSetup = null; }
-    state = STATES.WAIT_CONTEXT;
-    emit('ANALYSIS', { analysis: { ...lastAnalysis, state, activeSetup: null, reason: ctx.direction === 'NEUTRAL' ? `Need 200+80 alignment (${ctx.regime200}/${ctx.authority80})` : ctx.chop.blocked ? 'CHOP veto' : `Volatility ${ctx.volatility}` } });
-    return;
+  const structure = structureTagAt(signalIndex);
+  const pattern = patternDecision(signalIndex, structure);
+  const context80 = softDirection(ticks.slice(-80));
+  const context200 = ticks.length >= 200 ? softDirection(ticks.slice(-200)) : 'WARMING';
+  const approved = Boolean(pattern.ok);
+  const predicted = pattern.direction;
+  const tradeDirection = predicted === 'UP' ? 'CALL' : predicted === 'DOWN' ? 'PUT' : 'NONE';
+
+  if (approved) {
+    if (campaign.direction !== tradeDirection) campaign = { direction: tradeDirection, sinceEpoch: last.epoch, pulses: 0 };
+    campaign.pulses += 1;
   }
 
-  if (!activeSetup) {
-    const candidate = findArmedSetup(ctx);
-    if (!candidate) { state = STATES.WAIT_STRUCTURE; emit('ANALYSIS', { analysis: { ...lastAnalysis, state, reason: `Aligned ${ctx.direction}. Waiting HL/LH anchor.` } }); return; }
-    activeSetup = { ...candidate, openedAt: Date.now(), context: { regime200: ctx.regime200, authority80: ctx.authority80, fast20: ctx.fast20, chop: ctx.chop.score, volatility: ctx.volatility, slope200: ctx.m200.slopeNorm, slope80: ctx.m80.slopeNorm }, state: STATES.ARMED };
-    lifecycleEvent(activeSetup, STATES.ARMED, `${activeSetup.pivotType} anchor frozen; BOS ${activeSetup.bosLevel}`);
-  }
+  const signalId = `v8-${last.epoch}-${pattern.familyId || 'none'}`;
+  const decisionMs = perfNow() - started;
+  const decision = {
+    signalId,
+    approved,
+    state: approved ? 'ENTER' : 'WATCH',
+    tradeDirection,
+    predicted,
+    signalEpoch: last.epoch,
+    signalQuote: last.quote,
+    duration: CFG.FIXED_DURATION,
+    executionOffset: CFG.executionOffset,
+    structure,
+    pattern,
+    context80,
+    context200,
+    campaign: { ...campaign },
+    decisionMs,
+    why: pattern.reason
+  };
 
-  if (activeSetup.direction !== ctx.direction) {
-    lifecycleEvent(activeSetup, STATES.INVALIDATED, `Direction changed ${activeSetup.direction}→${ctx.direction}`);
-    activeSetup = null; state = STATES.WAIT_STRUCTURE;
-    emit('ANALYSIS', { analysis: { ...lastAnalysis, state, activeSetup: null, reason: 'Direction changed. Waiting fresh setup.' } });
-    return;
-  }
+  lastAnalysis = { version: CFG.VERSION, state: decision.state, reason: decision.why, tick: last, structure, pattern, context80, context200, campaign: { ...campaign }, decisionMs, config: CFG };
+  emit('ANALYSIS', { analysis: lastAnalysis });
+  emit('DECISION', { decision });
 
-  const current = ticks.at(-1).quote, previous = ticks.at(-2)?.quote;
-  const buffer = activeSetup.avgStep * .02;
-  let firstBreak = false, breakDistanceSteps = 0, earlyDistance = Infinity;
-  if (activeSetup.direction === 'BULL') {
-    const nowAbove = current > activeSetup.bosLevel + buffer;
-    const beforeAbove = Number(previous) > activeSetup.bosLevel + buffer;
-    firstBreak = nowAbove && !beforeAbove;
-    breakDistanceSteps = nowAbove ? Math.max(0, (current - activeSetup.bosLevel) / activeSetup.avgStep) : 0;
-    earlyDistance = !nowAbove ? Math.max(0, (activeSetup.bosLevel - current) / activeSetup.avgStep) : 0;
-  } else {
-    const nowBelow = current < activeSetup.bosLevel - buffer;
-    const beforeBelow = Number(previous) < activeSetup.bosLevel - buffer;
-    firstBreak = nowBelow && !beforeBelow;
-    breakDistanceSteps = nowBelow ? Math.max(0, (activeSetup.bosLevel - current) / activeSetup.avgStep) : 0;
-    earlyDistance = !nowBelow ? Math.max(0, (current - activeSetup.bosLevel) / activeSetup.avgStep) : 0;
+  if (tradeDirection !== 'NONE') {
+    pendingShadows.set(signalId, { signalIndex, executionOffset: CFG.executionOffset, duration: CFG.FIXED_DURATION, tradeDirection });
   }
-
-  if (!firstBreak) {
-    state = STATES.ARMED;
-    emit('ANALYSIS', { analysis: { ...lastAnalysis, state, activeSetup: { ...activeSetup }, reason: `${activeSetup.pivotType} armed · ${earlyDistance.toFixed(2)}x from BOS` } });
-    return;
-  }
-
-  const signalIndex = ticks.length - 1;
-  const timingClass = breakDistanceSteps <= CFG.MAX_BREAK_EXTENSION_STEPS ? 'PRIME' : 'CHASE';
-  lifecycleEvent(activeSetup, timingClass === 'PRIME' ? STATES.PRIME_BOS : STATES.CHASE_BLOCK, `${timingClass} first BOS break`, { timingClass, breakDistanceSteps, signalEpoch: last.epoch, signalQuote: last.quote });
-  const audit = patternAudit(signalIndex, activeSetup.direction);
-  lifecycleEvent(activeSetup, STATES.PATTERN_AUDIT, 'Pattern audit completed', { timingClass, breakDistanceSteps, pattern: audit });
-  const approved = timingClass === 'PRIME' && audit.ok;
-  const finalState = approved ? STATES.APPROVED : timingClass === 'CHASE' ? STATES.CHASE_BLOCK : STATES.PATTERN_BLOCK;
-  const why = approved ? 'All gates passed' : timingClass === 'CHASE' ? `CHASE ${breakDistanceSteps.toFixed(2)}x > ${CFG.MAX_BREAK_EXTENSION_STEPS.toFixed(2)}x` : audit.reason;
-  lifecycleEvent(activeSetup, finalState, why, { timingClass, breakDistanceSteps, pattern: audit, approved, signalEpoch: last.epoch, signalQuote: last.quote, duration: CFG.FIXED_DURATION, executionOffset: CFG.executionOffset });
-  emit('DECISION', { decision: { setupId: activeSetup.id, approved, state: finalState, direction: activeSetup.direction, tradeDirection: activeSetup.direction === 'BULL' ? 'CALL' : 'PUT', pivotType: activeSetup.pivotType, pivotQuote: activeSetup.pivotQuote, pivotEpoch: activeSetup.pivotEpoch, bosLevel: activeSetup.bosLevel, timingClass, breakDistanceSteps, signalEpoch: last.epoch, signalQuote: last.quote, duration: CFG.FIXED_DURATION, executionOffset: CFG.executionOffset, context: activeSetup.context, pattern: audit, why } });
-  scheduleShadow(activeSetup, signalIndex, audit, timingClass, approved);
-  activeSetup = null; state = finalState;
-  emit('ANALYSIS', { analysis: { ...lastAnalysis, state, activeSetup: null, reason: why } });
 }
 
 function addTick(raw) {
@@ -386,8 +296,15 @@ onmessage = event => {
   if (msg.type === 'INIT') {
     ticks = dedupe(msg.ticks || []);
     if (Number.isFinite(+msg.executionOffset)) CFG.executionOffset = clamp(Math.round(+msg.executionOffset), 1, 10);
-    activeSetup = null; state = ticks.length >= CFG.LONG ? STATES.WAIT_CONTEXT : STATES.WARMING; evaluateTick();
-  } else if (msg.type === 'TICK') addTick(msg.tick);
-  else if (msg.type === 'CONFIG') { if (Number.isFinite(+msg.executionOffset)) CFG.executionOffset = clamp(Math.round(+msg.executionOffset), 1, 10); }
-  else if (msg.type === 'RESET') { activeSetup = null; pendingShadow.clear(); state = ticks.length >= CFG.LONG ? STATES.WAIT_CONTEXT : STATES.WARMING; evaluateTick(); }
+    campaign = { direction: 'NONE', sinceEpoch: 0, pulses: 0 };
+    evaluateTick();
+  } else if (msg.type === 'TICK') {
+    addTick(msg.tick);
+  } else if (msg.type === 'CONFIG') {
+    if (Number.isFinite(+msg.executionOffset)) CFG.executionOffset = clamp(Math.round(+msg.executionOffset), 1, 10);
+  } else if (msg.type === 'RESET') {
+    campaign = { direction: 'NONE', sinceEpoch: 0, pulses: 0 };
+    pendingShadows.clear();
+    evaluateTick();
+  }
 };
