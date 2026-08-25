@@ -36,14 +36,31 @@ test('requires hysteresis before flipping the locked direction', () => {
   assert.equal(meter.current.direction, 'DOWN');
 });
 
-test('drive policy allows aligned shots and blocks opposing shots', () => {
+test('Trend Map is advisory and never vetoes an original v8.1 entry', () => {
   const base = { approved:true, requestedBatch:2, sniper:{ grade:'A' } };
-  assert.deepEqual(applyMilkingPolicy({ ...base, tradeDirection:'CALL' }, { state:'DRIVE', direction:'UP' }).approved, true);
-  assert.equal(applyMilkingPolicy({ ...base, tradeDirection:'PUT' }, { state:'DRIVE', direction:'UP' }).approved, false);
+  const aligned = applyMilkingPolicy({ ...base, tradeDirection:'CALL' }, { state:'DRIVE', direction:'UP' });
+  const counter = applyMilkingPolicy({ ...base, tradeDirection:'PUT' }, { state:'DRIVE', direction:'UP' });
+  assert.equal(aligned.approved, true);
+  assert.equal(counter.approved, true);
+  assert.equal(aligned.batch, 2);
+  assert.equal(counter.batch, 2);
+  assert.equal(aligned.alignment, 'ALIGNED');
+  assert.equal(counter.alignment, 'COUNTER_TREND');
+  assert.equal(counter.role, 'GUIDE_ONLY');
 });
 
-test('mature policy earns only one contract and harvest blocks entries', () => {
+test('every mapped stage preserves the original entry and batch', () => {
   const base = { approved:true, requestedBatch:2, tradeDirection:'CALL', sniper:{ grade:'A' } };
-  assert.equal(applyMilkingPolicy(base, { state:'MATURE', direction:'UP' }).batch, 1);
-  assert.equal(applyMilkingPolicy(base, { state:'HARVEST', direction:'UP' }).approved, false);
+  for (const state of ['OBSERVE', 'DRIVE', 'MATURE', 'HARVEST', 'TURNING']) {
+    const policy = applyMilkingPolicy(base, { state, direction:state === 'OBSERVE' ? 'NONE' : 'UP' });
+    assert.equal(policy.approved, true, state);
+    assert.equal(policy.batch, 2, state);
+  }
+});
+
+test('the original sniper decision remains the only no-entry decision', () => {
+  const policy = applyMilkingPolicy({ approved:false, requestedBatch:2, tradeDirection:'CALL' }, { state:'DRIVE', direction:'UP' });
+  assert.equal(policy.approved, false);
+  assert.equal(policy.batch, 0);
+  assert.equal(policy.alignment, 'NO_ENTRY');
 });

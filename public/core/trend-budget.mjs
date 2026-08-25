@@ -238,21 +238,42 @@ export class TrendBudget {
 }
 
 export function applyMilkingPolicy(decision, trend) {
-  if (!decision?.approved) return { approved:false, batch:0, reason:'The base sniper pattern did not qualify.' };
+  if (!decision?.approved) return {
+    approved:false,
+    batch:0,
+    role:'GUIDE_ONLY',
+    alignment:'NO_ENTRY',
+    timing:trend?.state || 'OBSERVE',
+    reason:'The original v8.1 sniper pattern did not qualify on this tick.'
+  };
   const wantedDirection = decision.tradeDirection === 'CALL' ? 'UP' : 'DOWN';
+  const batch = Math.max(1, Math.min(2, Number(decision.requestedBatch || 1)));
   if (!trend || trend.direction === 'NONE' || trend.state === 'OBSERVE') {
-    return { approved:false, batch:0, reason:'Trend Budget is still observing.' };
+    return {
+      approved:true,
+      batch,
+      role:'GUIDE_ONLY',
+      alignment:'UNMAPPED',
+      timing:'OBSERVE',
+      reason:`Original ${decision.tradeDirection} ×${batch} entry is unchanged. The Trend Map is still observing and has no locked mountain yet.`
+    };
   }
-  if (trend.state === 'TURNING') return { approved:false, batch:0, reason:'Trend Budget is collecting opposing votes before a direction flip.' };
-  if (trend.state === 'HARVEST') return { approved:false, batch:0, reason:'Harvest zone: preserve the campaign and wait.' };
-  if (trend.direction !== wantedDirection) return { approved:false, batch:0, reason:`${wantedDirection} pattern is fighting the locked ${trend.direction} drive.` };
-  if (trend.state === 'MATURE') {
-    const grade = decision.sniper?.grade;
-    return grade === 'A'
-      ? { approved:true, batch:1, reason:'A-grade continuation allowed at reduced mature-campaign size.' }
-      : { approved:false, batch:0, reason:'Mature campaigns require an A-grade continuation pattern.' };
-  }
-  return { approved:true, batch:Math.max(1, Math.min(2, Number(decision.requestedBatch || 1))), reason:'Pattern is aligned with a healthy locked drive.' };
+  const aligned = trend.direction === wantedDirection;
+  const alignment = aligned ? 'ALIGNED' : 'COUNTER_TREND';
+  const stageCopy = {
+    DRIVE:'healthy drive',
+    MATURE:'mature drive',
+    HARVEST:'late/exhaustion zone',
+    TURNING:'turning transition'
+  }[trend.state] || String(trend.state || 'mapped market').toLowerCase();
+  return {
+    approved:true,
+    batch,
+    role:'GUIDE_ONLY',
+    alignment,
+    timing:trend.state,
+    reason:`Original ${decision.tradeDirection} ×${batch} entry is unchanged. It is ${alignment === 'ALIGNED' ? 'aligned with' : `counter to`} the ${trend.direction} ${stageCopy}.`
+  };
 }
 
 export const __trendBudgetTest = { movementStats, percentile };
