@@ -104,7 +104,8 @@ function install() {
   if (ledgerTitle) ledgerTitle.textContent = 'v8.1 Sniper Decision Audit';
   const ledgerTable = $('ptLedgerRows')?.closest('table');
   if (ledgerTable) {
-    ledgerTable.querySelector('thead').innerHTML = '<tr><th>Time</th><th>Event</th><th>Family</th><th>Address</th><th>Score</th><th>Memory</th><th>Campaign</th><th>Batch</th><th>Speed</th><th>Actual</th><th>Shadow</th><th>Why</th></tr>';
+    const ledgerHead = ledgerTable.querySelector('thead');
+    if (ledgerHead) ledgerHead.innerHTML = '<tr><th>Time</th><th>Event</th><th>Family</th><th>Address</th><th>Score</th><th>Memory</th><th>Campaign</th><th>Batch</th><th>Speed</th><th>Actual</th><th>Shadow</th><th>Why</th></tr>';
     ledgerTable.closest('.tableWrap')?.classList.add('v8Audit');
   }
   if ($('ptExportLedger')) $('ptExportLedger').textContent = 'Export v8.1 CSV';
