@@ -183,17 +183,60 @@ function handleDecision(decision){
 }
 
 function reviewMission(force=false){
-  if(mission.status!=='ACTIVE')return;if(!force&&Date.now()<mission.nextReviewAt)return;
-  const block=shadowSummary(mission.reviewStartedAt),brainState=brain.snapshot();mission.reviewCount+=1;mission.lastReview={...block,at:Date.now(),brain:{actionAccuracy:brainState.actionAccuracy,shadowLessons:brainState.shadowLessons,generation:brainState.generation}};mission.reviewStartedAt=Date.now();mission.nextReviewAt=Date.now()+REVIEW_MS;
-  const enough=block.comparable>=25&&block.libra.trades>=12;
-  const ready=enough&&block.libra.winRate>BREAK_EVEN&&block.libra.avg>0&&block.libra.pnl>block.sani.pnl&&brainState.shadowLessons>=20;
+  if(mission.status!=='ACTIVE')return;
+  if(!force&&Date.now()<mission.nextReviewAt)return;
+  const now=Date.now();
+  const freshBlock=shadowSummary(mission.reviewStartedAt);
+  const cumulative=shadowSummary(mission.startedAt);
+  const brainState=brain.snapshot();
+  mission.reviewCount+=1;
+  mission.lastReview={
+    at:now,
+    block:freshBlock,
+    cumulative,
+    brain:{
+      actionAccuracy:brainState.actionAccuracy,
+      shadowLessons:brainState.shadowLessons,
+      generation:brainState.generation,
+      lastLesson:brainState.lastLesson,
+      lastInsight:brainState.lastInsight
+    }
+  };
+  mission.reviewStartedAt=now;
+  mission.nextReviewAt=now+REVIEW_MS;
+
   if(mission.phase==='LEARN'){
-    if(ready){mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.reason=`I've seen enough. Libra shadow ${block.libra.winRate.toFixed(1)}% ${money(block.libra.pnl)} vs SANI ${block.sani.winRate.toFixed(1)}% ${money(block.sani.pnl)}. I earned Demo authority.`;mission.recommendation='WORK';engine.start()}
-    else{mission.reason=enough?`Not yet. Libra ${block.libra.winRate.toFixed(1)}% ${money(block.libra.pnl)} vs SANI ${block.sani.winRate.toFixed(1)}% ${money(block.sani.pnl)}. I keep learning.`:`I need more fresh comparable decisions: ${block.comparable}/25. Another 7-minute shadow block.`;mission.recommendation='LEARN'}
+    const enough=cumulative.comparable>=25&&cumulative.libra.trades>=12&&brainState.shadowLessons>=20;
+    const profitable=cumulative.libra.pnl>0&&cumulative.libra.winRate>BREAK_EVEN;
+    const controlsSani=cumulative.libra.pnl>cumulative.sani.pnl&&cumulative.edge>0;
+    const ready=enough&&profitable&&controlsSani;
+    if(ready){
+      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';
+      mission.reason=`Seven-minute review passed. Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)} vs SANI ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}. SANI may trade now, but every SANI intent goes through Libra's final hand. Libra can AGREE, YIELD, BLOCK, REPLACE, or LEAD.`;
+      mission.recommendation='WORK';
+      engine.start();
+    }else{
+      const why=!enough
+        ? `I still need enough clean comparisons: ${cumulative.comparable}/25 decisions, ${cumulative.libra.trades}/12 Libra entries, ${brainState.shadowLessons}/20 action lessons.`
+        : !profitable
+          ? `I am not profitable enough yet: Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}. Break-even is ${BREAK_EVEN.toFixed(1)}%.`
+          : `I have not proved control over SANI yet: Libra ${money(cumulative.libra.pnl)} vs SANI ${money(cumulative.sani.pnl)}.`;
+      mission.reason=`Seven-minute review: not ready for money yet. ${why} I keep shadowing and learning; the next review uses all evidence collected since this mission began.`;
+      mission.recommendation='LEARN';
+      engine.pause();
+    }
   }else{
-    const deteriorated=enough&&(block.libra.avg<=0||block.libra.pnl<block.sani.pnl-1);
-    if(deteriorated){mission.phase='LEARN';mission.reason=`My edge deteriorated. Libra ${money(block.libra.pnl)} vs SANI ${money(block.sani.pnl)}. Demo orders paused; back to shadow.`;mission.recommendation='LEARN';engine.pause()}
-    else{mission.reason=`Review passed. Libra shadow ${block.libra.winRate.toFixed(1)}% ${money(block.libra.pnl)} vs SANI ${block.sani.winRate.toFixed(1)}% ${money(block.sani.pnl)}.`;mission.recommendation=mission.phase}
+    const enough=freshBlock.comparable>=20&&freshBlock.libra.trades>=10;
+    const deteriorated=enough&&(freshBlock.libra.avg<=0||freshBlock.libra.pnl<freshBlock.sani.pnl-1);
+    if(deteriorated){
+      mission.phase='LEARN';
+      mission.reason=`My latest seven-minute edge deteriorated. Libra ${money(freshBlock.libra.pnl)} vs SANI ${money(freshBlock.sani.pnl)}. Paid Demo orders pause; I return to shadow until cumulative control is proven again.`;
+      mission.recommendation='LEARN';
+      engine.pause();
+    }else{
+      mission.reason=`Seven-minute health check passed. Libra shadow ${freshBlock.libra.winRate.toFixed(1)}% ${money(freshBlock.libra.pnl)} vs SANI ${freshBlock.sani.winRate.toFixed(1)}% ${money(freshBlock.sani.pnl)}. Paid authority remains active.`;
+      mission.recommendation=mission.phase;
+    }
   }
   publish();
 }
@@ -210,8 +253,8 @@ function showError(message){if(!$('traderError'))return;$('traderError').textCon
 function clearError(){if(!$('traderError'))return;$('traderError').textContent='';$('traderError').classList.add('hidden')}
 function renderAccounts(){const select=$('ptAccount');if(!select)return;select.innerHTML=accounts.length?'':'<option value="">No accounts found</option>';for(const account of accounts){const option=document.createElement('option');option.value=account.account_id;option.textContent=`${String(account.account_type).toUpperCase()} · ${account.account_id} · ${account.currency} ${account.balance}`;select.appendChild(option)}const saved=localStorage.getItem('sani.deriv.accountId');if(saved&&accounts.some(account=>account.account_id===saved&&String(account.account_type).toLowerCase()!=='real'))select.value=saved;const demo=accounts.find(account=>String(account.account_type).toLowerCase()!=='real');if(demo&&(!select.value||String(accounts.find(account=>account.account_id===select.value)?.account_type).toLowerCase()==='real'))select.value=demo.account_id;selectedAccount=accounts.find(account=>account.account_id===select.value)||null;publish()}
 
-function startMission(){clearError();try{auth();const plan=traderConfig();if(engine.running)engine.pause();shadowPending.clear();const now=Date.now();mission={...freshMission(),...plan,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',startedAt:now,deadlineAt:now+plan.durationMinutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),reason:'SANI and I are both shadow trading. Nobody is spending money. I am learning decisions, not just direction.',recommendation:'LEARN'};lastArbitration={action:'SHADOW LEARN',approved:false,tradeDirection:'NONE',reason:mission.reason,at:now};publish()}catch(error){showError(error.message)}}
-function continueMission(minutes){if(!engine.snapshot().connected){showError('Connect the trader first.');return}const now=Date.now();mission.status='ACTIVE';mission.phase='LEARN';mission.durationMinutes=minutes;mission.deadlineAt=now+minutes*60000;mission.reviewStartedAt=now;mission.nextReviewAt=now+REVIEW_MS;mission.basePnl=Number(engine.snapshot().sessionPnL||0);mission.baseTrades=totalSettled();mission.peakPnl=0;mission.protectedFloor=0;mission.reason=`New ${minutes}-minute mission. I keep my learned brain and return to shadow first.`;engine.pause();shadowPending.clear();publish()}
+function startMission(){clearError();try{auth();const plan=traderConfig();if(engine.running)engine.pause();shadowPending.clear();const now=Date.now();mission={...freshMission(),...plan,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',startedAt:now,deadlineAt:now+plan.durationMinutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),reason:'First seven-minute shadow study. SANI takes virtual entries; Libra takes her own virtual entries. Nobody spends Demo money. At the review, Libra must prove positive expectancy and control over SANI before paid trading unlocks.',recommendation:'LEARN'};lastArbitration={action:'SHADOW LEARN',approved:false,tradeDirection:'NONE',reason:mission.reason,at:now};publish()}catch(error){showError(error.message)}}
+function continueMission(minutes){if(!engine.snapshot().connected){showError('Connect the trader first.');return}const now=Date.now();mission.status='ACTIVE';mission.phase='LEARN';mission.durationMinutes=minutes;mission.deadlineAt=now+minutes*60000;mission.reviewStartedAt=now;mission.nextReviewAt=now+REVIEW_MS;mission.basePnl=Number(engine.snapshot().sessionPnL||0);mission.baseTrades=totalSettled();mission.peakPnl=0;mission.protectedFloor=0;mission.reason=`New ${minutes}-minute mission. I keep my learned brain and return to a seven-minute shadow study before paid authority.`;engine.pause();shadowPending.clear();publish()}
 function bindControls(){
   $('ptLoadAccounts')?.addEventListener('click',async()=>{clearError();try{const appId=$('ptAppId').value.trim(),token=$('ptToken').value.trim();if(!appId||!token)throw new Error('App ID and trade token are required.');$('ptLoadAccounts').disabled=true;const data=await api('accounts',{appId,token});accounts=data.accounts||[];localStorage.setItem('sani.deriv.appId',appId);sessionStorage.setItem('sani.deriv.token',token);renderAccounts()}catch(error){showError(error.message)}finally{$('ptLoadAccounts').disabled=false}});
   $('ptAccount')?.addEventListener('change',()=>{localStorage.setItem('sani.deriv.accountId',$('ptAccount').value);lastOtpContext=null;selectedAccount=accounts.find(account=>account.account_id===$('ptAccount').value)||null;publish()});
