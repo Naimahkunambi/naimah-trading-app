@@ -7,7 +7,7 @@ const clock = ms => {
 };
 const conf = (arb,prediction) => Number(arb?.confidence ?? prediction?.confidence ?? 0);
 
-const stable = {headline:'',text:'',action:'',direction:'',confidence:'',key:'',changedAt:0,lastSnapshot:null};
+const stable={headline:'',text:'',action:'',direction:'',confidence:'',reviewKey:'',phase:'',lastSnapshot:null};
 
 function installUi(){
   const stats=document.querySelector('.libraBrainStats');
@@ -40,51 +40,59 @@ function installUi(){
   if($('libraReviewNow')&&!$('libraReviewNow').dataset.bound){$('libraReviewNow').dataset.bound='1';$('libraReviewNow').onclick=()=>window.LIBRA?.review?.()}
 }
 
+function reviewSnapshot(detail){
+  const mission=detail.mission||{},brain=detail.brain||{},shadows=detail.shadows||{};
+  const last=mission.lastReview||null;
+  if(last?.cumulative)return {sani:last.cumulative.sani,libra:last.cumulative.libra,edge:last.cumulative.edge,insight:last.brain?.lastInsight||last.brain?.lastLesson||mission.reason||''};
+  if(last?.block)return {sani:last.block.sani,libra:last.block.libra,edge:last.block.edge,insight:last.brain?.lastInsight||last.brain?.lastLesson||mission.reason||''};
+  return {sani:shadows.sani||{},libra:shadows.libra||{},edge:shadows.edge||0,insight:mission.reason||brain.lastInsight||''};
+}
+
 function thoughtFor(detail){
-  const mission=detail.mission||{},brain=detail.brain||{},arb=detail.arbitration||{},prediction=detail.prediction||{},shadows=detail.shadows||{};
+  const mission=detail.mission||{},brain=detail.brain||{},arb=detail.arbitration||{},prediction=detail.prediction||{};
   const phase=mission.phase||'IDLE';
+  const snap=reviewSnapshot(detail);
   if(mission.status&&mission.status!=='ACTIVE'&&mission.status!=='IDLE'&&mission.status!=='PAUSED')return{
     headline:'MISSION REVIEW.',
     text:`${mission.reason||'The run ended.'} ${mission.recommendation?`My recommendation: ${mission.recommendation}.`:''}`,
-    action:mission.status,direction:'NONE',confidence:'',key:`END:${mission.status}:${mission.reason}`
+    action:mission.status,direction:'NONE',confidence:'',reviewKey:`END:${mission.status}:${mission.reason}`,phase
   };
   if(phase==='LEARN')return{
-    headline:'I AM STILL LEARNING THE DECISION, NOT JUST THE DIRECTION.',
-    text:`SANI ${shadows.sani?.trades||0} shadow trades ${money(shadows.sani?.pnl||0)}. I have ${shadows.libra?.trades||0} shadow trades ${money(shadows.libra?.pnl||0)}. Edge ${money(shadows.edge||0)}. ${brain.lastInsight||mission.reason||''} Next review in ${clock(mission.reviewRemainingMs)}.`,
-    action:'SHADOW LEARN',direction:arb.shadowDirection||arb.tradeDirection||'NONE',confidence:`${Number(prediction.confidence||0).toFixed(0)}%`,key:`LEARN:${mission.reviewCount}:${brain.generation}:${brain.lastInsight}`
+    headline:mission.reviewCount>0?'I REVIEWED IT. I AM STILL LEARNING.':'FIRST I WATCH. THEN I TOUCH MONEY.',
+    text:mission.reviewCount>0
+      ? `${mission.reason||''} Last completed review: SANI ${snap.sani?.trades||0} trades ${money(snap.sani?.pnl||0)}; Libra ${snap.libra?.trades||0} trades ${money(snap.libra?.pnl||0)}; edge ${money(snap.edge||0)}. I keep learning silently until the next seven-minute review.`
+      : `For seven minutes SANI and I take virtual entries side by side. Nobody spends Demo money. I am learning which SANI trades to allow, block, replace, and when I should lead. I will speak again when the review is complete.`,
+    action:'SHADOW LEARN',direction:'NONE',confidence:'',reviewKey:`LEARN:${mission.reviewCount}:${mission.lastReview?.at||mission.startedAt||0}`,phase
   };
   if(phase==='RECOVER')return{
     headline:'I AM RECOVERING SELECTIVELY.',
-    text:`Run ${money(mission.runPnl)}. I am not chasing the deficit. I am only paying for actions whose retained utility is positive. ${brain.lastInsight||mission.reason||''}`,
-    action:'RECOVER',direction:arb.tradeDirection||'NONE',confidence:`${conf(arb,prediction).toFixed(0)}%`,key:`RECOVER:${brain.generation}:${mission.lastReview?.at||0}`
+    text:`${mission.reason||''} I am not chasing the deficit. SANI still proposes trades, and I control the final paid hand while shadow-scoring both of us for the next review.`,
+    action:'RECOVER',direction:'NONE',confidence:'',reviewKey:`RECOVER:${mission.reviewCount}:${mission.lastReview?.at||0}`,phase
   };
   if(phase==='PROTECT')return{
     headline:'THE PROFIT NOW HAS A FLOOR.',
-    text:`Peak ${money(mission.peakPnl)}. Protected floor ${money(mission.protectedFloor)}. Current ${money(mission.runPnl)}. I will keep SANI shadow-running beside me and I will step back if my edge decays.`,
-    action:'PROTECT',direction:arb.tradeDirection||'NONE',confidence:`${conf(arb,prediction).toFixed(0)}%`,key:`PROTECT:${Math.floor(Number(mission.peakPnl||0))}:${mission.reviewCount}`
+    text:`${mission.reason||''} Peak ${money(mission.peakPnl)}. Protected floor ${money(mission.protectedFloor)}. I will not rewrite this page every tick. My next report comes at the seven-minute review unless the mission stops.`,
+    action:'PROTECT',direction:'NONE',confidence:'',reviewKey:`PROTECT:${mission.reviewCount}:${mission.lastReview?.at||0}`,phase
   };
   if(phase==='WORK')return{
-    headline:"I'VE EARNED THE RIGHT TO WORK.",
-    text:`I am executing the highest-utility action I know for this state while SANI remains my shadow benchmark. ${brain.lastInsight||mission.reason||''}`,
-    action:arb.action||'WORK',direction:arb.tradeDirection||'NONE',confidence:`${conf(arb,prediction).toFixed(0)}%`,key:`WORK:${arb.action}:${brain.generation}:${mission.reviewCount}`
+    headline:"I'VE SEEN ENOUGH. NOW WE WORK TOGETHER.",
+    text:`${mission.reason||''} SANI continues generating its entries. I am not replacing SANI as the strategy. I am controlling the final hand: allow good SANI entries, block the mistakes I learned, replace when the opposite has better retained utility, and lead only when I have a stronger edge.`,
+    action:'WORK',direction:'NONE',confidence:'',reviewKey:`WORK:${mission.reviewCount}:${mission.lastReview?.at||0}`,phase
   };
-  return{headline:'I AM READING THE ROOM.',text:brain.lastInsight||brain.lastLesson||'I am waiting for a mission.',action:'LISTEN',direction:'NONE',confidence:'',key:`IDLE:${brain.generation}`};
+  return{headline:'I AM READING THE ROOM.',text:mission.reason||brain.lastInsight||brain.lastLesson||'I am waiting for a mission.',action:'LISTEN',direction:'NONE',confidence:'',reviewKey:`IDLE:${mission.status}:${mission.startedAt||0}`,phase};
 }
 
-function shouldAccept(next){
-  if(!stable.key)return true;
-  if(next.key===stable.key)return false;
-  const major=next.action!==stable.action||next.headline!==stable.headline;
-  if(major&&Date.now()-stable.changedAt>1800)return true;
-  return Date.now()-stable.changedAt>6500;
+function setStable(next){
+  if(stable.reviewKey===next.reviewKey&&stable.phase===next.phase)return;
+  Object.assign(stable,next);
 }
 function applyStable(){
   if(!stable.headline)return;
-  if($('libraVoiceHeadline')&&$('libraVoiceHeadline').textContent!==stable.headline)$('libraVoiceHeadline').textContent=stable.headline;
-  if($('libraVoiceText')&&$('libraVoiceText').textContent!==stable.text)$('libraVoiceText').textContent=stable.text;
-  if($('libraVoiceAction')&&$('libraVoiceAction').textContent!==stable.action)$('libraVoiceAction').textContent=stable.action;
-  if($('libraVoiceDirection')&&$('libraVoiceDirection').textContent!==stable.direction)$('libraVoiceDirection').textContent=stable.direction;
-  if($('libraVoiceConfidence')&&stable.confidence&&$('libraVoiceConfidence').textContent!==stable.confidence)$('libraVoiceConfidence').textContent=stable.confidence;
+  if($('libraVoiceHeadline'))$('libraVoiceHeadline').textContent=stable.headline;
+  if($('libraVoiceText'))$('libraVoiceText').textContent=stable.text;
+  if($('libraVoiceAction'))$('libraVoiceAction').textContent=stable.action;
+  if($('libraVoiceDirection'))$('libraVoiceDirection').textContent=stable.direction;
+  if($('libraVoiceConfidence'))$('libraVoiceConfidence').textContent=stable.confidence||'—';
 }
 function render(detail){
   installUi();stable.lastSnapshot=detail;
@@ -95,15 +103,19 @@ function render(detail){
   if($('libraActionAccuracy'))$('libraActionAccuracy').textContent=pct(brain.actionAccuracy||0);
   if($('libraActionStates'))$('libraActionStates').textContent=String(brain.actionStates||0);
   if($('libraNextReview'))$('libraNextReview').textContent=mission.status==='ACTIVE'?clock(mission.reviewRemainingMs):'—';
-  if($('libraDeepInsight'))$('libraDeepInsight').textContent=brain.lastInsight||brain.lastLesson||'I am still separating direction from decision quality.';
+  if($('libraDeepInsight')){
+    const reviewInsight=mission.lastReview?.brain?.lastInsight||mission.lastReview?.brain?.lastLesson;
+    $('libraDeepInsight').textContent=reviewInsight||mission.reason||'I am learning silently. The detailed lesson updates at the seven-minute review.';
+  }
   if($('libraHeaderState')&&mission.status==='ACTIVE')$('libraHeaderState').textContent=mission.phase||'ACTIVE';
   if($('libraRunStatus')&&mission.status==='ACTIVE')$('libraRunStatus').textContent=`${mission.phase||'ACTIVE'} · ${mission.status}`;
-  if($('libraReadiness')&&mission.status==='ACTIVE')$('libraReadiness').textContent=`${mission.phase} · ${brain.shadowLessons||0} action lessons · ${brain.actionStates||0} retained action states · review ${clock(mission.reviewRemainingMs)}`;
+  if($('libraReadiness')&&mission.status==='ACTIVE')$('libraReadiness').textContent=`${mission.phase} · ${brain.shadowLessons||0} action lessons · ${brain.actionStates||0} retained action states · next review ${clock(mission.reviewRemainingMs)}`;
   const finished=Boolean(mission.status&&!['ACTIVE','IDLE','PAUSED'].includes(mission.status));
   if($('libraMissionNext'))$('libraMissionNext').hidden=!finished;
   if($('libraMissionRecommendation'))$('libraMissionRecommendation').textContent=mission.reason||'I am reviewing the run.';
-  const next=thoughtFor(detail);if(shouldAccept(next))Object.assign(stable,next,{changedAt:Date.now()});applyStable();
+  setStable(thoughtFor(detail));
+  applyStable();
 }
 window.addEventListener('libra-state',event=>render(event.detail||{}));
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',installUi,{once:true});else installUi();
-setInterval(applyStable,120);
+setInterval(applyStable,250);
