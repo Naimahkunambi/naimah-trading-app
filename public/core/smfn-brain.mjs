@@ -1,18 +1,18 @@
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Number(value) || 0));
 
 export const SMFN_CALIBRATION = Object.freeze({
-  label: '25 Aug 20T cohort',
-  windows: 1,
-  contracts: 42,
-  wins: 26,
-  losses: 16,
-  winRate: 0.619,
-  winRateLow: 0.468,
-  winRateHigh: 0.750,
+  label: '25 Aug original v8 two-run audit',
+  windows: 2,
+  contracts: 1003,
+  wins: 548,
+  losses: 455,
+  winRate: 0.546,
+  winRateLow: 0.515,
+  winRateHigh: 0.577,
   payoutPerStake: 0.923,
-  contractsPerMinute: 5.3,
-  contractsPerMinuteLow: 1.0,
-  contractsPerMinuteHigh: 5.3
+  contractsPerMinute: 53.4,
+  contractsPerMinuteLow: 40.0,
+  contractsPerMinuteHigh: 56.2
 });
 
 export function estimateSmfnPlan(input = {}, calibration = SMFN_CALIBRATION) {
@@ -20,10 +20,11 @@ export function estimateSmfnPlan(input = {}, calibration = SMFN_CALIBRATION) {
   const stake = clamp(input.stake ?? 1, 0.35, 10000);
   const target = Math.max(0, Number(input.target) || 0);
   const batch = clamp(Math.round(input.batch ?? 2), 1, 2);
+  const maxTrades = clamp(Math.round(input.maxTrades ?? 5000), 1, 5000);
   const paceScale = batch / 2;
-  const lowContracts = Math.max(1, Math.floor(minutes * calibration.contractsPerMinuteLow * paceScale));
-  const expectedContracts = Math.max(1, Math.round(minutes * calibration.contractsPerMinute * paceScale));
-  const highContracts = expectedContracts;
+  const lowContracts = Math.min(maxTrades, Math.max(1, Math.floor(minutes * calibration.contractsPerMinuteLow * paceScale)));
+  const expectedContracts = Math.min(maxTrades, Math.max(1, Math.round(minutes * calibration.contractsPerMinute * paceScale)));
+  const highContracts = Math.min(maxTrades, Math.max(1, Math.round(minutes * calibration.contractsPerMinuteHigh * paceScale)));
   const expectancy = winRate => winRate * calibration.payoutPerStake - (1 - winRate);
   const lowProfit = lowContracts * stake * expectancy(calibration.winRateLow);
   const expectedProfit = expectedContracts * stake * expectancy(calibration.winRate);
@@ -37,6 +38,7 @@ export function estimateSmfnPlan(input = {}, calibration = SMFN_CALIBRATION) {
     minutes,
     stake,
     batch,
+    maxTrades,
     target,
     lowContracts,
     expectedContracts,
@@ -51,8 +53,8 @@ export function estimateSmfnPlan(input = {}, calibration = SMFN_CALIBRATION) {
   };
 }
 
-export function isSmfnSniperEntry({ milkCandidate = false, patternLength = 0 } = {}) {
-  return Boolean(milkCandidate && Number(patternLength) >= 20);
+export function isSmfnSniperEntry({ milkCandidate = false } = {}) {
+  return Boolean(milkCandidate);
 }
 
 export class SmfnBrain {
@@ -121,15 +123,11 @@ export class SmfnBrain {
     this.cooldownUntil = 0;
     this.lossStreak = 0;
     this.routeHistory = [];
-    if (this.config.mode !== 'MANUAL') this.updateLane(trend);
-    if (this.activeLane !== 'NONE') this.recordRoute(Number(trend?.epoch || 0));
-    this.phase = this.config.mode === 'MANUAL' ? 'MANUAL' : this.activeLane === 'NONE' ? 'SCANNING' : 'ACTIVE';
+    this.phase = this.config.mode === 'MANUAL' ? 'MANUAL' : 'ACTIVE';
     this.status = this.phase;
     this.lastReason = this.config.mode === 'MANUAL'
       ? 'Manual Milking behavior is active; SMFN direction gates are bypassed.'
-      : this.activeLane === 'NONE'
-        ? 'SMFN is drawing the first sustained UP or DOWN footprint.'
-        : `${this.activeLane === 'UP' ? 'CALL' : 'PUT'} BOT is on from the sustained ${this.activeLane} footprint. Micro moves are ignored; the opposite bot is locked.`;
+      : 'SMFN is armed. The original v8 signal chooses one bot for each entry; the wider footprint is advisory and never holds a stale side.';
     return this.snapshot({ now, pnl:this.basePnl, trades:this.baseTrades });
   }
 
@@ -173,14 +171,8 @@ export class SmfnBrain {
 
   syncTrend(trend, epoch = 0) {
     if (this.config.mode === 'MANUAL' || !this.isRunning()) return this.snapshot();
-    const previous = this.activeLane;
-    this.updateLane(trend);
-    if (this.activeLane !== previous) {
-      this.recordRoute(epoch);
-      if (this.phase !== 'LANDING') this.phase = 'ACTIVE';
-      this.status = this.phase;
-      this.lastReason = `${this.activeLane === 'UP' ? 'CALL' : 'PUT'} BOT now follows the sustained ${this.activeLane} footprint. The opposite bot is locked.`;
-    }
+    // The footprint is intentionally visual/advisory. A multi-second map must
+    // not hold a CALL or PUT gate over millisecond, one-tick entry decisions.
     return this.snapshot();
   }
 
@@ -232,23 +224,6 @@ export class SmfnBrain {
     return { stop:false, phase:this.phase, runPnl, runTrades };
   }
 
-  trendCandidate(trend) {
-    if (!trend) return 'NONE';
-    if (!['UP','DOWN'].includes(trend.direction)) return 'NONE';
-    return trend.direction;
-  }
-
-  updateLane(trend) {
-    const candidate = this.trendCandidate(trend);
-    if (candidate === 'NONE') {
-      return this.activeLane;
-    }
-    this.activeLane = candidate;
-    this.lockCandidate = candidate;
-    this.lockCount = 1;
-    return this.activeLane;
-  }
-
   evaluate({ now = Date.now(), trend, harvest, sourceDecision, grade, totalPnl = 0, totalTrades = 0 } = {}) {
     const gate = this.sessionGate({ now:Number(now), totalPnl, totalTrades });
     if (this.config.mode === 'MANUAL') {
@@ -269,26 +244,24 @@ export class SmfnBrain {
       const result = { approved:false, batch:0, allowedDirection:'NONE', status:this.status, action:this.status, reason:this.lastReason, ...gate };
       this.lastDecision = result; return result;
     }
-    this.updateLane(trend);
-    const allowedDirection = this.activeLane === 'UP' ? 'CALL' : this.activeLane === 'DOWN' ? 'PUT' : 'NONE';
-    if (allowedDirection === 'NONE') {
-      this.status = gate.phase === 'LANDING' ? 'LANDING' : 'SCANNING';
-      const reason = 'Waiting for the map to draw its first sustained UP or DOWN footprint.';
-      const result = { approved:false, batch:0, allowedDirection, status:this.status, action:'WAIT', reason, ...gate };
-      this.lastReason = reason; this.lastDecision = result; return result;
-    }
-    const sameSide = sourceDecision?.tradeDirection === allowedDirection;
+    const requestedDirection = ['CALL','PUT'].includes(sourceDecision?.tradeDirection) ? sourceDecision.tradeDirection : 'NONE';
     const landingGrade = gate.phase !== 'LANDING' || ['A','B'].includes(String(grade || '').toUpperCase());
-    const approved = Boolean(sourceDecision?.approved && sameSide && landingGrade);
+    const approved = Boolean(sourceDecision?.approved && requestedDirection !== 'NONE' && landingGrade);
+    const nextLane = approved ? (requestedDirection === 'CALL' ? 'UP' : 'DOWN') : 'NONE';
+    if (nextLane !== this.activeLane) {
+      this.activeLane = nextLane;
+      this.lockCandidate = nextLane;
+      this.lockCount = approved ? 1 : 0;
+      this.recordRoute(Number(sourceDecision?.signalEpoch || Math.floor(Number(now) / 1000)));
+    }
+    const allowedDirection = approved ? requestedDirection : 'NONE';
     this.status = gate.phase === 'LANDING' ? 'LANDING' : 'ACTIVE';
     this.phase = gate.phase === 'LANDING' ? 'LANDING' : 'ACTIVE';
     const reason = !sourceDecision?.approved
-      ? sourceDecision?.waitReason || `${allowedDirection} BOT stays on; waiting for the 20-tick SMFN sniper entry.`
-      : !sameSide
-        ? `${sourceDecision.tradeDirection} entry was ignored. The map is routing only ${allowedDirection}.`
+      ? sourceDecision?.waitReason || 'Waiting for the next original v8 entry. No bot is held on between signals.'
       : !landingGrade
         ? `Safety Landing rejected grade ${grade || '—'}; only A/B evidence may trade.`
-          : `${allowedDirection} BOT fired a 20-tick SMFN sniper entry. The opposite bot remains locked.`;
+        : `${allowedDirection} BOT fired the original v8 entry immediately. The opposite bot is locked for this signal only.`;
     const result = {
       approved,
       batch:approved ? (gate.phase === 'LANDING' ? 1 : this.config.batch) : 0,
