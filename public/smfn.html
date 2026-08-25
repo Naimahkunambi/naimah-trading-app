@@ -75,26 +75,26 @@
         </div>
       </article>
 
-      <article class="smfnChapter" data-smfn-chapter="1" aria-hidden="true">
-        <div class="smfnChapterIntro compact">
-          <span>RADAR_02.EXE</span>
-          <h1>The Brain Watches. The Bots Wait.</h1>
-          <p>Chart and controls are separated. This screen reads the mountain; it never asks you to configure a trade while the pixels are moving.</p>
-        </div>
-        <section class="smfnBrainBanner">
-          <div class="smfnBrainIcon">S</div>
-          <div><small>SMFN NARRATOR</small><strong id="smfnNarratorHeadline">COLLECTING THE MAP</strong><span id="smfnNarratorWhy">Connect live data to begin.</span></div>
-          <div><small>LOCKED SIDE</small><b id="smfnLiveLane">NONE</b><span>CALL or PUT · never both</span></div>
-          <div><small>MAP BUDGET</small><b id="smfnRemaining">—</b><span id="smfnRemainingMeta">waiting for direction</span></div>
-        </section>
-        <div class="smfnLiveCards">
-          <section class="smfnWindow smfnDirectionCard"><div class="smfnWindowBar"><span>DIRECTION</span><b id="smfnTrendState">OBSERVE</b></div><div class="smfnWindowBody"><strong id="smfnDirection">—</strong><p id="smfnDirectionReason">The map is forming.</p></div></section>
-          <section class="smfnWindow"><div class="smfnWindowBar"><span>TREND METERS</span><b>LIVE</b></div><div class="smfnWindowBody smfnMeters"><div><span>HEALTH</span><b id="smfnHealth">0</b><meter id="smfnHealthMeter" min="0" max="100" value="0"></meter></div><div><span>MATURITY</span><b id="smfnMaturity">0%</b><meter id="smfnMaturityMeter" min="0" max="100" value="0"></meter></div><div><span>EXHAUSTION</span><b id="smfnExhaustion">0%</b><meter id="smfnExhaustionMeter" min="0" max="100" value="0"></meter></div></div></section>
-          <section class="smfnWindow smfnRuleCard"><div class="smfnWindowBar"><span>V1 PERMISSION RULE</span><b>DATA-LED</b></div><div class="smfnWindowBody"><strong>MATURE + ALIGNED</strong><p>DRIVE is watched, MATURE may trade, TURNING and HARVEST lock both bots.</p></div></section>
-        </div>
-        <section class="smfnWindow smfnChartWindow">
-          <div class="smfnWindowBar"><span>SMFN TREND RADAR · LATEST 300 TICKS</span><b id="smfnChartTag">LIVE</b></div>
-          <div class="smfnWindowBody"><canvas id="smfnTrendCanvas" width="1600" height="520"></canvas><div class="smfnLegend"><span><i class="up"></i>CALL LANE</span><span><i class="down"></i>PUT LANE</span><span><i class="wait"></i>WAIT / LOCK</span><span><i class="trade"></i>SMFN FIRE</span></div></div>
+      <article class="smfnChapter smfnMapChapter" data-smfn-chapter="1" aria-hidden="true">
+        <section class="smfnWindow smfnChartWindow smfnMapWindow">
+          <div class="smfnWindowBar"><span>MAP_02.EXE · SMFN LIVE TREND MAP</span><b id="smfnChartTag">LIVE · LAST 120 TICKS</b></div>
+          <div class="smfnWindowBody">
+            <div class="smfnMapHud">
+              <div><small>TREND</small><strong id="smfnDirection">—</strong><span id="smfnTrendState">OBSERVE</span></div>
+              <div><small>BOT ROUTE</small><strong id="smfnLiveLane">NONE</strong><span id="smfnNarratorHeadline">COLLECTING MAP</span></div>
+              <div><small>DRAWN PATH</small><strong id="smfnMapProjection">WAITING</strong><span id="smfnRemaining">—</span></div>
+              <div><small>HEALTH · MATURITY · EXHAUSTION</small><strong><i id="smfnHealth">0</i> · <i id="smfnMaturity">0%</i> · <i id="smfnExhaustion">0%</i></strong><span id="smfnRemainingMeta">waiting for direction</span></div>
+              <div><small>RUN P/L</small><strong id="smfnMapPnl">+$0.00</strong><span id="smfnDirectionReason">The map is forming.</span></div>
+            </div>
+            <div class="smfnMapTools">
+              <button id="smfnZoomIn" type="button">ZOOM +</button><button id="smfnZoomOut" type="button">ZOOM −</button><button id="smfnMapFreeze" type="button">FREEZE MAP</button><button id="smfnMapDraw" type="button">DRAW</button><button id="smfnMapClearInk" type="button">CLEAR INK</button>
+              <span class="smfnInkColors"><button type="button" data-map-color="#ffd45b" class="active" aria-label="Gold ink"></button><button type="button" data-map-color="#59f5ed" aria-label="Cyan ink"></button><button type="button" data-map-color="#ff6680" aria-label="Red ink"></button></span>
+              <label>LABEL<select id="smfnMapLabel"><option value="unlabelled">Unlabelled</option><option value="clear-uptrend">Clear uptrend</option><option value="clear-downtrend">Clear downtrend</option><option value="reversal">Reversal</option><option value="good-entry">Good entry</option><option value="bad-entry">Bad entry</option><option value="missed-entry">Missed entry</option></select></label>
+              <button id="smfnSaveMap" class="smfnPrimary" type="button">SAVE MAP PNG</button><button id="smfnSaveCase" type="button">SAVE TRAINING CASE</button>
+            </div>
+            <canvas id="smfnTrendCanvas" width="1800" height="760"></canvas>
+            <div class="smfnMapFooter"><div class="smfnLegend"><span><i class="raw"></i>PRICE</span><span><i class="trend"></i>DRAWN TREND</span><span><i class="projected"></i>PROJECTED DIRECTION</span><span><i class="trade"></i>ENTRY</span><span><i class="exit"></i>EXIT</span></div><span id="smfnNarratorWhy">Freeze affects only the picture. The bot keeps running.</span></div>
+          </div>
         </section>
       </article>
 
@@ -106,7 +106,7 @@
         </div>
         <div class="smfnModeGrid">
           <label class="smfnModeCard"><input type="radio" name="smfnMode" value="MANUAL"><span><b>MANUAL MILKING</b><em>You are the brain</em><small>Exactly the existing Milking Zone behavior. No SMFN direction gate is added.</small></span></label>
-          <label class="smfnModeCard selected"><input type="radio" name="smfnMode" value="AUTO" checked><span><b>SMFN AUTO</b><em>SMFN is the brain</em><small>Locks CALL or PUT from the wider trend and blocks the other side completely.</small></span></label>
+          <label class="smfnModeCard selected"><input type="radio" name="smfnMode" value="AUTO" checked><span><b>SMFN AUTO</b><em>SMFN is the brain</em><small>The wider map keeps CALL or PUT switched on continuously; original v8 entries flow only through that side.</small></span></label>
         </div>
         <div class="smfnPlanGrid">
           <section class="smfnWindow">
@@ -131,7 +131,7 @@
               <div class="smfnForecastHero"><small>OBSERVED RANGE</small><strong id="smfnForecastRange">—</strong><span id="smfnForecastNote">Calculating from today’s exports…</span></div>
               <div class="smfnForecastStats"><div><small>EXPECTED CONTRACTS</small><b id="smfnForecastTrades">—</b></div><div><small>CENTRAL ESTIMATE</small><b id="smfnForecastExpected">—</b></div><div><small>SUGGESTED STAKE</small><b id="smfnSuggestedStake">—</b></div><div><small>BREAK-EVEN W/R</small><b id="smfnBreakEven">52.0%</b></div></div>
               <div id="smfnFeasibility" class="smfnFeasibility">Set a mission to check feasibility.</div>
-              <p>Calibration: 3 Demo windows · 80 trend-aligned MATURE contracts · 62W / 18L · 77.5% observed. Future results can be lower or negative.</p>
+              <p>Benchmark only: 3 earlier Demo windows · 80 MATURE-aligned contracts · 62W / 18L. Continuous routing is a new revision and must build its own evidence; future results can be lower or negative.</p>
             </div>
           </section>
         </div>
@@ -146,11 +146,11 @@
           <div class="smfnBrainIcon big">S</div><div><small>SMFN DECISION</small><strong id="smfnCommandAction">NOT ARMED</strong><span id="smfnCommandReason">Connect, choose a plan, then start.</span></div><div><small>RUN P/L</small><b id="smfnRunPnl">+$0.00</b><span id="smfnRunTrades">0 contracts</span></div>
         </section>
         <div class="smfnLaneGrid">
-          <section id="smfnCallLane" class="smfnLane call"><div class="smfnLaneTop"><span>▲</span><div><small>UP MOVEMENT</small><strong>CALL BOT</strong></div><b id="smfnCallState">LOCKED</b></div><p id="smfnCallWhy">Waiting for an UP MATURE lock.</p></section>
-          <section id="smfnPutLane" class="smfnLane put"><div class="smfnLaneTop"><span>▼</span><div><small>DOWN MOVEMENT</small><strong>PUT BOT</strong></div><b id="smfnPutState">LOCKED</b></div><p id="smfnPutWhy">Waiting for a DOWN MATURE lock.</p></section>
+          <section id="smfnCallLane" class="smfnLane call"><div class="smfnLaneTop"><span>▲</span><div><small>UP MOVEMENT</small><strong>CALL BOT</strong></div><b id="smfnCallState">LOCKED</b></div><p id="smfnCallWhy">Waiting for the map to identify UP.</p></section>
+          <section id="smfnPutLane" class="smfnLane put"><div class="smfnLaneTop"><span>▼</span><div><small>DOWN MOVEMENT</small><strong>PUT BOT</strong></div><b id="smfnPutState">LOCKED</b></div><p id="smfnPutWhy">Waiting for the map to identify DOWN.</p></section>
         </div>
         <div class="smfnCommandGrid">
-          <section class="smfnWindow"><div class="smfnWindowBar"><span>SESSION SAFETY</span><b id="smfnSafetyState">READY</b></div><div class="smfnWindowBody smfnSafetyGrid"><div><small>TARGET</small><b id="smfnCmdTarget">+$30.00</b></div><div><small>HARD STOP</small><b id="smfnCmdStop">-$15.00</b></div><div><small>OPEN</small><b id="smfnCmdOpen">0</b></div><div><small>LOSS SCAN</small><b id="smfnCmdCooldown">READY</b></div></div></section>
+          <section class="smfnWindow"><div class="smfnWindowBar"><span>SESSION SAFETY</span><b id="smfnSafetyState">READY</b></div><div class="smfnWindowBody smfnSafetyGrid"><div><small>TARGET</small><b id="smfnCmdTarget">+$30.00</b></div><div><small>HARD STOP</small><b id="smfnCmdStop">-$15.00</b></div><div><small>OPEN</small><b id="smfnCmdOpen">0</b></div><div><small>ROUTER</small><b id="smfnCmdCooldown">CONTINUOUS</b></div></div></section>
           <section class="smfnWindow"><div class="smfnWindowBar"><span>MASTER SWITCH</span><b id="ptStatus">DISCONNECTED</b></div><div class="smfnWindowBody"><div class="smfnButtons vertical"><button id="ptStart" class="smfnPrimary">START SMFN</button><button id="ptPause">PAUSE</button><button id="ptStop" class="smfnDanger">STOP</button></div><p class="smfnHint">The browser tab must remain open and connected. SMFN never raises the stake to recover.</p></div></section>
         </div>
       </article>

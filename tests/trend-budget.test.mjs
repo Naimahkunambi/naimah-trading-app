@@ -36,6 +36,16 @@ test('requires hysteresis before flipping the locked direction', () => {
   assert.equal(meter.current.direction, 'DOWN');
 });
 
+test('micro pullbacks do not reverse the sustained footprint', () => {
+  const meter = new TrendBudget();
+  meter.hydrate(ticks(140, 1000, 2));
+  const last = meter.ticks.at(-1);
+  for (let index = 0; index < 8; index += 1) {
+    meter.ingest({ epoch:last.epoch + index + 1, quote:last.quote - (index + 1) * 3 });
+  }
+  assert.equal(meter.current.direction, 'UP');
+});
+
 test('original v8 fires its full selected batch before Harvest', () => {
   const base = { approved:true, requestedBatch:2 };
   const aligned = applyMilkingPolicy({ ...base, tradeDirection:'CALL' }, { state:'DRIVE', direction:'UP' });

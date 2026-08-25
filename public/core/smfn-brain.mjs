@@ -62,9 +62,6 @@ export class SmfnBrain {
       recoveryTarget:0,
       maxTrades:200,
       batch:2,
-      lockVotes:3,
-      lossCooldownSeconds:15,
-      matureExhaustionCeiling:74,
       ...config
     };
     this.reset();
@@ -106,7 +103,7 @@ export class SmfnBrain {
     return this.snapshot();
   }
 
-  start({ now = Date.now(), basePnl = 0, baseTrades = 0, ...patch } = {}) {
+  start({ now = Date.now(), basePnl = 0, baseTrades = 0, trend = null, ...patch } = {}) {
     this.configure(patch);
     this.startedAt = Number(now);
     this.deadlineAt = this.startedAt + this.config.durationMinutes * 60_000;
@@ -118,11 +115,14 @@ export class SmfnBrain {
     this.lockCount = 0;
     this.cooldownUntil = 0;
     this.lossStreak = 0;
-    this.phase = this.config.mode === 'MANUAL' ? 'MANUAL' : 'SCANNING';
+    if (this.config.mode !== 'MANUAL') this.updateLane(trend);
+    this.phase = this.config.mode === 'MANUAL' ? 'MANUAL' : this.activeLane === 'NONE' ? 'SCANNING' : 'ACTIVE';
     this.status = this.phase;
     this.lastReason = this.config.mode === 'MANUAL'
       ? 'Manual Milking behavior is active; SMFN direction gates are bypassed.'
-      : 'SMFN is scanning for a stable MATURE direction. No side is active yet.';
+      : this.activeLane === 'NONE'
+        ? 'SMFN is drawing the first sustained UP or DOWN footprint.'
+        : `${this.activeLane === 'UP' ? 'CALL' : 'PUT'} BOT is on from the sustained ${this.activeLane} footprint. Micro moves are ignored; the opposite bot is locked.`;
     return this.snapshot({ now, pnl:this.basePnl, trades:this.baseTrades });
   }
 
@@ -147,7 +147,7 @@ export class SmfnBrain {
   }
 
   isRunning() {
-    return ['SCANNING','LOCKING','ACTIVE','LANDING','MANUAL','COOLDOWN'].includes(this.status);
+    return ['SCANNING','ACTIVE','LANDING','MANUAL'].includes(this.status);
   }
 
   runPnl(totalPnl = 0) { return Number(totalPnl || 0) - this.basePnl; }
@@ -159,15 +159,6 @@ export class SmfnBrain {
       return this.snapshot({ now });
     }
     this.lossStreak += 1;
-    if (this.lossStreak >= 2) {
-      this.cooldownUntil = Number(now) + this.config.lossCooldownSeconds * 1000;
-      this.lossStreak = 0;
-      this.activeLane = 'NONE';
-      this.lockCandidate = 'NONE';
-      this.lockCount = 0;
-      this.status = 'COOLDOWN';
-      this.lastReason = `Two losses triggered a ${this.config.lossCooldownSeconds}s safety scan. Stake will not increase.`;
-    }
     return this.snapshot({ now });
   }
 
@@ -206,34 +197,21 @@ export class SmfnBrain {
     return { stop:false, phase:this.phase, runPnl, runTrades };
   }
 
-  trendCandidate(trend, harvest) {
-    if (!trend || harvest?.blocked) return 'NONE';
-    if (trend.state !== 'MATURE') return 'NONE';
+  trendCandidate(trend) {
+    if (!trend) return 'NONE';
     if (!['UP','DOWN'].includes(trend.direction)) return 'NONE';
-    if (Number(trend.exhaustion || 0) >= this.config.matureExhaustionCeiling) return 'NONE';
     return trend.direction;
   }
 
-  updateLane(trend, harvest) {
-    const candidate = this.trendCandidate(trend, harvest);
+  updateLane(trend) {
+    const candidate = this.trendCandidate(trend);
     if (candidate === 'NONE') {
-      this.activeLane = 'NONE';
-      this.lockCandidate = 'NONE';
-      this.lockCount = 0;
-      return;
+      return this.activeLane;
     }
-    if (candidate === this.activeLane) {
-      this.lockCandidate = candidate;
-      this.lockCount = this.config.lockVotes;
-      return;
-    }
-    if (candidate !== this.lockCandidate) {
-      this.lockCandidate = candidate;
-      this.lockCount = 1;
-    } else {
-      this.lockCount += 1;
-    }
-    if (this.lockCount >= this.config.lockVotes) this.activeLane = candidate;
+    this.activeLane = candidate;
+    this.lockCandidate = candidate;
+    this.lockCount = 1;
+    return this.activeLane;
   }
 
   evaluate({ now = Date.now(), trend, harvest, sourceDecision, grade, totalPnl = 0, totalTrades = 0 } = {}) {
@@ -256,35 +234,26 @@ export class SmfnBrain {
       const result = { approved:false, batch:0, allowedDirection:'NONE', status:this.status, action:this.status, reason:this.lastReason, ...gate };
       this.lastDecision = result; return result;
     }
-    if (Number(now) < this.cooldownUntil) {
-      this.status = 'COOLDOWN'; this.phase = gate.phase === 'LANDING' ? 'LANDING' : 'COOLDOWN';
-      const seconds = Math.max(1, Math.ceil((this.cooldownUntil - Number(now)) / 1000));
-      const result = { approved:false, batch:0, allowedDirection:'NONE', status:this.status, action:'SAFETY_SCAN', reason:`Safety scan ${seconds}s. Both bots are locked.`, ...gate };
-      this.lastDecision = result; return result;
-    }
-    if (this.status === 'COOLDOWN') this.status = gate.phase === 'LANDING' ? 'LANDING' : 'SCANNING';
-    this.updateLane(trend, harvest);
+    this.updateLane(trend);
     const allowedDirection = this.activeLane === 'UP' ? 'CALL' : this.activeLane === 'DOWN' ? 'PUT' : 'NONE';
     if (allowedDirection === 'NONE') {
-      this.status = this.lockCandidate === 'NONE' ? (gate.phase === 'LANDING' ? 'LANDING' : 'SCANNING') : 'LOCKING';
-      const reason = this.lockCandidate === 'NONE'
-        ? `Waiting: SMFN needs MATURE direction, exhaustion below ${this.config.matureExhaustionCeiling}, and no Harvest brake.`
-        : `Locking ${this.lockCandidate} ${this.lockCount}/${this.config.lockVotes}. Neither bot may trade yet.`;
+      this.status = gate.phase === 'LANDING' ? 'LANDING' : 'SCANNING';
+      const reason = 'Waiting for the map to draw its first sustained UP or DOWN footprint.';
       const result = { approved:false, batch:0, allowedDirection, status:this.status, action:'WAIT', reason, ...gate };
       this.lastReason = reason; this.lastDecision = result; return result;
     }
     const sameSide = sourceDecision?.tradeDirection === allowedDirection;
     const landingGrade = gate.phase !== 'LANDING' || ['A','B'].includes(String(grade || '').toUpperCase());
-    const approved = Boolean(sourceDecision?.approved && sameSide && landingGrade && !harvest?.blocked);
+    const approved = Boolean(sourceDecision?.approved && sameSide && landingGrade);
     this.status = gate.phase === 'LANDING' ? 'LANDING' : 'ACTIVE';
     this.phase = gate.phase === 'LANDING' ? 'LANDING' : 'ACTIVE';
     const reason = !sourceDecision?.approved
-      ? `${allowedDirection} BOT is active; waiting for the original v8 entry.`
+      ? `${allowedDirection} BOT stays on; waiting for the original v8 entry.`
       : !sameSide
-        ? `${sourceDecision.tradeDirection} was blocked. Only ${allowedDirection} may trade this locked ${this.activeLane} trend.`
-        : !landingGrade
-          ? `Safety Landing rejected grade ${grade || '—'}; only A/B evidence may trade.`
-          : `${allowedDirection} BOT approved. The opposite bot remains hard-locked.`;
+        ? `${sourceDecision.tradeDirection} entry was ignored. The map is routing only ${allowedDirection}.`
+      : !landingGrade
+        ? `Safety Landing rejected grade ${grade || '—'}; only A/B evidence may trade.`
+          : `${allowedDirection} BOT routed the original v8 entry. The opposite bot remains locked.`;
     const result = {
       approved,
       batch:approved ? (gate.phase === 'LANDING' ? 1 : this.config.batch) : 0,
@@ -310,7 +279,7 @@ export class SmfnBrain {
       allowedDirection:this.activeLane === 'UP' ? 'CALL' : this.activeLane === 'DOWN' ? 'PUT' : 'NONE',
       lockCandidate:this.lockCandidate,
       lockCount:this.lockCount,
-      lockVotes:this.config.lockVotes,
+      lockVotes:1,
       startedAt:this.startedAt,
       deadlineAt:this.deadlineAt,
       landingDeadlineAt:this.landingDeadlineAt,

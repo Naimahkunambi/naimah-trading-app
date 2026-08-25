@@ -314,7 +314,10 @@ function handleDecision(d) {
     now:Date.now(),
     trend:trendSnapshot,
     harvest,
-    sourceDecision:{ approved:Boolean(milkingPolicy?.approved), tradeDirection:milkDirection },
+    sourceDecision:{
+      approved:smfnBrain.config.mode === 'AUTO' ? milkCandidate : Boolean(milkingPolicy?.approved),
+      tradeDirection:milkDirection
+    },
     grade:d.sniper?.grade,
     totalPnl:engine.snapshot().sessionPnL,
     totalTrades:engine.trades.length
@@ -570,10 +573,10 @@ function bindControls() {
     try {
       auth(); traderConfig(); engine.start();
       if (IS_SMFN) {
-        smfnBrain.start({ ...smfnPlanFromForm(), now:Date.now(), basePnl:engine.snapshot().sessionPnL, baseTrades:engine.trades.length });
+        smfnBrain.start({ ...smfnPlanFromForm(), now:Date.now(), basePnl:engine.snapshot().sessionPnL, baseTrades:engine.trades.length, trend:trendSnapshot });
         engine.log('info', smfnPlanFromForm().mode === 'MANUAL'
           ? 'Manual Milking is active with the original behavior unchanged.'
-          : 'SMFN armed: MATURE trend lock, one side only, two-loss safety scan, hard stop and time-boxed Safety Landing.');
+          : 'SMFN armed: the live map continuously routes one side only. Original v8 entries flow through the active CALL or PUT bot.');
       } else {
         engine.log('info',IS_MILKING_ZONE ? 'Milking Zone armed: original frequent v8 entries fire at the selected batch. Active Harvest stops new entries inside the two-pulse projected-end buffer, then releases on continuation or a locked flip.' : `v8.1 armed on ${isRealAccount()?'REAL':'DEMO'}: only the full sniper lane can buy. Six comparison variants remain shadow-only.`);
       }

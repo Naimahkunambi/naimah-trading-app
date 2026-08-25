@@ -13,14 +13,10 @@ test('planner labels estimates as evidence-only and scales target stake', () => 
   assert.equal(plan.breakEvenRate, 52);
 });
 
-test('auto mode locks exactly one mature direction after three votes', () => {
+test('auto mode routes the current map direction immediately', () => {
   const brain = new SmfnBrain();
   brain.start({ now:0, basePnl:0, baseTrades:0 });
-  for (let i = 0; i < 2; i += 1) {
-    const result = brain.evaluate({ now:1000+i, trend:trend('UP'), harvest:{blocked:false}, sourceDecision:source('CALL'), totalPnl:0, totalTrades:0 });
-    assert.equal(result.approved, false);
-  }
-  const result = brain.evaluate({ now:1003, trend:trend('UP'), harvest:{blocked:false}, sourceDecision:source('CALL'), totalPnl:0, totalTrades:0 });
+  const result = brain.evaluate({ now:1000, trend:trend('UP','DRIVE'), harvest:{blocked:false}, sourceDecision:source('CALL'), totalPnl:0, totalTrades:0 });
   assert.equal(result.approved, true);
   assert.equal(result.allowedDirection, 'CALL');
   assert.equal(brain.snapshot().activeLane, 'UP');
@@ -29,20 +25,38 @@ test('auto mode locks exactly one mature direction after three votes', () => {
 test('opposite bot never coexists with the active lane', () => {
   const brain = new SmfnBrain();
   brain.start({ now:0 });
-  for (let i=0;i<3;i+=1) brain.evaluate({ now:i, trend:trend('DOWN'), harvest:{blocked:false}, sourceDecision:source('PUT') });
+  brain.evaluate({ now:1, trend:trend('DOWN'), harvest:{blocked:false}, sourceDecision:source('PUT') });
   const blocked = brain.evaluate({ now:4, trend:trend('DOWN'), harvest:{blocked:false}, sourceDecision:source('CALL') });
   assert.equal(blocked.approved, false);
   assert.equal(blocked.allowedDirection, 'PUT');
 });
 
-test('drive, turning and harvest cannot arm auto mode', () => {
-  for (const state of ['DRIVE','TURNING','HARVEST']) {
+test('drive, mature, turning and harvest keep the mapped bot on', () => {
+  for (const state of ['DRIVE','MATURE','TURNING','HARVEST']) {
     const brain = new SmfnBrain(); brain.start({ now:0 });
-    for (let i=0;i<4;i+=1) {
-      const result = brain.evaluate({ now:i, trend:trend('UP',state), harvest:{blocked:state==='HARVEST'}, sourceDecision:source('CALL') });
-      assert.equal(result.approved, false);
-    }
+    const result = brain.evaluate({ now:1, trend:trend('UP',state,99), harvest:{blocked:true}, sourceDecision:source('CALL') });
+    assert.equal(result.approved, true);
+    assert.equal(result.allowedDirection, 'CALL');
   }
+});
+
+test('a missing map reading does not erase the last active bot', () => {
+  const brain = new SmfnBrain(); brain.start({ now:0 });
+  brain.evaluate({ now:1, trend:trend('UP','DRIVE'), sourceDecision:source('CALL') });
+  const held = brain.evaluate({ now:2, trend:{ direction:'NONE', state:'OBSERVE' }, sourceDecision:source('CALL') });
+  assert.equal(held.allowedDirection, 'CALL');
+  assert.equal(held.approved, true);
+});
+
+test('losses do not pause or clear the routed bot', () => {
+  const brain = new SmfnBrain(); brain.start({ now:0 });
+  brain.evaluate({ now:1, trend:trend('DOWN','DRIVE'), sourceDecision:source('PUT') });
+  brain.registerResult(-1, 2);
+  brain.registerResult(-1, 3);
+  const next = brain.evaluate({ now:4, trend:trend('DOWN','HARVEST'), harvest:{blocked:true}, sourceDecision:source('PUT') });
+  assert.equal(next.status, 'ACTIVE');
+  assert.equal(next.allowedDirection, 'PUT');
+  assert.equal(next.approved, true);
 });
 
 test('negative timed run enters a time-boxed single-contract landing', () => {
