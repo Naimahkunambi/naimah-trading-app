@@ -63,6 +63,7 @@ function missionRunPnl(){return Number(engine.snapshot().sessionPnL||0)-Number(m
 function missionRunTrades(){return Math.max(0,totalSettled()-Number(mission.baseTrades||0))}
 function missionPlanFromForm(){return{durationMinutes:Math.max(1,Math.min(720,Number($('libraDuration')?.value||30))),targetProfit:Math.max(0,Number($('ptTakeProfit')?.value||30)),hardStop:Math.max(.35,Number($('ptStopLoss')?.value||15)),maxTrades:Math.max(1,Math.min(5000,Math.round(Number($('ptMaxTrades')?.value||200)))),goal:Math.max(0,Number($('libraGoal')?.value||650))}}
 function money(value){return `${Number(value||0)>=0?'+':'-'}$${Math.abs(Number(value||0)).toFixed(2)}`}
+function sniperMission(since=0){try{return window.LIBRA_SNIPER?.missionSnapshot?.(since)||null}catch{return null}}
 
 function missionSignals(since=0){return signals.filter(row=>row.missionId===mission.id&&Number(row.createdAt||0)>=since)}
 function shadowSummary(since=0){
@@ -74,12 +75,7 @@ function shadowSummary(since=0){
   return out;
 }
 
-function derivePhase(runPnl){
-  if(mission.phase==='LEARN')return'LEARN';
-  if(runPnl<0)return'RECOVER';
-  if(runPnl>=5)return'PROTECT';
-  return'WORK';
-}
+function derivePhase(runPnl){if(mission.phase==='LEARN')return'LEARN';if(runPnl<0)return'RECOVER';if(runPnl>=5)return'PROTECT';return'WORK'}
 function checkMission(now=Date.now()){
   const runPnl=missionRunPnl(),runTrades=missionRunTrades();
   if(mission.status!=='ACTIVE')return{stop:true,runPnl,runTrades,status:mission.status};
@@ -98,38 +94,24 @@ function checkMission(now=Date.now()){
 function makeSnapshot(){
   const engineState=engine.snapshot(),prediction=brain.predict(localTicks),brainState=brain.snapshot(),gate=checkMission();
   const allShadow=mission.id?shadowSummary(mission.startedAt):shadowSummary(Number.MAX_SAFE_INTEGER);
-  return{version:LIBRA_VERSION,ticks:localTicks,signals:[...signals].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)),engine:engineState,analysis:workerAnalysis,trend:trendSnapshot,prediction,brain:brainState,arbitration:lastArbitration,
-    shadows:allShadow,
-    mission:{...mission,runPnl:gate.runPnl,runTrades:gate.runTrades,remainingMs:mission.deadlineAt?Math.max(0,mission.deadlineAt-Date.now()):0,reviewRemainingMs:mission.nextReviewAt?Math.max(0,mission.nextReviewAt-Date.now()):0},
-    accountType:selectedAccount?String(selectedAccount.account_type||'DEMO').toUpperCase():'NONE'}
+  return{version:LIBRA_VERSION,ticks:localTicks,signals:[...signals].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)),engine:engineState,analysis:workerAnalysis,trend:trendSnapshot,prediction,brain:brainState,arbitration:lastArbitration,shadows:allShadow,sniper:sniperMission(mission.startedAt),mission:{...mission,runPnl:gate.runPnl,runTrades:gate.runTrades,remainingMs:mission.deadlineAt?Math.max(0,mission.deadlineAt-Date.now()):0,reviewRemainingMs:mission.nextReviewAt?Math.max(0,mission.nextReviewAt-Date.now()):0},accountType:selectedAccount?String(selectedAccount.account_type||'DEMO').toUpperCase():'NONE'}
 }
 function publish(){const detail=makeSnapshot();window.dispatchEvent(new CustomEvent('libra-state',{detail}));return detail}
 
 function learnPreviousTick(epoch,quote){
   if(!pendingForecast||Number(epoch)<=Number(pendingForecast.epoch))return;
   const actualUp=quote>pendingForecast.quote?true:quote<pendingForecast.quote?false:null;
-  brain.learn(actualUp==null?{actualUp:null}:{features:pendingForecast.features,signature:pendingForecast.signature,predictedUp:pendingForecast.probabilityUp,actualUp,regime:pendingForecast.regime,confidence:pendingForecast.confidence});
-  persistBrain();
+  brain.learn(actualUp==null?{actualUp:null}:{features:pendingForecast.features,signature:pendingForecast.signature,predictedUp:pendingForecast.probabilityUp,actualUp,regime:pendingForecast.regime,confidence:pendingForecast.confidence});persistBrain();
 }
-function settleVirtual(direction,entryQuote,exitQuote){
-  if(!['CALL','PUT'].includes(direction))return null;
-  const actualDirection=Number(exitQuote)>Number(entryQuote)?'CALL':Number(exitQuote)<Number(entryQuote)?'PUT':'NONE';
-  if(actualDirection==='NONE')return{outcome:'FLAT',profit:0,actualDirection};
-  const won=direction===actualDirection;return{outcome:won?'WON':'LOST',profit:won?PAYOUT:-1,actualDirection};
-}
+function settleVirtual(direction,entryQuote,exitQuote){if(!['CALL','PUT'].includes(direction))return null;const actualDirection=Number(exitQuote)>Number(entryQuote)?'CALL':Number(exitQuote)<Number(entryQuote)?'PUT':'NONE';if(actualDirection==='NONE')return{outcome:'FLAT',profit:0,actualDirection};const won=direction===actualDirection;return{outcome:won?'WON':'LOST',profit:won?PAYOUT:-1,actualDirection}}
 function settleShadowOnTick(epoch,quote){
   for(const [signalId,pending] of [...shadowPending.entries()]){
     if(Number(epoch)<=Number(pending.epoch))continue;
     const row=signals.find(item=>item.signalId===signalId);if(!row){shadowPending.delete(signalId);continue}
     const actualDirection=Number(quote)>Number(pending.quote)?'CALL':Number(quote)<Number(pending.quote)?'PUT':'NONE';
-    const sani=settleVirtual(pending.sourceApproved?pending.sourceDirection:'NONE',pending.quote,quote);
-    const libra=settleVirtual(pending.libraDirection,pending.quote,quote);
+    const sani=settleVirtual(pending.sourceApproved?pending.sourceDirection:'NONE',pending.quote,quote),libra=settleVirtual(pending.libraDirection,pending.quote,quote);
     row.shadowSettled=true;row.shadowExitEpoch=Number(epoch);row.shadowExitQuote=Number(quote);row.shadowResult={sani,libra};
-    if(['CALL','PUT'].includes(actualDirection)){
-      brain.learnShadow({signature:pending.signature,regime:pending.regime,action:pending.action,tradeDirection:pending.libraDirection,sourceApproved:pending.sourceApproved,sourceDirection:pending.sourceDirection,actualDirection,confidence:pending.confidence,horizons:pending.horizons});
-      persistBrain();
-      row.libra.shadowLesson=brain.snapshot().lastLesson;
-    }
+    if(['CALL','PUT'].includes(actualDirection)){brain.learnShadow({signature:pending.signature,regime:pending.regime,action:pending.action,tradeDirection:pending.libraDirection,sourceApproved:pending.sourceApproved,sourceDirection:pending.sourceDirection,actualDirection,confidence:pending.confidence,horizons:pending.horizons});persistBrain();row.libra.shadowLesson=brain.snapshot().lastLesson}
     shadowPending.delete(signalId);saveSignals();
   }
 }
@@ -148,112 +130,77 @@ function initWorker(){
   worker.onerror=event=>{workerAnalysis={state:'WORKER_ERROR',reason:event.message||'Worker error'};showError(event.message||'Worker error');publish()};
   worker.postMessage({type:'INIT',ticks:localTicks,executionOffset:1,memoryRows:[]});
 }
-function sourceFromDecision(decision){const baseline=decision?.pattern?.baseline||{},approved=Boolean(decision?.controlApproved),tradeDirection=baseline.direction==='UP'?'CALL':baseline.direction==='DOWN'?'PUT':decision?.tradeDirection;return{approved,tradeDirection:['CALL','PUT'].includes(tradeDirection)?tradeDirection:'NONE',signalEpoch:decision?.signalEpoch,signalQuote:decision?.signalQuote,familyId:baseline.familyId||decision?.pattern?.familyId,edge:baseline.edge??decision?.pattern?.edge,why:approved?'Original v8 baseline qualified.':'Original v8 baseline is quiet.'}}
-
-function saniPaidDecision(source,shadowArb){
-  return {
-    ...shadowArb,
-    action:source.approved?'SANI PASS':'SANI QUIET',
-    approved:Boolean(source.approved&&['CALL','PUT'].includes(source.tradeDirection)),
-    tradeDirection:source.approved?source.tradeDirection:'NONE',
-    reason:source.approved?`SANI won the last review, so ${source.tradeDirection} passes paid while Libra keeps learning in shadow.`:'SANI has no paid setup on this decision.'
-  };
+function sourceFromDecision(decision){
+  const baseline=decision?.pattern?.baseline||{},pattern=decision?.pattern||{},sniper=decision?.sniper||{},structure=decision?.structure||{};
+  const approved=Boolean(decision?.controlApproved),tradeDirection=baseline.direction==='UP'?'CALL':baseline.direction==='DOWN'?'PUT':decision?.tradeDirection;
+  return{approved,tradeDirection:['CALL','PUT'].includes(tradeDirection)?tradeDirection:'NONE',signalEpoch:decision?.signalEpoch,signalQuote:decision?.signalQuote,familyId:baseline.familyId||pattern.familyId,edge:baseline.edge??pattern.edge,why:approved?'Original v8 baseline qualified.':'Original v8 baseline is quiet.',intent:{familyId:baseline.familyId||pattern.familyId,patternDirection:baseline.direction||pattern.direction,edge:baseline.edge??pattern.edge,avgSimilarity:pattern.avgSimilarity,matchCount:pattern.matchCount,top10Agree:pattern.top10Agree,top10Total:pattern.top10Total,sameTagCount:pattern.sameTagCount,samePhaseCount:pattern.samePhaseCount,structureTag:structure.tag,phase:structure.phase,repeatCount:sniper.repeatCount,sniperScore:sniper.score,familyRate:sniper.familyMemory?.rate,familySamples:sniper.familyMemory?.total,addressRate:sniper.addressMemory?.rate,addressSamples:sniper.addressMemory?.total}}
 }
+function saniPaidDecision(source,shadowArb){return{...shadowArb,action:source.approved?'SANI PASS':'SANI QUIET',approved:Boolean(source.approved&&['CALL','PUT'].includes(source.tradeDirection)),tradeDirection:source.approved?source.tradeDirection:'NONE',reason:source.approved?`SANI supplies the ${source.tradeDirection} setup. Libra's final sniper gate decides whether this exact moment deserves money.`:'SANI has no paid setup on this decision.'}}
 function choosePaidDecision(source,shadowArb,runPnl){
   if(mission.phase==='LEARN'||mission.authorityMode==='NONE')return null;
-  if(mission.authorityMode==='SANI_LEADS')return saniPaidDecision(source,shadowArb);
+  if(['SANI_LEADS','SNIPER_FILTER'].includes(mission.authorityMode))return saniPaidDecision(source,shadowArb);
   const libra=brain.decide({ticks:localTicks,sourceDecision:source,openContracts:exposure(),runPnl,mode:'PAID'});
-  if(mission.authorityMode==='TEAM')return libra;
-  if(mission.authorityMode==='LIBRA_CONTROLS')return libra;
+  if(mission.authorityMode==='TEAM'||mission.authorityMode==='LIBRA_CONTROLS')return libra;
   return null;
 }
-
 function storeDecision(decision,source,shadowArb,paidArb){
-  const finalArb=paidArb||shadowArb;
-  return upsertSignal(decision.signalId,{missionId:mission.id,missionPhase:mission.phase,authorityMode:mission.authorityMode,approved:Boolean(paidArb?.approved),sourceApproved:source.approved,sourceDirection:source.tradeDirection,tradeDirection:paidArb?.tradeDirection||'NONE',signalEpoch:decision.signalEpoch,signalQuote:decision.signalQuote,duration:FIXED_DURATION,structure:decision.structure,pattern:{...decision.pattern,foundationFamily:source.familyId,foundationEdge:source.edge},sniper:decision.sniper,campaign:decision.campaign,decisionMs:decision.decisionMs,
-    libra:{action:finalArb.action,shadowAction:shadowArb.action,reason:finalArb.reason,regime:finalArb.regime,direction:finalArb.direction,confidence:finalArb.confidence,probabilityUp:finalArb.probabilityUp,bestHorizon:finalArb.bestHorizon,horizons:finalArb.horizons,signature:finalArb.signature,features:finalArb.features,policyScore:finalArb.policyScore,policySamples:finalArb.policySamples,modelGeneration:finalArb.modelGeneration,updates:finalArb.updates,retainedStates:finalArb.retainedStates,lastLearnMs:finalArb.lastLearnMs},
-    shadowLibra:{action:shadowArb.action,direction:shadowArb.tradeDirection,reason:shadowArb.reason,policyScore:shadowArb.policyScore,policySamples:shadowArb.policySamples},why:`${finalArb.reason} Foundation: ${source.why}`});
+  const finalArb=paidArb||shadowArb,armed=window.LIBRA_SNIPER?.preArmed?.()||{};
+  return upsertSignal(decision.signalId,{missionId:mission.id,missionPhase:mission.phase,authorityMode:mission.authorityMode,approved:Boolean(paidArb?.approved),sourceApproved:source.approved,sourceDirection:source.tradeDirection,tradeDirection:paidArb?.tradeDirection||'NONE',signalEpoch:decision.signalEpoch,signalQuote:decision.signalQuote,duration:FIXED_DURATION,structure:decision.structure,pattern:{...decision.pattern,foundationFamily:source.familyId,foundationEdge:source.edge},saniIntent:source.intent,sniper:decision.sniper,campaign:decision.campaign,decisionMs:decision.decisionMs,libra:{action:finalArb.action,shadowAction:shadowArb.action,reason:finalArb.reason,regime:finalArb.regime,direction:finalArb.direction,confidence:finalArb.confidence,probabilityUp:finalArb.probabilityUp,bestHorizon:finalArb.bestHorizon,horizons:finalArb.horizons,signature:finalArb.signature,features:finalArb.features,preArmedEpoch:armed.epoch,preArmedRegime:armed.regime,preArmedSignature:armed.signature,preArmedFeatures:armed.features,policyScore:finalArb.policyScore,policySamples:finalArb.policySamples,modelGeneration:finalArb.modelGeneration,updates:finalArb.updates,retainedStates:finalArb.retainedStates,lastLearnMs:finalArb.lastLearnMs},shadowLibra:{action:shadowArb.action,direction:shadowArb.tradeDirection,reason:shadowArb.reason,policyScore:shadowArb.policyScore,policySamples:shadowArb.policySamples},why:`${finalArb.reason} Foundation: ${source.why}`});
 }
-
 function handleDecision(decision){
   if(!decision?.signalId)return;
-  const source=sourceFromDecision(decision);
-  if(mission.status!=='ACTIVE')return;
+  const source=sourceFromDecision(decision);if(mission.status!=='ACTIVE')return;
   const gate=checkMission();if(gate.stop)return;
-  const shadowArb=brain.decide({ticks:localTicks,sourceDecision:source,openContracts:0,runPnl:gate.runPnl,mode:'SHADOW'});
-  const paidArb=choosePaidDecision(source,shadowArb,gate.runPnl);
-  const row=storeDecision(decision,source,shadowArb,paidArb);
+  const shadowArb=brain.decide({ticks:localTicks,sourceDecision:source,openContracts:0,runPnl:gate.runPnl,mode:'SHADOW'}),paidArb=choosePaidDecision(source,shadowArb,gate.runPnl),row=storeDecision(decision,source,shadowArb,paidArb);
   shadowPending.set(decision.signalId,{epoch:Number(decision.signalEpoch),quote:Number(decision.signalQuote),sourceApproved:source.approved,sourceDirection:source.tradeDirection,action:shadowArb.action,libraDirection:shadowArb.tradeDirection,signature:shadowArb.signature,regime:shadowArb.regime,confidence:shadowArb.confidence,horizons:shadowArb.horizons});
-
-  if(mission.phase==='LEARN'||!paidArb){
-    row.executionState='SHADOW_ONLY';row.approved=false;row.tradeDirection='NONE';lastArbitration={...shadowArb,action:'SHADOW LEARN',approved:false,tradeDirection:shadowArb.tradeDirection,shadowDirection:shadowArb.tradeDirection,at:Date.now(),signalId:decision.signalId};saveSignals();publish();return;
-  }
-
+  if(mission.phase==='LEARN'||!paidArb){row.executionState='SHADOW_ONLY';row.approved=false;row.tradeDirection='NONE';lastArbitration={...shadowArb,action:'SHADOW LEARN',approved:false,tradeDirection:shadowArb.tradeDirection,shadowDirection:shadowArb.tradeDirection,at:Date.now(),signalId:decision.signalId};saveSignals();publish();return}
   const arbitration=paidArb;lastArbitration={...arbitration,at:Date.now(),signalId:decision.signalId};
   if(!arbitration.approved||!['CALL','PUT'].includes(arbitration.tradeDirection)){row.executionState=`${mission.authorityMode}_${String(arbitration.action).replaceAll(' ','_')}`;saveSignals();publish();return}
   const state=engine.snapshot();if(!state.running){row.executionState='PAID_ENGINE_PAUSED';saveSignals();publish();return}if(state.safeBlocked){row.executionState='SAFE_BLOCK';saveSignals();publish();return}if(exposure()>=MAX_CONCURRENT){row.executionState='EXPOSURE_FULL';saveSignals();publish();return}
   try{
     traderConfig();const room=Math.max(0,MAX_CONCURRENT-exposure()),wanted=Math.min(batchSize(),room,Math.max(0,mission.maxTrades-missionRunTrades())),sent=[];
     for(let slot=1;slot<=wanted;slot+=1){const didSend=engine.execute({direction:arbitration.tradeDirection,structure:`${mission.authorityMode.toLowerCase()}-${String(arbitration.action).toLowerCase().replaceAll(' ','-')}-${source.familyId||decision.structure?.tag||'state'}`,epoch:decision.signalEpoch,quote:decision.signalQuote,detectedPerf:perfNow(),detectedWallMs:Date.now(),patternMeta:{signalId:decision.signalId,slot,action:arbitration.action,authorityMode:mission.authorityMode,sourceDirection:source.tradeDirection,libraDirection:arbitration.tradeDirection,regime:arbitration.regime,confidence:arbitration.confidence}});if(didSend)sent.push(slot)}
-    row.requestedBatch=sent.length;row.executionState=sent.length?`ORDER_SENT_X${sent.length}`:'NOT_SENT';if(sent.length)engine.log('success',`${mission.authorityMode} · ${arbitration.action} · ${arbitration.tradeDirection} x${sent.length}.`)
+    row.requestedBatch=sent.length;row.executionState=sent.length?`ORDER_SENT_X${sent.length}`:'SNIPER_BLOCKED';if(sent.length)engine.log('success',`${mission.authorityMode} · ${arbitration.action} · ${arbitration.tradeDirection} x${sent.length}.`)
   }catch(error){row.executionState='ERROR';row.error=error.message;showError(error.message)}
   saveSignals();publish();
 }
 
 function reviewMission(force=false){
-  if(mission.status!=='ACTIVE')return;
-  if(!force&&Date.now()<mission.nextReviewAt)return;
-  const now=Date.now();
-  const freshBlock=shadowSummary(mission.reviewStartedAt);
-  const cumulative=shadowSummary(mission.startedAt);
-  const brainState=brain.snapshot();
-  mission.reviewCount+=1;
-  mission.lastReview={at:now,block:freshBlock,cumulative,brain:{actionAccuracy:brainState.actionAccuracy,shadowLessons:brainState.shadowLessons,generation:brainState.generation,lastLesson:brainState.lastLesson,lastInsight:brainState.lastInsight}};
-  mission.reviewStartedAt=now;
-  mission.nextReviewAt=now+REVIEW_MS;
-
+  if(mission.status!=='ACTIVE')return;if(!force&&Date.now()<mission.nextReviewAt)return;
+  const now=Date.now(),freshBlock=shadowSummary(mission.reviewStartedAt),cumulative=shadowSummary(mission.startedAt),brainState=brain.snapshot(),sniper=sniperMission(mission.startedAt);
+  mission.reviewCount+=1;mission.lastReview={at:now,block:freshBlock,cumulative,sniper,brain:{actionAccuracy:brainState.actionAccuracy,shadowLessons:brainState.shadowLessons,generation:brainState.generation,lastLesson:brainState.lastLesson,lastInsight:brainState.lastInsight}};mission.reviewStartedAt=now;mission.nextReviewAt=now+REVIEW_MS;
   const enough=cumulative.comparable>=25&&brainState.shadowLessons>=20;
   const saniReady=enough&&cumulative.sani.trades>=12&&cumulative.sani.pnl>0&&cumulative.sani.winRate>BREAK_EVEN;
   const libraReady=enough&&cumulative.libra.trades>=12&&cumulative.libra.pnl>0&&cumulative.libra.winRate>BREAK_EVEN;
+  const sniperReady=Boolean(sniper&&sniper.sniper.trades>=12&&sniper.sniper.pnl>0&&sniper.sniper.winRate>BREAK_EVEN+2);
 
   if(mission.phase==='LEARN'){
-    if(saniReady&&libraReady){
-      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';
-      mission.authorityMode=cumulative.libra.pnl>cumulative.sani.pnl?'LIBRA_CONTROLS':'TEAM';
-      mission.reason=`Seven-minute review: both have edge. SANI ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}; Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}. Paid trading starts. SANI keeps producing entries and Libra keeps shadow-learning; ${mission.authorityMode==='LIBRA_CONTROLS'?'Libra owns the final hand because her shadow edge is stronger.':'SANI is currently stronger, so SANI entries keep priority while Libra controls only when retained evidence justifies interference.'}`;
-      mission.recommendation=mission.authorityMode;
-      engine.start();
+    if(sniperReady){
+      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode='SNIPER_FILTER';
+      mission.reason=`Seven-minute review: the broad streams are not my paid trigger anymore. SANI still finds setups; my filtered SANI sniper subset has ${sniper.sniper.trades} entries at ${sniper.sniper.winRate.toFixed(1)}% ${money(sniper.sniper.pnl)}, above ${BREAK_EVEN.toFixed(1)}% break-even. Paid Demo unlocks SNIPER ONLY. GOOD, LATE and TRASH remain shadow. SANI all-stream ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}; broad Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}.`;
+      mission.recommendation='SNIPER_FILTER';engine.start();
+    }else if(saniReady&&libraReady){
+      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode=cumulative.libra.pnl>cumulative.sani.pnl?'LIBRA_CONTROLS':'TEAM';mission.reason=`Seven-minute review: both broad systems have edge. SANI ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}; Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}. Paid trading starts, with the sniper gate still protecting the final entry.`;mission.recommendation=mission.authorityMode;engine.start();
     }else if(saniReady){
-      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';
-      mission.authorityMode='SANI_LEADS';
-      mission.reason=`Seven-minute review: SANI won. SANI ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)} is above break-even while Libra is ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}. SANI starts paid Demo trading now. Libra stays beside him in shadow, learns every outcome, and must earn intervention authority at a later review.`;
-      mission.recommendation='SANI_LEADS';
-      engine.start();
+      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode='SANI_LEADS';mission.reason=`Seven-minute review: SANI is above break-even at ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}. SANI supplies paid setups; Libra's sniper gate still decides whether each exact moment qualifies.`;mission.recommendation='SANI_LEADS';engine.start();
     }else if(libraReady){
-      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';
-      mission.authorityMode='LIBRA_CONTROLS';
-      mission.reason=`Seven-minute review: Libra has the edge while SANI does not. Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)} vs SANI ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}. Paid Demo trading starts under Libra's final hand. SANI continues shadowing as the control.`;
-      mission.recommendation='LIBRA_CONTROLS';
-      engine.start();
+      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode='LIBRA_CONTROLS';mission.reason=`Seven-minute review: broad Libra has edge at ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}. Paid Demo begins, but the final sniper gate remains mandatory.`;mission.recommendation='LIBRA_CONTROLS';engine.start();
     }else{
-      mission.authorityMode='NONE';
-      const why=!enough?`I need more clean comparisons: ${cumulative.comparable}/25 decisions and ${brainState.shadowLessons}/20 action lessons.`:`Neither system has a proven paid edge yet. SANI ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}; Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}; break-even ${BREAK_EVEN.toFixed(1)}%.`;
-      mission.reason=`Seven-minute review: ${why} Nobody touches Demo money. I keep shadowing.`;
-      mission.recommendation='LEARN';
-      engine.pause();
+      mission.authorityMode='NONE';const sniperText=sniper?` Sniper subset: ${sniper.sniper.trades} entries, ${sniper.sniper.winRate.toFixed(1)}% ${money(sniper.sniper.pnl)}; rejected entries: ${sniper.rejected.trades}, ${sniper.rejected.winRate.toFixed(1)}% ${money(sniper.rejected.pnl)}.`:'';
+      mission.reason=`Seven-minute review: no paid entry subset is proven yet. SANI ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}; broad Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}.${sniperText} Nobody touches Demo money. I keep narrowing SANI setups into SNIPER versus GOOD/LATE/TRASH.`;mission.recommendation='LEARN';engine.pause();
     }
   }else{
-    const freshEnough=freshBlock.comparable>=20;
-    const saniHealthy=freshEnough&&freshBlock.sani.trades>=10&&freshBlock.sani.pnl>0&&freshBlock.sani.winRate>BREAK_EVEN;
-    const libraHealthy=freshEnough&&freshBlock.libra.trades>=10&&freshBlock.libra.pnl>0&&freshBlock.libra.winRate>BREAK_EVEN;
-    if(!saniHealthy&&!libraHealthy&&freshEnough){
-      mission.phase='LEARN';mission.authorityMode='NONE';mission.reason=`Latest seven-minute block lost its edge. SANI ${money(freshBlock.sani.pnl)}; Libra ${money(freshBlock.libra.pnl)}. Paid Demo trading pauses and both return to shadow.`;mission.recommendation='LEARN';engine.pause();
-    }else if(saniHealthy&&!libraHealthy){
-      mission.authorityMode='SANI_LEADS';mission.reason=`Health review: SANI is the only proven edge in the latest block at ${freshBlock.sani.winRate.toFixed(1)}% ${money(freshBlock.sani.pnl)}. SANI keeps paid authority; Libra stays shadow-only.`;mission.recommendation='SANI_LEADS';engine.start();
-    }else if(!saniHealthy&&libraHealthy){
-      mission.authorityMode='LIBRA_CONTROLS';mission.reason=`Health review: Libra is the only proven edge in the latest block at ${freshBlock.libra.winRate.toFixed(1)}% ${money(freshBlock.libra.pnl)}. Libra controls paid authority; SANI stays shadow control.`;mission.recommendation='LIBRA_CONTROLS';engine.start();
-    }else if(saniHealthy&&libraHealthy){
-      mission.authorityMode=freshBlock.libra.pnl>freshBlock.sani.pnl?'LIBRA_CONTROLS':'TEAM';mission.reason=`Health review: both still have edge. SANI ${money(freshBlock.sani.pnl)}; Libra ${money(freshBlock.libra.pnl)}. ${mission.authorityMode==='LIBRA_CONTROLS'?'Libra keeps the final hand.':'SANI keeps priority and Libra intervenes only where her retained decision utility is stronger.'}`;mission.recommendation=mission.authorityMode;engine.start();
+    const currentSniper=sniperMission(mission.startedAt),sniperHealthy=Boolean(currentSniper&&currentSniper.sniper.trades>=12&&currentSniper.sniper.pnl>0&&currentSniper.sniper.winRate>BREAK_EVEN+1);
+    if(mission.authorityMode==='SNIPER_FILTER'){
+      if(sniperHealthy){mission.reason=`Sniper health check: ${currentSniper.sniper.trades} filtered SANI entries are ${currentSniper.sniper.winRate.toFixed(1)}% ${money(currentSniper.sniper.pnl)}. SNIPER ONLY authority stays active; rejected setups remain shadow.`;mission.recommendation='SNIPER_FILTER';engine.start()}
+      else{mission.phase='LEARN';mission.authorityMode='NONE';mission.reason=`My sniper subset has lost its proven edge. Paid Demo pauses. I return to shadow and keep learning the entry boundary.`;mission.recommendation='LEARN';engine.pause()}
+    }else{
+      const freshEnough=freshBlock.comparable>=20,saniHealthy=freshEnough&&freshBlock.sani.trades>=10&&freshBlock.sani.pnl>0&&freshBlock.sani.winRate>BREAK_EVEN,libraHealthy=freshEnough&&freshBlock.libra.trades>=10&&freshBlock.libra.pnl>0&&freshBlock.libra.winRate>BREAK_EVEN;
+      if(sniperHealthy){mission.authorityMode='SNIPER_FILTER';mission.reason=`The sniper subset is now the cleanest edge at ${currentSniper.sniper.winRate.toFixed(1)}% ${money(currentSniper.sniper.pnl)}. I switch paid authority to SANI SETUP → LIBRA MOMENT.`;mission.recommendation='SNIPER_FILTER';engine.start()}
+      else if(!saniHealthy&&!libraHealthy&&freshEnough){mission.phase='LEARN';mission.authorityMode='NONE';mission.reason=`Latest block lost its paid edge. Paid Demo pauses and I return to entry shadowing.`;mission.recommendation='LEARN';engine.pause()}
+      else if(saniHealthy&&!libraHealthy){mission.authorityMode='SANI_LEADS';mission.reason=`Health review: SANI is the only broad edge. Libra still applies the mandatory sniper gate to each SANI setup.`;mission.recommendation='SANI_LEADS';engine.start()}
+      else if(!saniHealthy&&libraHealthy){mission.authorityMode='LIBRA_CONTROLS';mission.reason=`Health review: Libra is the only broad edge. Final sniper gate remains mandatory.`;mission.recommendation='LIBRA_CONTROLS';engine.start()}
+      else if(saniHealthy&&libraHealthy){mission.authorityMode=freshBlock.libra.pnl>freshBlock.sani.pnl?'LIBRA_CONTROLS':'TEAM';mission.reason=`Health review: both broad systems still have edge. Final paid entry remains subject to Libra's sniper gate.`;mission.recommendation=mission.authorityMode;engine.start()}
     }
   }
   publish();
@@ -271,8 +218,8 @@ function showError(message){if(!$('traderError'))return;$('traderError').textCon
 function clearError(){if(!$('traderError'))return;$('traderError').textContent='';$('traderError').classList.add('hidden')}
 function renderAccounts(){const select=$('ptAccount');if(!select)return;select.innerHTML=accounts.length?'':'<option value="">No accounts found</option>';for(const account of accounts){const option=document.createElement('option');option.value=account.account_id;option.textContent=`${String(account.account_type).toUpperCase()} · ${account.account_id} · ${account.currency} ${account.balance}`;select.appendChild(option)}const saved=localStorage.getItem('sani.deriv.accountId');if(saved&&accounts.some(account=>account.account_id===saved&&String(account.account_type).toLowerCase()!=='real'))select.value=saved;const demo=accounts.find(account=>String(account.account_type).toLowerCase()!=='real');if(demo&&(!select.value||String(accounts.find(account=>account.account_id===select.value)?.account_type).toLowerCase()==='real'))select.value=demo.account_id;selectedAccount=accounts.find(account=>account.account_id===select.value)||null;publish()}
 
-function startMission(){clearError();try{auth();const plan=traderConfig();if(engine.running)engine.pause();shadowPending.clear();const now=Date.now();mission={...freshMission(),...plan,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',authorityMode:'NONE',startedAt:now,deadlineAt:now+plan.durationMinutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),reason:'First seven-minute shadow study. SANI takes virtual entries; Libra takes her own virtual entries. Nobody spends Demo money. At review, whichever system proves a paid edge earns authority; Libra keeps learning regardless.',recommendation:'LEARN'};lastArbitration={action:'SHADOW LEARN',approved:false,tradeDirection:'NONE',reason:mission.reason,at:now};publish()}catch(error){showError(error.message)}}
-function continueMission(minutes){if(!engine.snapshot().connected){showError('Connect the trader first.');return}const now=Date.now();mission.status='ACTIVE';mission.phase='LEARN';mission.authorityMode='NONE';mission.durationMinutes=minutes;mission.deadlineAt=now+minutes*60000;mission.reviewStartedAt=now;mission.nextReviewAt=now+REVIEW_MS;mission.basePnl=Number(engine.snapshot().sessionPnL||0);mission.baseTrades=totalSettled();mission.peakPnl=0;mission.protectedFloor=0;mission.reason=`New ${minutes}-minute mission. I keep my learned brain and return to a seven-minute shadow study before paid authority.`;engine.pause();shadowPending.clear();publish()}
+function startMission(){clearError();try{auth();const plan=traderConfig();if(engine.running)engine.pause();shadowPending.clear();const now=Date.now();mission={...freshMission(),...plan,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',authorityMode:'NONE',startedAt:now,deadlineAt:now+plan.durationMinutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),reason:'First seven-minute shadow study. SANI finds virtual setups; Libra pre-arms continuously and judges the exact entry moment. Nobody spends Demo money. At review, a profitable SNIPER subset can earn paid authority even if the broad SANI and broad Libra streams are still losing.',recommendation:'LEARN'};lastArbitration={action:'SHADOW LEARN',approved:false,tradeDirection:'NONE',reason:mission.reason,at:now};publish()}catch(error){showError(error.message)}}
+function continueMission(minutes){if(!engine.snapshot().connected){showError('Connect the trader first.');return}const now=Date.now();mission.status='ACTIVE';mission.phase='LEARN';mission.authorityMode='NONE';mission.durationMinutes=minutes;mission.deadlineAt=now+minutes*60000;mission.reviewStartedAt=now;mission.nextReviewAt=now+REVIEW_MS;mission.basePnl=Number(engine.snapshot().sessionPnL||0);mission.baseTrades=totalSettled();mission.peakPnl=0;mission.protectedFloor=0;mission.reason=`New ${minutes}-minute mission. Learned memory stays. SANI finds setups; Libra goes back to shadowing the exact entry moment until the sniper subset proves itself.`;engine.pause();shadowPending.clear();publish()}
 function bindControls(){
   $('ptLoadAccounts')?.addEventListener('click',async()=>{clearError();try{const appId=$('ptAppId').value.trim(),token=$('ptToken').value.trim();if(!appId||!token)throw new Error('App ID and trade token are required.');$('ptLoadAccounts').disabled=true;const data=await api('accounts',{appId,token});accounts=data.accounts||[];localStorage.setItem('sani.deriv.appId',appId);sessionStorage.setItem('sani.deriv.token',token);renderAccounts()}catch(error){showError(error.message)}finally{$('ptLoadAccounts').disabled=false}});
   $('ptAccount')?.addEventListener('change',()=>{localStorage.setItem('sani.deriv.accountId',$('ptAccount').value);lastOtpContext=null;selectedAccount=accounts.find(account=>account.account_id===$('ptAccount').value)||null;publish()});
@@ -283,7 +230,7 @@ function bindControls(){
   $('ptStop')?.addEventListener('click',()=>{mission.status='STOPPED';mission.reason='Mission stopped. Memory retained.';engine.stop();publish()});
   $('ptReset')?.addEventListener('click',()=>{try{engine.resetSession();mission=freshMission();signals=[];shadowPending.clear();localStorage.removeItem(SIGNAL_KEY);publish()}catch(error){showError(error.message)}});
   $('libraClearResults')?.addEventListener('click',()=>{if(confirm('Clear Libra trade results? Her learned brain will be retained.')){signals=[];shadowPending.clear();localStorage.removeItem(SIGNAL_KEY);publish()}});
-  $('libraResetBrain')?.addEventListener('click',()=>{if(confirm('Erase Libra learned memory and start her brain from zero?')){brain.importState({weights:Array(14).fill(0),bias:0,updates:0,mistakes:0,correct:0,skippedFlats:0,generation:1,stateMemory:{},actionMemory:{},regimeMemory:{},horizonMemory:{},recent:[],shadowRecent:[],shadowLessons:0,shadowMistakes:0,actionWins:0,actionLosses:0,lastLesson:'Memory reset. I am learning from zero.',lastInsight:'I am rebuilding my decision memory.',lastLearnMs:0,lastUpdateAt:0});persistBrain();pendingForecast=null;publish()}})
+  $('libraResetBrain')?.addEventListener('click',()=>{if(confirm('Erase Libra learned memory and start her brain from zero?')){brain.importState({weights:Array(14).fill(0),bias:0,updates:0,mistakes:0,correct:0,skippedFlats:0,generation:1,stateMemory:{},actionMemory:{},regimeMemory:{},horizonMemory:{},recent:[],shadowRecent:[],shadowLessons:0,shadowMistakes:0,actionWins:0,actionLosses:0,lastLesson:'Memory reset. I am learning from zero.',lastInsight:'I am rebuilding my decision memory.',lastLearnMs:0,lastUpdateAt:0});persistBrain();pendingForecast=null;window.LIBRA_SNIPER?.reset?.();publish()}})
 }
 
 window.addEventListener('sani-observatory-analysis',event=>{const tick=event.detail;if(Number(tick?.archiveCount||0)>localTicks.length+10&&typeof window.SaniObservatory?.getTicks==='function'){const feed=window.SaniObservatory.getTicks().filter(row=>Number.isFinite(+row.epoch)&&Number.isFinite(+row.quote)).sort((a,b)=>a.epoch-b.epoch).slice(-10000);if(feed.length){localTicks=feed;lastTickKey=`${feed.at(-1).epoch}:${feed.at(-1).quote}`;trendSnapshot=trendBudget.hydrate(localTicks)||trendSnapshot;worker?.postMessage({type:'INIT',ticks:localTicks,executionOffset:1,memoryRows:[]});const f=brain.predict(localTicks);pendingForecast=f.ready?{epoch:f.epoch,quote:f.quote,features:[...(f.features||[])],signature:f.signature,probabilityUp:f.probabilityUp,regime:f.regime,confidence:f.confidence}:null;publish();return}}if(tick?.epoch!==undefined&&tick?.quote!==undefined)postTick(tick)});
