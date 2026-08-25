@@ -28,6 +28,7 @@ function makeCollapsible(card, collapsed = true) {
 
 function install() {
   installStyles();
+  const isMilkingZone = document.body?.dataset?.lab === 'milking-zone';
   document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('SANI Sniper Campaign v8.1'));
   const intro = document.querySelector('.obsIntro');
   if (intro) {
@@ -83,7 +84,7 @@ function install() {
 
   const title = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Master Trader') || x.textContent.includes('Sniper Campaign') || x.textContent.includes('Pattern + Structure'));
   if (title) title.textContent = 'Sniper Campaign v8.1 · Controlled Execution';
-  if ($('ptStart')) $('ptStart').textContent = 'Start v8.1 Sniper';
+  if ($('ptStart')) $('ptStart').textContent = isMilkingZone ? 'START MILKING' : 'Start v8.1 Sniper';
 
   const cooldownLabel = $('ptCooldown')?.closest('label');
   if (cooldownLabel) cooldownLabel.childNodes[0].textContent = 'Batch contracts / pulse';
@@ -108,8 +109,8 @@ function install() {
     if (ledgerHead) ledgerHead.innerHTML = '<tr><th>Time</th><th>Event</th><th>Family</th><th>Address</th><th>Score</th><th>Memory</th><th>Campaign</th><th>Batch</th><th>Speed</th><th>Actual</th><th>Shadow</th><th>Why</th></tr>';
     ledgerTable.closest('.tableWrap')?.classList.add('v8Audit');
   }
-  if ($('ptExportLedger')) $('ptExportLedger').textContent = 'Export v8.1 CSV';
-  if ($('ptClearLedger')) $('ptClearLedger').textContent = 'Clear v8.1 cohort';
+  if ($('ptExportLedger')) $('ptExportLedger').textContent = isMilkingZone ? 'DOWNLOAD MILK CSV' : 'Export v8.1 CSV';
+  if ($('ptClearLedger')) $('ptClearLedger').textContent = isMilkingZone ? 'CLEAR MILK RESULTS' : 'Clear v8.1 cohort';
 
   const patternTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Pattern lens') || x.textContent.includes('Pattern Observatory'));
   if (patternTitle) patternTitle.textContent = 'Visible Pattern Research';
