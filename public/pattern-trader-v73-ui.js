@@ -28,7 +28,7 @@ function makeCollapsible(card, collapsed = true) {
 
 function install() {
   installStyles();
-  const isMilkingZone = document.body?.dataset?.lab === 'milking-zone';
+  const isMilkingZone = ['milking-zone','smfn'].includes(document.body?.dataset?.lab);
   document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('SANI Sniper Campaign v8.1'));
   const intro = document.querySelector('.obsIntro');
   if (intro) {

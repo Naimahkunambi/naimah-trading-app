@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#071523">
+  <title>SMFN · Sani Milks for Naimah</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/milking-zone.css">
+  <link rel="stylesheet" href="/smfn.css">
+</head>
+<body data-lab="smfn">
+  <main class="smfnApp">
+    <header class="smfnTopbar">
+      <a class="smfnBrand" href="/smfn.html" aria-label="SMFN home">
+        <span class="smfnOrb">S</span>
+        <span><small>SANI INTELLIGENCE SYSTEM</small><b>SANI MILKS FOR NAIMAH</b></span>
+        <em>SMFN</em>
+      </a>
+      <nav class="smfnLabs" aria-label="Trading labs">
+        <a href="/">BOS LAB</a>
+        <a href="/observatory.html">MASTER / PATTERN</a>
+        <a href="/milking-zone.html">MILKING ZONE</a>
+        <a class="active" href="/smfn.html">SMFN</a>
+      </nav>
+      <div class="smfnHeaderHud"><span id="smfnHeaderState">OFFLINE</span><b id="smfnHeaderPnl">+$0.00</b></div>
+    </header>
+
+    <div class="smfnTicker"><span>SMFN v1</span><b id="smfnTickerText">ONE BRAIN · ONE SIDE · NEVER BOTH</b><em>DEMO RESEARCH SYSTEM</em></div>
+
+    <nav class="smfnRail" aria-label="SMFN sections">
+      <button class="active" data-smfn-target="0"><b>01</b><span>CONNECT</span></button>
+      <button data-smfn-target="1"><b>02</b><span>LIVE MAP</span></button>
+      <button data-smfn-target="2"><b>03</b><span>PLAN</span></button>
+      <button data-smfn-target="3"><b>04</b><span>COMMAND</span></button>
+      <button data-smfn-target="4"><b>05</b><span>RESULTS</span></button>
+      <button data-smfn-target="5"><b>06</b><span>TAPE</span></button>
+    </nav>
+
+    <section class="smfnStage">
+      <article class="smfnChapter active" data-smfn-chapter="0">
+        <div class="smfnChapterIntro">
+          <span>SETUP_01.EXE</span>
+          <h1>Power Up the Brain</h1>
+          <p>Same trusted connection flow. Public ticks build the map; a Demo account gives SMFN permission to test decisions.</p>
+        </div>
+        <div class="smfnSplit">
+          <section class="smfnWindow">
+            <div class="smfnWindowBar"><span>MARKET_PORTAL</span><b><i id="obsDot" class="dot"></i><span id="obsStatus">Disconnected</span></b></div>
+            <div class="smfnWindowBody">
+              <div class="smfnForm two">
+                <label>SYMBOL<input id="obsSymbol" value="1HZ25V"></label>
+                <label>MEMORY<select id="archiveLimit"><option value="2000">2,000 ticks</option><option value="5000" selected>5,000 ticks</option><option value="10000">10,000 ticks</option></select></label>
+              </div>
+              <div class="smfnButtons"><button id="obsConnect" class="smfnPrimary">CONNECT LIVE</button><button id="obsDisconnect">DISCONNECT</button><button id="clearTickArchive">CLEAR TICKS</button></div>
+              <div id="obsError" class="errorBox hidden"></div>
+              <div class="smfnPortalReadout"><small>TICKS READY</small><strong id="smfnArchiveCount">0</strong><span>feeding the Trend Budget</span></div>
+            </div>
+          </section>
+
+          <section class="smfnWindow">
+            <div class="smfnWindowBar"><span>DEMO_PLAYER</span><b id="smfnTraderConnection">OFFLINE</b></div>
+            <div class="smfnWindowBody">
+              <div class="smfnForm two">
+                <label>APP ID<input id="ptAppId" autocomplete="off" placeholder="Deriv App ID"></label>
+                <label>TRADE TOKEN<input id="ptToken" type="password" autocomplete="off" placeholder="PAT / OAuth token"></label>
+              </div>
+              <div class="smfnButtons"><button id="ptLoadAccounts">LOAD ACCOUNTS</button></div>
+              <label>DEMO ACCOUNT<select id="ptAccount"><option value="">Load accounts first</option></select></label>
+              <div class="smfnButtons"><button id="ptConnect" class="smfnPrimary">CONNECT TRADER</button><button id="ptDisconnect">DISCONNECT</button></div>
+              <div id="traderError" class="errorBox hidden"></div>
+              <p class="smfnHint">Demo only · browser must remain open · 1-tick contract · no martingale</p>
+            </div>
+          </section>
+        </div>
+      </article>
+
+      <article class="smfnChapter" data-smfn-chapter="1" aria-hidden="true">
+        <div class="smfnChapterIntro compact">
+          <span>RADAR_02.EXE</span>
+          <h1>The Brain Watches. The Bots Wait.</h1>
+          <p>Chart and controls are separated. This screen reads the mountain; it never asks you to configure a trade while the pixels are moving.</p>
+        </div>
+        <section class="smfnBrainBanner">
+          <div class="smfnBrainIcon">S</div>
+          <div><small>SMFN NARRATOR</small><strong id="smfnNarratorHeadline">COLLECTING THE MAP</strong><span id="smfnNarratorWhy">Connect live data to begin.</span></div>
+          <div><small>LOCKED SIDE</small><b id="smfnLiveLane">NONE</b><span>CALL or PUT · never both</span></div>
+          <div><small>MAP BUDGET</small><b id="smfnRemaining">—</b><span id="smfnRemainingMeta">waiting for direction</span></div>
+        </section>
+        <div class="smfnLiveCards">
+          <section class="smfnWindow smfnDirectionCard"><div class="smfnWindowBar"><span>DIRECTION</span><b id="smfnTrendState">OBSERVE</b></div><div class="smfnWindowBody"><strong id="smfnDirection">—</strong><p id="smfnDirectionReason">The map is forming.</p></div></section>
+          <section class="smfnWindow"><div class="smfnWindowBar"><span>TREND METERS</span><b>LIVE</b></div><div class="smfnWindowBody smfnMeters"><div><span>HEALTH</span><b id="smfnHealth">0</b><meter id="smfnHealthMeter" min="0" max="100" value="0"></meter></div><div><span>MATURITY</span><b id="smfnMaturity">0%</b><meter id="smfnMaturityMeter" min="0" max="100" value="0"></meter></div><div><span>EXHAUSTION</span><b id="smfnExhaustion">0%</b><meter id="smfnExhaustionMeter" min="0" max="100" value="0"></meter></div></div></section>
+          <section class="smfnWindow smfnRuleCard"><div class="smfnWindowBar"><span>V1 PERMISSION RULE</span><b>DATA-LED</b></div><div class="smfnWindowBody"><strong>MATURE + ALIGNED</strong><p>DRIVE is watched, MATURE may trade, TURNING and HARVEST lock both bots.</p></div></section>
+        </div>
+        <section class="smfnWindow smfnChartWindow">
+          <div class="smfnWindowBar"><span>SMFN TREND RADAR · LATEST 300 TICKS</span><b id="smfnChartTag">LIVE</b></div>
+          <div class="smfnWindowBody"><canvas id="smfnTrendCanvas" width="1600" height="520"></canvas><div class="smfnLegend"><span><i class="up"></i>CALL LANE</span><span><i class="down"></i>PUT LANE</span><span><i class="wait"></i>WAIT / LOCK</span><span><i class="trade"></i>SMFN FIRE</span></div></div>
+        </section>
+      </article>
+
+      <article class="smfnChapter" data-smfn-chapter="2" aria-hidden="true">
+        <div class="smfnChapterIntro compact">
+          <span>PLANNER_03.EXE</span>
+          <h1>Tell SMFN the Mission</h1>
+          <p>Choose the old manual behavior or hand direction control to SMFN. Forecasts are evidence ranges from today’s Demo exports—not promises.</p>
+        </div>
+        <div class="smfnModeGrid">
+          <label class="smfnModeCard"><input type="radio" name="smfnMode" value="MANUAL"><span><b>MANUAL MILKING</b><em>You are the brain</em><small>Exactly the existing Milking Zone behavior. No SMFN direction gate is added.</small></span></label>
+          <label class="smfnModeCard selected"><input type="radio" name="smfnMode" value="AUTO" checked><span><b>SMFN AUTO</b><em>SMFN is the brain</em><small>Locks CALL or PUT from the wider trend and blocks the other side completely.</small></span></label>
+        </div>
+        <div class="smfnPlanGrid">
+          <section class="smfnWindow">
+            <div class="smfnWindowBar"><span>MISSION SETTINGS</span><b>EDIT WHILE STOPPED</b></div>
+            <div class="smfnWindowBody">
+              <div class="smfnForm three">
+                <label>RUN TIME<select id="smfnDuration"><option value="10">10 minutes</option><option value="30" selected>30 minutes</option><option value="60">1 hour</option><option value="120">2 hours</option><option value="300">5 hours</option><option value="360">6 hours</option><option value="720">12 hours</option></select></label>
+                <label>PROFIT TARGET $<input id="ptTakeProfit" type="number" min="0" step="0.1" value="30"></label>
+                <label>STAKE / CONTRACT $<input id="ptStake" type="number" min="0.35" step="0.01" value="1"></label>
+                <label>HARD LOSS CAP $<input id="ptStopLoss" type="number" min="0.35" step="0.1" value="15"></label>
+                <label>MAX CONTRACTS<input id="ptMaxTrades" type="number" min="1" step="1" value="200"></label>
+                <label>BATCH / ENTRY<select id="ptCooldown"><option value="1">1 contract</option><option value="2" selected>2 contracts</option></select></label>
+                <label>SAFETY LANDING<select id="smfnLandingMinutes"><option value="0">Off</option><option value="5">5 minutes</option><option value="10" selected>10 minutes</option><option value="15">15 minutes</option></select></label>
+                <label>LANDING TARGET $<input id="smfnRecoveryTarget" type="number" step="0.1" value="0"></label>
+              </div>
+              <p class="smfnHint">Safety Landing activates only if the timed run ends below its landing target. It uses one contract, A/B evidence only, the same stake, and stops at the deadline or hard loss cap.</p>
+            </div>
+          </section>
+          <section class="smfnWindow smfnForecast">
+            <div class="smfnWindowBar"><span>EVIDENCE FORECAST</span><b>NOT A GUARANTEE</b></div>
+            <div class="smfnWindowBody">
+              <div class="smfnForecastHero"><small>OBSERVED RANGE</small><strong id="smfnForecastRange">—</strong><span id="smfnForecastNote">Calculating from today’s exports…</span></div>
+              <div class="smfnForecastStats"><div><small>EXPECTED CONTRACTS</small><b id="smfnForecastTrades">—</b></div><div><small>CENTRAL ESTIMATE</small><b id="smfnForecastExpected">—</b></div><div><small>SUGGESTED STAKE</small><b id="smfnSuggestedStake">—</b></div><div><small>BREAK-EVEN W/R</small><b id="smfnBreakEven">52.0%</b></div></div>
+              <div id="smfnFeasibility" class="smfnFeasibility">Set a mission to check feasibility.</div>
+              <p>Calibration: 3 Demo windows · 80 trend-aligned MATURE contracts · 62W / 18L · 77.5% observed. Future results can be lower or negative.</p>
+            </div>
+          </section>
+        </div>
+      </article>
+
+      <article class="smfnChapter" data-smfn-chapter="3" aria-hidden="true">
+        <div class="smfnChapterIntro compact inline">
+          <div><span>COMMAND_04.EXE</span><h1>Two Bots. One Key.</h1></div>
+          <div class="smfnRunClock"><small>RUN CLOCK</small><strong id="smfnRunClock">00:00:00</strong><span id="smfnRunPhase">IDLE</span></div>
+        </div>
+        <section class="smfnCommandHero">
+          <div class="smfnBrainIcon big">S</div><div><small>SMFN DECISION</small><strong id="smfnCommandAction">NOT ARMED</strong><span id="smfnCommandReason">Connect, choose a plan, then start.</span></div><div><small>RUN P/L</small><b id="smfnRunPnl">+$0.00</b><span id="smfnRunTrades">0 contracts</span></div>
+        </section>
+        <div class="smfnLaneGrid">
+          <section id="smfnCallLane" class="smfnLane call"><div class="smfnLaneTop"><span>▲</span><div><small>UP MOVEMENT</small><strong>CALL BOT</strong></div><b id="smfnCallState">LOCKED</b></div><p id="smfnCallWhy">Waiting for an UP MATURE lock.</p></section>
+          <section id="smfnPutLane" class="smfnLane put"><div class="smfnLaneTop"><span>▼</span><div><small>DOWN MOVEMENT</small><strong>PUT BOT</strong></div><b id="smfnPutState">LOCKED</b></div><p id="smfnPutWhy">Waiting for a DOWN MATURE lock.</p></section>
+        </div>
+        <div class="smfnCommandGrid">
+          <section class="smfnWindow"><div class="smfnWindowBar"><span>SESSION SAFETY</span><b id="smfnSafetyState">READY</b></div><div class="smfnWindowBody smfnSafetyGrid"><div><small>TARGET</small><b id="smfnCmdTarget">+$30.00</b></div><div><small>HARD STOP</small><b id="smfnCmdStop">-$15.00</b></div><div><small>OPEN</small><b id="smfnCmdOpen">0</b></div><div><small>LOSS SCAN</small><b id="smfnCmdCooldown">READY</b></div></div></section>
+          <section class="smfnWindow"><div class="smfnWindowBar"><span>MASTER SWITCH</span><b id="ptStatus">DISCONNECTED</b></div><div class="smfnWindowBody"><div class="smfnButtons vertical"><button id="ptStart" class="smfnPrimary">START SMFN</button><button id="ptPause">PAUSE</button><button id="ptStop" class="smfnDanger">STOP</button></div><p class="smfnHint">The browser tab must remain open and connected. SMFN never raises the stake to recover.</p></div></section>
+        </div>
+      </article>
+
+      <article class="smfnChapter" data-smfn-chapter="4" aria-hidden="true">
+        <div class="smfnChapterIntro compact inline"><div><span>RESULTS_05.EXE</span><h1>Mission Debrief</h1></div><div class="smfnResultScore"><small>CUMULATIVE SMFN P/L</small><strong id="smfnResultPnl">+$0.00</strong><span id="smfnResultRate">0.0% win rate</span></div></div>
+        <div class="smfnResultCards"><div><small>CONTRACTS</small><strong id="smfnContracts">0</strong></div><div><small>WINS</small><strong id="smfnWins">0</strong></div><div><small>LOSSES</small><strong id="smfnLosses">0</strong></div><div><small>CALL CONTRACTS</small><strong id="smfnCalls">0</strong></div><div><small>PUT CONTRACTS</small><strong id="smfnPuts">0</strong></div><div><small>SMFN BLOCKS</small><strong id="smfnBlocks">0</strong></div><div><small>ACTIVE LANE</small><strong id="smfnResultLane">NONE</strong></div><div><small>RUN STATUS</small><strong id="smfnResultStatus">IDLE</strong></div></div>
+        <section class="smfnWindow smfnTableWindow"><div class="smfnWindowBar"><span>SMFN CONTRACT RESULTS</span><b>LATEST FIRST</b></div><div class="smfnWindowBody"><table><thead><tr><th>TIME</th><th>SIDE</th><th>TREND</th><th>GRADE</th><th>RESULT</th><th>ENTRY → EXIT</th><th>P/L</th></tr></thead><tbody id="smfnTradeBody"><tr><td colspan="7">NO SMFN TRADES YET</td></tr></tbody></table></div></section>
+      </article>
+
+      <article class="smfnChapter" data-smfn-chapter="5" aria-hidden="true">
+        <div class="smfnChapterIntro compact inline"><div><span>TAPE_06.EXE</span><h1>Brain Decision Tape</h1></div><div class="smfnButtons"><button id="ptExportLedger" class="smfnPrimary">DOWNLOAD SMFN CSV</button><button id="ptClearLedger">CLEAR RESULTS</button><button id="ptReset">RESET RUN</button></div></div>
+        <section class="smfnWindow smfnTableWindow tape"><div class="smfnWindowBar"><span>ONE ROW PER V8 DECISION</span><b>SMFN AUDIT</b></div><div class="smfnWindowBody"><table><thead><tr><th>TIME</th><th>SMFN</th><th>LANE</th><th>TREND</th><th>STAGE</th><th>V8 SIDE</th><th>ACTION</th><th>WHY</th></tr></thead><tbody id="smfnTapeBody"><tr><td colspan="8">COLLECTING TICKS</td></tr></tbody></table></div></section>
+      </article>
+    </section>
+
+    <footer class="smfnControls"><button id="smfnPrev">◀ PREVIOUS</button><div><span id="smfnChapterLabel">SCREEN 1 / 6</span><i><b id="smfnProgress"></b></i></div><button id="smfnNext" class="smfnPrimary">NEXT ▶</button></footer>
+  </main>
+
+  <section id="smfnCompat" class="card" aria-hidden="true">
+    <select id="patternLength"><option value="20" selected>20</option></select><input id="similarityFloor" value="0.82"><input id="maxMatches" value="80"><button id="reanalyzeBtn"></button>
+    <span id="patternSizeStat"></span><span id="archiveCount"></span><span id="matchCount"></span><span id="avgSimilarity"></span><span id="executionOffsetStat"></span><span id="executionWindowCaption"></span><span id="canvasCaption"></span>
+    <canvas id="tickCanvas"></canvas><canvas id="patternCanvas"></canvas><div id="horizonGrid"></div><div id="executionHorizonGrid"></div><table><tbody id="patternRows"></tbody></table><canvas id="masterCanvas"></canvas>
+    <div id="ptRealGate" class="hidden"></div><span id="ptAccountPill"></span><span id="ptPnl"></span><span id="ptWL"></span><span id="ptOpen"></span>
+    <span id="mtRegime200"></span><span id="mtTrend80"></span><span id="mtSession"></span><span id="mtEntry20"></span><span id="mtChop"></span><span id="mtVolatility"></span><span id="ptEntryOffset"></span><span id="ptBought"></span><span id="ptCohortN"></span><span id="ptCohortWL"></span><span id="ptCohortPnl"></span><span id="ptBullWL"></span><span id="ptBearWL"></span><span id="ptQualified"></span><span id="ptSkipped"></span>
+    <div id="ptSignal"></div><table><tbody id="ptTradeRows"></tbody></table><table><tbody id="ptLedgerRows"></tbody></table><button id="ptResetCalibration"></button><div id="ptLogs"></div><i id="ptDot"></i>
+  </section>
+
+  <script type="module" src="/smfn.js"></script>
+  <script type="module" src="/observatory.js"></script>
+  <script type="module" src="/pattern-trader-v72.js"></script>
+</body>
+</html>
