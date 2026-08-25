@@ -90,6 +90,8 @@ export class TrendBudget {
       ageSeconds: 0,
       distanceUnits: 0,
       remaining: { low: null, median: null, high: null },
+      remainingDistance: { low: null, median: null, high: null },
+      targetQuote: { low: null, median: null, high: null },
       efficiency: 0,
       slope60: 0,
       slope120: 0,
@@ -169,6 +171,8 @@ export class TrendBudget {
     const durationHigh = percentile(this.completedDurations, .75, 260);
     const distanceUnits = this.direction === 'NONE' ? 0 : Math.abs(tick.quote - this.directionStartedQuote) / Math.max(primary.avgMove || 0, Number.EPSILON);
     const expectedDistance = percentile(this.completedDistances, .5, 55);
+    const distanceLow = percentile(this.completedDistances, .25, 34);
+    const distanceHigh = percentile(this.completedDistances, .75, 89);
     const ageProgress = clamp(ageSeconds / Math.max(1, expectedDuration) * 100);
     const distanceProgress = clamp(distanceUnits / Math.max(1, expectedDistance) * 100);
     const extensionProgress = this.direction === 'UP' ? primary.position * 100 : this.direction === 'DOWN' ? (1 - primary.position) * 100 : 50;
@@ -196,6 +200,16 @@ export class TrendBudget {
       (health < 45 ? 18 : 0) +
       (patternOpposes ? 10 : 0)
     );
+
+    const remainingDistance = {
+      low: Math.max(0, distanceLow - distanceUnits),
+      median: Math.max(0, expectedDistance - distanceUnits),
+      high: Math.max(0, distanceHigh - distanceUnits)
+    };
+    const directionSign = this.direction === 'UP' ? 1 : this.direction === 'DOWN' ? -1 : 0;
+    const targetQuotes = directionSign
+      ? [distanceLow, expectedDistance, distanceHigh].map(distance => this.directionStartedQuote + directionSign * distance * primary.avgMove)
+      : [];
 
     let state = 'OBSERVE';
     let reason = 'Direction is not stable enough to lock.';
@@ -226,6 +240,16 @@ export class TrendBudget {
         median: Math.max(0, Math.round(expectedDuration - ageSeconds)),
         high: Math.max(0, Math.round(durationHigh - ageSeconds))
       },
+      remainingDistance: {
+        low:Number(remainingDistance.low.toFixed(1)),
+        median:Number(remainingDistance.median.toFixed(1)),
+        high:Number(remainingDistance.high.toFixed(1))
+      },
+      targetQuote: targetQuotes.length ? {
+        low:Number(Math.min(...targetQuotes).toFixed(2)),
+        median:Number(targetQuotes[1].toFixed(2)),
+        high:Number(Math.max(...targetQuotes).toFixed(2))
+      } : { low:null, median:null, high:null },
       efficiency:Number((primary.efficiency * 100).toFixed(1)),
       slope60:Number(primary.slopeNorm.toFixed(3)),
       slope120:Number(confirm.slopeNorm.toFixed(3)),
@@ -237,25 +261,117 @@ export class TrendBudget {
   }
 }
 
-export function applyMilkingPolicy(decision, trend) {
+export class HarvestBrake {
+  constructor(config = {}) {
+    this.config = {
+      pulseLead:2,
+      minMaturity:68,
+      minExhaustion:66,
+      resumeHealth:58,
+      resumeExhaustion:62,
+      resumeVotes:2,
+      ...config
+    };
+    this.reset();
+  }
+
+  reset() {
+    this.active = null;
+    this.resumeVotes = 0;
+    return this.snapshot('READY');
+  }
+
+  snapshot(action = 'READY', extra = {}) {
+    return {
+      active:Boolean(this.active),
+      action,
+      direction:this.active?.direction || 'NONE',
+      startedAt:this.active?.startedAt || null,
+      bufferSeconds:this.active?.bufferSeconds || null,
+      resumeVotes:this.resumeVotes,
+      ...extra
+    };
+  }
+
+  evaluate({ trend, epoch, quote, pulseGapSeconds = 1 } = {}) {
+    const direction = trend?.direction || 'NONE';
+    const state = trend?.state || 'OBSERVE';
+    const safeGap = Math.max(1, Number(pulseGapSeconds) || 1);
+    const bufferSeconds = Math.max(2, Math.round(safeGap * this.config.pulseLead));
+    const timeClose = Number.isFinite(Number(trend?.remaining?.median)) && Number(trend.remaining.median) <= bufferSeconds;
+    const distanceClose = Number.isFinite(Number(trend?.remainingDistance?.median)) && Number(trend.remainingDistance.median) <= bufferSeconds;
+    const lateEvidence = direction !== 'NONE' && (
+      (state === 'HARVEST' && (timeClose || distanceClose)) ||
+      (Number(trend?.maturity || 0) >= this.config.minMaturity &&
+        Number(trend?.exhaustion || 0) >= this.config.minExhaustion &&
+        Boolean(trend?.decelerating) &&
+        (timeClose || distanceClose))
+    );
+
+    if (!this.active && lateEvidence) {
+      this.active = { direction, startedAt:Number(epoch) || 0, startedQuote:Number(quote), bufferSeconds };
+      this.resumeVotes = 0;
+      return this.snapshot('HARVEST_ENTER', { blocked:true, reason:`Projected trend end is inside the next ${this.config.pulseLead} entry opportunities.` });
+    }
+
+    if (!this.active) return this.snapshot('MILK', { blocked:false, reason:'Drive remains open for repeated entries.' });
+
+    if (direction !== 'NONE' && direction !== this.active.direction) {
+      const previousDirection = this.active.direction;
+      this.active = null;
+      this.resumeVotes = 0;
+      return this.snapshot('FLIP_RELEASE', { blocked:false, previousDirection, direction, reason:`The new ${direction} direction is locked; Milk may enter the new side.` });
+    }
+
+    const recovered = direction === this.active.direction && state === 'DRIVE' &&
+      Number(trend?.health || 0) >= this.config.resumeHealth &&
+      Number(trend?.exhaustion || 0) < this.config.resumeExhaustion;
+    this.resumeVotes = recovered ? this.resumeVotes + 1 : 0;
+    if (this.resumeVotes >= this.config.resumeVotes) {
+      const previousDirection = this.active.direction;
+      this.active = null;
+      this.resumeVotes = 0;
+      return this.snapshot('CONTINUE_RELEASE', { blocked:false, previousDirection, direction, reason:`The ${direction} drive recovered for ${this.config.resumeVotes} ticks; repeated entries resume.` });
+    }
+
+    return this.snapshot('HARVEST_STOP', {
+      blocked:true,
+      reason:recovered
+        ? `Continuation check ${this.resumeVotes}/${this.config.resumeVotes}; entries remain stopped.`
+        : 'Harvest buffer is active; stop adding until continuation or a new direction locks.'
+    });
+  }
+}
+
+export function applyMilkingPolicy(decision, trend, harvest = {}) {
   if (!decision?.approved) return {
     approved:false,
     batch:0,
-    role:'GUIDE_ONLY',
+    role:'ORIGINAL_V8',
     alignment:'NO_ENTRY',
     timing:trend?.state || 'OBSERVE',
-    reason:'The original v8.1 sniper pattern did not qualify on this tick.'
+    reason:'The original v8 pattern did not qualify on this tick.'
   };
   const wantedDirection = decision.tradeDirection === 'CALL' ? 'UP' : 'DOWN';
   const batch = Math.max(1, Math.min(2, Number(decision.requestedBatch || 1)));
+  if (harvest?.blocked) {
+    return {
+      approved:false,
+      batch:0,
+      role:'ACTIVE_HARVEST',
+      alignment:'HARVEST_STOP',
+      timing:trend?.state || 'HARVEST',
+      reason:harvest.reason || 'Harvest buffer stopped this new entry near the projected trend end.'
+    };
+  }
   if (!trend || trend.direction === 'NONE' || trend.state === 'OBSERVE') {
     return {
       approved:true,
       batch,
-      role:'GUIDE_ONLY',
+      role:'ORIGINAL_V8',
       alignment:'UNMAPPED',
       timing:'OBSERVE',
-      reason:`Original ${decision.tradeDirection} ×${batch} entry is unchanged. The Trend Map is still observing and has no locked mountain yet.`
+      reason:`Original v8 ${decision.tradeDirection} ×${batch} fires. The Trend Map is still observing.`
     };
   }
   const aligned = trend.direction === wantedDirection;
@@ -269,10 +385,10 @@ export function applyMilkingPolicy(decision, trend) {
   return {
     approved:true,
     batch,
-    role:'GUIDE_ONLY',
+    role:'ORIGINAL_V8',
     alignment,
     timing:trend.state,
-    reason:`Original ${decision.tradeDirection} ×${batch} entry is unchanged. It is ${alignment === 'ALIGNED' ? 'aligned with' : `counter to`} the ${trend.direction} ${stageCopy}.`
+    reason:`Original v8 ${decision.tradeDirection} ×${batch} fires. It is ${alignment === 'ALIGNED' ? 'aligned with' : `counter to`} the ${trend.direction} ${stageCopy}.`
   };
 }
 

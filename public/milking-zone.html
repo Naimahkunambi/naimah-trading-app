@@ -108,7 +108,7 @@
           <i>↙</i>
           <div data-state="TURNING"><b>05</b><span>TURNING</span><small>side may change</small></div>
         </div>
-        <div class="mzCycleLegend"><span>HARVEST ↻ DRIVE <b>RETEST + CONTINUE</b></span><span>HARVEST → TURNING → DRIVE <b>NEW SIDE LOCKS</b></span><em>Every qualified v8.1 entry still fires in every stage.</em></div>
+        <div class="mzCycleLegend"><span>HARVEST ↻ DRIVE <b>RETEST + CONTINUE</b></span><span>HARVEST → TURNING → DRIVE <b>NEW SIDE LOCKS</b></span><em>Original v8 entries fire repeatedly until the active two-pulse Harvest buffer.</em></div>
         <section class="mzPanel mzMiniChart">
           <div class="mzReplayBar"><span class="mzChartWindow">LIVE · LATEST TICKS</span><div><button data-chart-nav="older">◀ OLDER</button><button data-chart-nav="newer">NEWER ▶</button><button data-chart-nav="live">LIVE</button></div></div>
           <canvas id="mzTrendCanvas" width="1400" height="260"></canvas>
@@ -123,21 +123,21 @@
         <div class="mzMilkGrid">
           <section class="mzPanel mzChartPanel">
             <div class="mzPanelTitle"><span>LIVE MOUNTAIN MAP</span><b id="mzLiveTag">WAITING</b></div>
-            <div class="mzReplayBar"><span class="mzChartWindow">LIVE · LATEST TICKS</span><div><button data-chart-nav="older">◀ OLDER</button><button data-chart-nav="newer">NEWER ▶</button><button data-chart-nav="live">LIVE</button></div></div>
+            <div class="mzReplayBar"><span class="mzChartWindow">LIVE · LATEST TICKS</span><div class="mzZoomTools"><button data-chart-window="60">60T</button><button data-chart-window="140">140T</button><button data-chart-window="240" class="active">240T</button><button data-chart-window="500">500T</button><button data-chart-fit>FIT CHART</button><button data-chart-nav="older">◀ OLDER</button><button data-chart-nav="newer">NEWER ▶</button><button data-chart-nav="live">LIVE</button></div></div>
             <canvas id="mzChart" width="1400" height="520"></canvas>
-            <div class="mzLegend"><span><i class="up"></i>CALL FIRE</span><span><i class="down"></i>PUT FIRE</span><span><i class="entry"></i>E ENTRY</span><span><i class="exit"></i>X EXPIRY</span><span><b class="mzLegendKey harvest">H</b> SHADOW EXIT</span><span><b class="mzLegendKey exact5">5</b> 5T SHADOW</span></div>
+            <div class="mzLegend"><span><i class="up"></i>CALL FIRE</span><span><i class="down"></i>PUT FIRE</span><span><i class="entry"></i>E ENTRY</span><span><i class="exit"></i>X EXPIRY</span><span><b class="mzLegendKey harvest">H</b> ACTIVE HARVEST STOP</span><span><b class="mzLegendKey exact5">R</b> RESUME</span><span><b class="mzLegendKey exact5">↻</b> NEW SIDE</span></div>
           </section>
           <aside class="mzPanel mzCockpit">
-            <div class="mzAction"><small>ENTRY ENGINE · ORIGINAL V8.1</small><strong id="mzAction">SCANNING</strong><span id="mzActionWhy">Connect live data first.</span><div class="mzActionContext"><b id="mzAlignment">NO TREND MAP</b><i>GUIDE ONLY · NEVER VETOES</i></div></div>
+            <div class="mzAction"><small>ENTRY ENGINE · ORIGINAL FREQUENT V8</small><strong id="mzAction">SCANNING</strong><span id="mzActionWhy">Connect live data first.</span><div class="mzActionContext"><b id="mzAlignment">NO TREND MAP</b><i>MILK UNTIL ACTIVE HARVEST</i></div></div>
             <div class="mzForm two">
               <label>STAKE $<input id="ptStake" type="number" min="0.35" step="0.01" value="1"></label>
               <label>MAX CONTRACTS<input id="ptMaxTrades" type="number" min="1" step="1" value="60"></label>
               <label>TAKE PROFIT $<input id="ptTakeProfit" type="number" min="0" step="0.1" value="0"></label>
               <label>STOP LOSS $<input id="ptStopLoss" type="number" min="0" step="0.1" value="10"></label>
-              <label>BATCH<select id="ptCooldown"><option value="1">1 contract</option><option value="2" selected>Earn up to 2</option></select></label>
+              <label>BATCH / V8 ENTRY<select id="ptCooldown"><option value="1">1 contract every entry</option><option value="2" selected>2 contracts every entry</option></select></label>
             </div>
             <div class="mzButtons vertical"><button id="ptStart" class="mzPrimary">START MILKING</button><button id="ptPause">PAUSE</button><button id="ptStop" class="mzDanger">STOP</button></div>
-            <div class="mzStatusList"><span>TRADER <b id="mzEngineState">DISCONNECTED</b></span><span>OPEN <b id="mzOpen">0</b></span><span>DECISION <b id="mzDecisionMs">— ms</b></span><span>PATTERN <b id="mzPattern">SEARCHING</b></span><span>V8.1 ENTRIES <b id="mzSetups">0</b></span><span>TREND VETOES <b id="mzVetoes">0 · LOCKED OFF</b></span><span>HARVEST EXIT <b id="mzHarvestStatus">ARMED · SHADOW ONLY</b></span><span>5T CHALLENGER <b id="mzExact5Status">ARMED · SHADOW ONLY</b></span></div>
+            <div class="mzStatusList"><span>TRADER <b id="mzEngineState">DISCONNECTED</b></span><span>OPEN <b id="mzOpen">0</b></span><span>DECISION <b id="mzDecisionMs">— ms</b></span><span>PATTERN <b id="mzPattern">SEARCHING</b></span><span>V8 ENTRIES <b id="mzSetups">0</b></span><span>HARVEST STOPS <b id="mzVetoes">0</b></span><span>HARVEST BRAKE <b id="mzHarvestStatus">ARMED · ACTIVE</b></span><span>PROJECTED TARGET <b id="mzExact5Status">LEARNING</b></span></div>
           </aside>
         </div>
       </article>
@@ -153,15 +153,15 @@
           <div><small>LOSSES</small><strong id="mzLosses">0</strong></div>
           <div><small>PEAK</small><strong id="mzPeak">+$0.00</strong></div>
           <div><small>GIVE-BACK</small><strong id="mzGiveback">$0.00</strong></div>
-          <div><small>V8.1 ENTRIES</small><strong id="mzResultSetups">0</strong></div>
-          <div><small>TREND VETOES</small><strong id="mzResultVetoes">0</strong></div>
-          <div><small>SHADOW EXIT P/L</small><strong id="mzShadowExitPnl">+$0.00</strong></div>
-          <div><small>SAVED GIVE-BACK</small><strong id="mzSavedGiveback">+$0.00</strong></div>
-          <div><small>MISSED CONTINUATION</small><strong id="mzMissedContinuation">+$0.00</strong></div>
-          <div><small>H EXITS</small><strong id="mzHarvestCount">0</strong></div>
-          <div><small>5T EXTRA SHADOWS</small><strong id="mzExact5Extra">0</strong></div>
-          <div><small>5T SHADOW W/L</small><strong id="mzExact5WL">0W / 0L</strong></div>
-          <div><small>5T SHADOW RATE</small><strong id="mzExact5Rate">—</strong></div>
+          <div><small>V8 ENTRIES</small><strong id="mzResultSetups">0</strong></div>
+          <div><small>HARVEST STOPS</small><strong id="mzResultVetoes">0</strong></div>
+          <div><small>STOPPED SHADOW W/L</small><strong id="mzShadowExitPnl">0W / 0L</strong></div>
+          <div><small>STOPPED SHADOW RATE</small><strong id="mzSavedGiveback">—</strong></div>
+          <div><small>ACTIVE BUFFER</small><strong id="mzMissedContinuation">OPEN</strong></div>
+          <div><small>H BRAKES</small><strong id="mzHarvestCount">0</strong></div>
+          <div><small>CONTINUATION RESUMES</small><strong id="mzExact5Extra">0</strong></div>
+          <div><small>LOCKED FLIPS</small><strong id="mzExact5WL">0</strong></div>
+          <div><small>TARGET MID</small><strong id="mzExact5Rate">—</strong></div>
         </div>
         <section class="mzPanel mzTablePanel">
           <div class="mzPanelTitle"><span>TRADE RESULTS</span><b id="mzTradePage">PAGE 1</b></div>
@@ -177,10 +177,10 @@
         </div>
         <section class="mzPanel mzTablePanel tape">
           <div class="mzPanelTitle"><span>ONE ROW PER DECISION TICK</span><b id="mzTickPage">PAGE 1</b></div>
-          <table><thead><tr><th>TIME</th><th>STAGE</th><th>TREND</th><th>CONTEXT</th><th>HEALTH</th><th>PATTERN</th><th>V8.1 DECISION</th><th>SHADOW</th><th>MS</th></tr></thead><tbody id="mzTickBody"><tr><td colspan="9">COLLECTING TICKS</td></tr></tbody></table>
+          <table><thead><tr><th>TIME</th><th>STAGE</th><th>TREND</th><th>HARVEST</th><th>HEALTH</th><th>PATTERN</th><th>V8 DECISION</th><th>SHADOW</th><th>MS</th></tr></thead><tbody id="mzTickBody"><tr><td colspan="9">COLLECTING TICKS</td></tr></tbody></table>
           <div class="mzPager"><button id="mzTickLatest">LIVE / LATEST</button><button id="mzTickPrev">◀ NEWER</button><button id="mzTickNext">OLDER ▶</button></div>
         </section>
-        <div class="mzTapeFooter"><span>CSV includes Trend guidance, Harvest shadow zones, 5T challenger, actual entries/exits, per-tick shadow result and execution timing.</span><b>STOP → CLEAR → RESET → START</b></div>
+        <div class="mzTapeFooter"><span>CSV includes every original v8 candidate, active Harvest stop/resume/flip, projected target, actual entries/exits, stopped-candidate shadow result and execution timing.</span><b>STOP → CLEAR → RESET → START</b></div>
       </article>
     </section>
 

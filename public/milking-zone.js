@@ -8,6 +8,7 @@ let latest = { ticks:[], signals:[], engine:{}, analysis:null, trend:null };
 let tradePage = 0;
 let tickPage = 0;
 let chartOffset = 0;
+let chartWindow = 240;
 
 function showChapter(index) {
   currentChapter = Math.max(0, Math.min(chapters.length - 1, index));
@@ -61,7 +62,7 @@ function compactTime(seconds) {
 }
 
 function pulseEstimate(signals, ticks) {
-  const entries = signals.filter(signal => signal.sniperApproved).map(signal => Number(signal.signalEpoch)).filter(Number.isFinite).sort((a, b) => a - b);
+  const entries = signals.filter(signal => signal.milkCandidate).map(signal => Number(signal.signalEpoch)).filter(Number.isFinite).sort((a, b) => a - b);
   if (entries.length < 3) return { label:'LEARNING ENTRY PACE', detail:`${entries.length}/3 recent entries` };
   const gaps = entries.slice(1).map((epoch, index) => epoch - entries[index]).filter(gap => gap > 0 && gap < 1800).slice(-10);
   const typical = median(gaps);
@@ -78,67 +79,64 @@ function pulseEstimate(signals, ticks) {
 }
 
 function trendAlignment(signal, trend) {
-  if (!signal?.sniperApproved) return `${trend.direction || 'NONE'} · ${trend.state || 'OBSERVE'} · SCANNING`;
+  if (!signal?.milkCandidate) return `${trend.direction || 'NONE'} · ${trend.state || 'OBSERVE'} · SCANNING`;
   return signal.milking?.policy?.alignment || ((signal.tradeDirection === 'CALL' ? 'UP' : 'DOWN') === trend.direction ? 'ALIGNED' : 'COUNTER_TREND');
 }
 
-function exact5Summary(signals) {
-  const rows = signals.filter(signal => signal.milking?.exact5?.extra);
-  const settled = rows.filter(signal => ['WON', 'LOST'].includes(signal.milking?.exact5?.outcome));
-  const wins = settled.filter(signal => signal.milking.exact5.outcome === 'WON').length;
-  const losses = settled.filter(signal => signal.milking.exact5.outcome === 'LOST').length;
-  return { rows, settled, wins, losses, rate:settled.length ? wins / settled.length * 100 : NaN };
-}
-
-function harvestShadow(signals, tradeRows = []) {
+function harvestSummary(signals) {
   const ordered = [...signals].sort((left, right) => Number(left.signalEpoch || 0) - Number(right.signalEpoch || 0));
   const zones = [];
   const markers = [];
   const actionBySignal = new Map();
   let active = null;
+  let brakes = 0;
+  let resumes = 0;
+  let flips = 0;
   for (const signal of ordered) {
     const epoch = Number(signal.signalEpoch);
-    const state = signal.milking?.state || 'OBSERVE';
-    const direction = signal.milking?.direction || 'NONE';
-    if (!active && state === 'HARVEST' && direction !== 'NONE') {
+    const harvest = signal.milking?.harvest || {};
+    const direction = harvest.direction || signal.milking?.direction || 'NONE';
+    const action = harvest.action || 'MILK';
+    if (action === 'HARVEST_ENTER') {
+      if (active) active.endEpoch = epoch;
       active = { startEpoch:epoch, endEpoch:null, direction, startQuote:Number(signal.signalQuote), reason:'ACTIVE' };
       zones.push(active);
-      markers.push({ type:'H', epoch, quote:Number(signal.signalQuote), label:'SHADOW EXIT' });
-      actionBySignal.set(signal.signalId, 'H SHADOW EXIT');
-      continue;
-    }
-    if (!active) {
-      actionBySignal.set(signal.signalId, 'LIVE');
-      continue;
-    }
-    if (direction !== 'NONE' && direction !== active.direction) {
-      active.endEpoch = epoch;
-      active.reason = 'FLIP';
-      markers.push({ type:'↻', epoch, quote:Number(signal.signalQuote), label:'FLIP' });
-      actionBySignal.set(signal.signalId, '↻ FLIP');
+      markers.push({ type:'H', epoch, quote:Number(signal.signalQuote), label:'STOP ADDING' });
+      actionBySignal.set(signal.signalId, 'H STOP ADDING');
+      brakes += 1;
+    } else if (action === 'HARVEST_STOP') {
+      actionBySignal.set(signal.signalId, signal.milkCandidate ? 'H ENTRY STOPPED' : 'H BUFFER ACTIVE');
+    } else if (action === 'CONTINUE_RELEASE') {
+      if (active) { active.endEpoch = epoch; active.reason = 'RESUME'; }
+      markers.push({ type:'R', epoch, quote:Number(signal.signalQuote), label:'RESUME MILKING' });
+      actionBySignal.set(signal.signalId, 'R RESUME MILKING');
       active = null;
-    } else if (state === 'DRIVE' && direction === active.direction && epoch > active.startEpoch) {
-      active.endEpoch = epoch;
-      active.reason = 'RESUME';
-      markers.push({ type:'R', epoch, quote:Number(signal.signalQuote), label:'RESUME' });
-      actionBySignal.set(signal.signalId, 'R RESUME');
+      resumes += 1;
+    } else if (action === 'FLIP_RELEASE') {
+      if (active) { active.endEpoch = epoch; active.reason = 'FLIP'; }
+      markers.push({ type:'↻', epoch, quote:Number(signal.signalQuote), label:'NEW SIDE' });
+      actionBySignal.set(signal.signalId, '↻ NEW SIDE');
       active = null;
-    } else {
-      actionBySignal.set(signal.signalId, 'H NO-TRADE SHADOW');
-    }
+      flips += 1;
+    } else actionBySignal.set(signal.signalId, signal.milkCandidate ? 'V8 MILK' : 'SCAN');
   }
-  const inZone = epoch => zones.some(zone => Number(epoch) >= zone.startEpoch && (zone.endEpoch == null || Number(epoch) < zone.endEpoch));
-  const zoneProfit = tradeRows.filter(({ signal }) => inZone(signal.signalEpoch)).reduce((sum, row) => sum + Number(row.trade.profit || 0), 0);
-  const actualProfit = tradeRows.reduce((sum, row) => sum + Number(row.trade.profit || 0), 0);
+  const stopped = ordered.filter(signal => signal.milkCandidate && signal.harvestBlocked);
+  const settled = stopped.filter(signal => ['WON', 'LOST'].includes(signal.shadow?.outcome));
+  const wins = settled.filter(signal => signal.shadow.outcome === 'WON').length;
+  const losses = settled.filter(signal => signal.shadow.outcome === 'LOST').length;
   return {
     zones,
     markers,
     active,
     actionBySignal,
-    zoneProfit,
-    shadowProfit:actualProfit - zoneProfit,
-    savedGiveback:Math.max(0, -zoneProfit),
-    missedContinuation:Math.max(0, zoneProfit)
+    stopped,
+    settled,
+    wins,
+    losses,
+    rate:settled.length ? wins / settled.length * 100 : NaN,
+    brakes,
+    resumes,
+    flips
   };
 }
 
@@ -148,13 +146,12 @@ function renderState() {
   const analysis = latest.analysis || {};
   const signals = freshSignals();
   const trades = settledTrades();
-  const sniperSetups = signals.filter(signal => signal.sniperApproved).length;
-  const trendVetoes = signals.filter(signal => signal.sniperApproved && !signal.approved).length;
+  const v8Entries = signals.filter(signal => signal.milkCandidate).length;
+  const harvestStops = signals.filter(signal => signal.milkCandidate && signal.harvestBlocked).length;
   const wins = trades.filter(row => row.trade.outcome === 'WON').length;
   const losses = trades.filter(row => row.trade.outcome === 'LOST').length;
   const pnl = trades.reduce((sum, row) => sum + Number(row.trade.profit || 0), 0);
-  const exitShadow = harvestShadow(signals, trades);
-  const exact5 = exact5Summary(signals);
+  const harvest = harvestSummary(signals);
   let equity = 0;
   let peak = 0;
   [...trades].reverse().forEach(row => { equity += Number(row.trade.profit || 0); peak = Math.max(peak, equity); });
@@ -182,36 +179,43 @@ function renderState() {
   setText('mzOpen', Number(engine.openContracts || 0));
   setText('mzDecisionMs', Number.isFinite(Number(analysis.decisionMs)) ? `${Number(analysis.decisionMs).toFixed(2)} ms` : '— ms');
   setText('mzPattern', analysis.pattern?.familyId || 'SEARCHING');
-  setText('mzSetups', sniperSetups);
-  setText('mzVetoes', `${trendVetoes} · LOCKED OFF`);
+  setText('mzSetups', v8Entries);
+  setText('mzVetoes', harvestStops);
   setText('mzLiveTag', `${trend.direction || 'NONE'} · ${trend.state || 'OBSERVE'}`);
   const last = signals[0];
-  const entryFound = Boolean(last?.sniperApproved);
+  const entryFound = Boolean(last?.milkCandidate);
+  const harvestStopped = Boolean(last?.harvestBlocked);
   const orderSent = String(last?.executionState || '').startsWith('ORDER_SENT') || (last?.actualTrades || []).length > 0;
-  const action = entryFound
+  const action = harvestStopped
+    ? 'HARVEST · STOP ADDING'
+    : entryFound
     ? orderSent ? `FIRE ${last.tradeDirection} ×${last.requestedBatch || 1}` : `${last.tradeDirection} ×${last.requestedBatch || 1} · ${last.executionState || 'QUALIFIED'}`
     : 'SCANNING';
   setText('mzAction', action);
   setText('mzActionWhy', entryFound ? last?.milking?.policy?.reason : last?.why || trend.reason || 'Connect live data first.');
   setText('mzAlignment', trendAlignment(last, trend));
-  setText('mzHarvestStatus', exitShadow.active ? `H ACTIVE · ${exitShadow.active.direction}` : exitShadow.zones.length ? `H ×${exitShadow.zones.length} RECORDED` : 'ARMED · SHADOW ONLY');
-  setText('mzExact5Status', exact5.rows.length ? `${exact5.rows.length} EXTRA · SHADOW ONLY` : 'ARMED · SHADOW ONLY');
+  setText('mzHarvestStatus', harvest.active ? `H ACTIVE · ${harvest.active.direction}` : harvest.brakes ? `ARMED · ${harvest.brakes} USED` : 'ARMED · ACTIVE');
+  setText('mzExact5Status', Number.isFinite(Number(trend.targetQuote?.median)) ? Number(trend.targetQuote.median).toFixed(2) : 'LEARNING');
 
   const pace = pulseEstimate(signals, latest.ticks || []);
   const narratorHeadline = !engine.connected
     ? 'CONNECT THE DEMO TRADER'
     : !engine.running
       ? 'READY · PRESS START MILKING'
+      : harvestStopped
+        ? 'HARVEST · PROTECT THE MILK'
       : entryFound
         ? action
-        : 'SCANNING · NO V8.1 ENTRY THIS TICK';
+        : 'SCANNING · NO V8 PATTERN THIS TICK';
   const narratorWhy = !engine.connected
     ? 'The market map can run, but no order can be sent until the Demo trader is connected.'
     : !engine.running
-      ? 'The original v8.1 entry engine is paused. Trend guidance remains visible.'
+      ? 'The original frequent v8 entry engine is paused. The mountain map remains visible.'
+      : harvestStopped
+        ? `Original v8 qualified, but the active two-pulse Harvest buffer stopped this new ${last.tradeDirection} entry near the projected trend end.`
       : entryFound
         ? last?.milking?.policy?.reason
-        : last?.why || analysis.reason || 'The next tick is being evaluated by the original v8.1 pattern logic.';
+        : last?.why || analysis.reason || 'The next tick is being evaluated by the original frequent v8 pattern logic.';
   setText('mzNarratorHeadline', narratorHeadline);
   setText('mzNarratorWhy', narratorWhy);
   setText('mzNextPulse', engine.running ? pace.label : 'ENGINE NOT RUNNING');
@@ -230,15 +234,15 @@ function renderState() {
   setText('mzLosses', losses);
   setText('mzPeak', money(peak));
   setText('mzGiveback', `$${Math.max(0, peak - pnl).toFixed(2)}`);
-  setText('mzResultSetups', sniperSetups);
-  setText('mzResultVetoes', trendVetoes);
-  setText('mzShadowExitPnl', money(exitShadow.shadowProfit));
-  setText('mzSavedGiveback', money(exitShadow.savedGiveback));
-  setText('mzMissedContinuation', money(exitShadow.missedContinuation));
-  setText('mzHarvestCount', exitShadow.zones.length);
-  setText('mzExact5Extra', exact5.rows.length);
-  setText('mzExact5WL', `${exact5.wins}W / ${exact5.losses}L`);
-  setText('mzExact5Rate', Number.isFinite(exact5.rate) ? `${exact5.rate.toFixed(1)}%` : '—');
+  setText('mzResultSetups', v8Entries);
+  setText('mzResultVetoes', harvestStops);
+  setText('mzShadowExitPnl', `${harvest.wins}W / ${harvest.losses}L`);
+  setText('mzSavedGiveback', Number.isFinite(harvest.rate) ? `${harvest.rate.toFixed(1)}% WON` : 'LEARNING');
+  setText('mzMissedContinuation', harvest.active ? `${harvest.active.direction} · STOPPED` : 'OPEN · MILKING');
+  setText('mzHarvestCount', harvest.brakes);
+  setText('mzExact5Extra', harvest.resumes);
+  setText('mzExact5WL', harvest.flips);
+  setText('mzExact5Rate', Number.isFinite(Number(trend.targetQuote?.median)) ? Number(trend.targetQuote.median).toFixed(2) : '—');
   renderTrades(trades);
   renderTickTape(signals);
   drawCharts();
@@ -263,11 +267,10 @@ function renderTickTape(rows) {
   setText('mzTickPage', `PAGE ${tickPage + 1} / ${pages}`);
   $('mzTickPrev').disabled = tickPage === 0;
   $('mzTickNext').disabled = tickPage >= pages - 1;
-  const exitShadow = harvestShadow(rows);
+  const harvest = harvestSummary(rows);
   $('mzTickBody').innerHTML = pageRows.length ? pageRows.map(row => {
-    const extra = row.milking?.exact5?.extra ? ' · 5T SHADOW' : '';
-    const harvest = exitShadow.actionBySignal.get(row.signalId);
-    const context = `${trendAlignment(row, row.milking || {})}${harvest && harvest !== 'LIVE' ? ` · ${harvest}` : ''}${extra}`;
+    const harvestAction = harvest.actionBySignal.get(row.signalId);
+    const context = `${trendAlignment(row, row.milking || {})}${harvestAction ? ` · ${harvestAction}` : ''}`;
     return `<tr><td>${new Date(row.createdAt || Date.now()).toLocaleTimeString()}</td><td>${esc(row.milking?.state || 'OBSERVE')}</td><td>${esc(row.milking?.direction || 'NONE')}</td><td>${esc(context)}</td><td>${row.milking?.health ?? '—'}</td><td>${esc(row.pattern?.familyId || '—')}</td><td class="${row.approved ? 'mzWin' : ''}">${row.approved ? `${esc(row.tradeDirection)} ×${row.requestedBatch || 1}` : esc(row.executionState || 'WATCH')}</td><td>${esc(row.shadow?.outcome || 'OPEN')}</td><td>${Number.isFinite(Number(row.decisionMs)) ? Number(row.decisionMs).toFixed(2) : '—'}</td></tr>`;
   }).join('') : '<tr><td colspan="9">COLLECTING TICKS</td></tr>';
 }
@@ -288,7 +291,7 @@ function drawCanvas(canvas, compact = false) {
   if (!canvas || !canvas.offsetParent) return;
   const { context:ctx, width, height } = canvasSize(canvas);
   const allTicks = latest.ticks || [];
-  const windowSize = compact ? 140 : 240;
+  const windowSize = compact ? Math.min(140, chartWindow) : chartWindow;
   const maxOffset = Math.max(0, allTicks.length - Math.min(windowSize, allTicks.length));
   chartOffset = Math.min(chartOffset, maxOffset);
   const end = Math.max(0, allTicks.length - chartOffset);
@@ -305,26 +308,35 @@ function drawCanvas(canvas, compact = false) {
   for (let y = 0; y <= height; y += 32) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
   if (ticks.length < 2) { ctx.fillStyle='#8f81af'; ctx.font='12px monospace'; ctx.fillText('CONNECT LIVE TO DRAW THE MOUNTAIN', 18, 30); return; }
   const quotes = ticks.map(tick => Number(tick.quote));
-  const low = Math.min(...quotes), high = Math.max(...quotes), span = high - low || 1;
-  const startEpoch = ticks[0].epoch, endEpoch = ticks.at(-1).epoch;
-  const remaining = latest.trend?.remaining || {};
-  const futureSeconds = Math.max(0, Math.min(Number(remaining.high || 0), windowSize * .35));
-  const chartEndEpoch = endEpoch + futureSeconds;
-  const xFor = epoch => 12 + (Number(epoch) - startEpoch) / Math.max(1, chartEndEpoch - startEpoch) * (width - 24);
-  const yFor = quote => height - 16 - (Number(quote) - low) / span * (height - 34);
+  const rawLow = Math.min(...quotes), rawHigh = Math.max(...quotes), rawSpan = rawHigh - rawLow || 1;
   const trend = latest.trend || {};
-  if (trend.direction && trend.direction !== 'NONE' && (Number.isFinite(Number(remaining.low)) || Number.isFinite(Number(remaining.high)))) {
-    const bandStart = xFor(endEpoch + Math.max(0, Number(remaining.low || 0)));
-    const bandEnd = xFor(endEpoch + Math.max(1, Number(remaining.high || 0)));
+  const target = trend.targetQuote || {};
+  const visibleTargets = [target.low, target.median, target.high]
+    .map(Number)
+    .filter(Number.isFinite)
+    .map(value => Math.max(rawLow - rawSpan * .45, Math.min(rawHigh + rawSpan * .45, value)));
+  const domainLow = Math.min(rawLow, ...visibleTargets);
+  const domainHigh = Math.max(rawHigh, ...visibleTargets);
+  const pad = Math.max((domainHigh - domainLow) * .10, rawSpan * .06);
+  const low = domainLow - pad, high = domainHigh + pad, span = high - low || 1;
+  const startEpoch = ticks[0].epoch, endEpoch = ticks.at(-1).epoch;
+  const xFor = epoch => 12 + (Number(epoch) - startEpoch) / Math.max(1, endEpoch - startEpoch) * (width - 24);
+  const yFor = quote => height - 12 - (Number(quote) - low) / span * (height - 24);
+  if (trend.direction && trend.direction !== 'NONE' && Number.isFinite(Number(target.median))) {
+    const targetLow = Number.isFinite(Number(target.low)) ? Number(target.low) : Number(target.median);
+    const targetHigh = Number.isFinite(Number(target.high)) ? Number(target.high) : Number(target.median);
+    const bandTop = Math.min(yFor(targetLow), yFor(targetHigh));
+    const bandBottom = Math.max(yFor(targetLow), yFor(targetHigh));
+    const targetY = yFor(target.median);
     ctx.fillStyle = trend.state === 'HARVEST' ? 'rgba(255,79,103,.20)' : 'rgba(255,210,87,.13)';
-    ctx.fillRect(Math.min(bandStart, width - 16), 0, Math.max(7, Math.min(width - 12, bandEnd) - Math.min(bandStart, width - 16)), height);
+    ctx.fillRect(width * .72, Math.max(2, bandTop), width * .28 - 12, Math.max(7, Math.min(height - 4, bandBottom) - Math.max(2, bandTop)));
     ctx.strokeStyle = trend.state === 'HARVEST' ? '#ff4f67' : '#ffd257';
     ctx.setLineDash([5, 4]);
-    ctx.beginPath(); ctx.moveTo(Math.min(bandStart, width - 16), 0); ctx.lineTo(Math.min(bandStart, width - 16), height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(width * .72, targetY); ctx.lineTo(width - 12, targetY); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = trend.state === 'HARVEST' ? '#ff4f67' : '#ffd257';
     ctx.font = 'bold 9px monospace';
-    ctx.fillText('PROJECTED END RANGE', Math.max(16, Math.min(width - 132, bandStart + 4)), height - 8);
+    ctx.fillText(`PROJECTED TURN ${Number(target.median).toFixed(2)}`, Math.max(16, width - 180), Math.max(14, targetY - 6));
   }
   ctx.strokeStyle = trend.direction === 'UP' ? '#62f58f' : trend.direction === 'DOWN' ? '#ff4f67' : '#f8f1d4';
   ctx.lineWidth = compact ? 2 : 2.5;
@@ -332,8 +344,8 @@ function drawCanvas(canvas, compact = false) {
   ticks.forEach((tick, index) => { const x=xFor(tick.epoch), y=yFor(tick.quote); index ? ctx.lineTo(x,y) : ctx.moveTo(x,y); });
   ctx.stroke();
   const signals = freshSignals().filter(signal => Number(signal.signalEpoch) >= startEpoch && Number(signal.signalEpoch) <= endEpoch);
-  const exitShadow = harvestShadow(freshSignals(), settledTrades());
-  for (const zone of exitShadow.zones) {
+  const harvest = harvestSummary(freshSignals());
+  for (const zone of harvest.zones) {
     const zoneStart = Math.max(startEpoch, zone.startEpoch);
     const zoneEnd = Math.min(endEpoch, zone.endEpoch == null ? endEpoch : zone.endEpoch);
     if (zoneEnd < startEpoch || zoneStart > endEpoch) continue;
@@ -346,15 +358,6 @@ function drawCanvas(canvas, compact = false) {
       ctx.fillStyle = signal.tradeDirection === 'CALL' ? '#62f58f' : '#ff4f67';
       ctx.fillRect(Math.round(x)-3, Math.round(y)-3, 7, 7);
       ctx.font='bold 10px monospace'; ctx.fillText(signal.tradeDirection === 'CALL' ? 'C' : 'P', x+6, y-6);
-    }
-    if (signal.milking?.exact5?.extra) {
-      ctx.fillStyle = '#4ff4d2';
-      ctx.strokeStyle = '#090414';
-      ctx.fillRect(x - 6, y - 6, 13, 13);
-      ctx.strokeRect(x - 6, y - 6, 13, 13);
-      ctx.fillStyle = '#160b32';
-      ctx.font = 'bold 10px monospace';
-      ctx.fillText('5', x - 3, y + 4);
     }
     for (const trade of signal.actualTrades || []) {
       const hasEntry = Number.isFinite(Number(trade.entryEpoch)) && Number.isFinite(Number(trade.entrySpot));
@@ -381,7 +384,7 @@ function drawCanvas(canvas, compact = false) {
       }
     }
   }
-  for (const marker of exitShadow.markers) {
+  for (const marker of harvest.markers) {
     if (marker.epoch < startEpoch || marker.epoch > endEpoch || !Number.isFinite(marker.quote)) continue;
     const markerX = xFor(marker.epoch), markerY = yFor(marker.quote);
     ctx.fillStyle = marker.type === 'H' ? '#ffd257' : '#4ff4d2';
@@ -405,10 +408,22 @@ $('mzTickNext').addEventListener('click', () => { tickPage+=1; renderState(); })
 $('mzTickLatest').addEventListener('click', () => { tickPage=0; renderState(); });
 document.querySelectorAll('[data-chart-nav]').forEach(button => button.addEventListener('click', () => {
   const action = button.dataset.chartNav;
-  if (action === 'older') chartOffset += 180;
-  if (action === 'newer') chartOffset = Math.max(0, chartOffset - 180);
+  const step = Math.max(60, Math.floor(chartWindow * .75));
+  if (action === 'older') chartOffset += step;
+  if (action === 'newer') chartOffset = Math.max(0, chartOffset - step);
   if (action === 'live') chartOffset = 0;
   drawCharts();
+}));
+document.querySelectorAll('[data-chart-window]').forEach(button => button.addEventListener('click', () => {
+  chartWindow = Math.max(60, Number(button.dataset.chartWindow) || 240);
+  chartOffset = 0;
+  document.querySelectorAll('[data-chart-window]').forEach(node => node.classList.toggle('active', node === button));
+  drawCharts();
+}));
+document.querySelectorAll('[data-chart-fit]').forEach(button => button.addEventListener('click', () => {
+  const focused = document.body.classList.toggle('mzChartFocus');
+  button.textContent = focused ? 'EXIT FIT' : 'FIT CHART';
+  requestAnimationFrame(drawCharts);
 }));
 window.addEventListener('resize', drawCharts);
 window.addEventListener('sani-v81-ui-render', event => { latest = event.detail || latest; renderState(); });
