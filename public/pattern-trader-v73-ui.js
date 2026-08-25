@@ -28,7 +28,9 @@ function makeCollapsible(card, collapsed = true) {
 
 function install() {
   installStyles();
-  const isMilkingZone = ['milking-zone','smfn'].includes(document.body?.dataset?.lab);
+  const lab = document.body?.dataset?.lab;
+  const isSmfn = lab === 'smfn';
+  const isMilkingZone = ['milking-zone','smfn'].includes(lab);
   document.querySelector('.topbar h1')?.replaceChildren(document.createTextNode('SANI Sniper Campaign v8.1'));
   const intro = document.querySelector('.obsIntro');
   if (intro) {
@@ -84,12 +86,12 @@ function install() {
 
   const title = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Master Trader') || x.textContent.includes('Sniper Campaign') || x.textContent.includes('Pattern + Structure'));
   if (title) title.textContent = 'Sniper Campaign v8.1 · Controlled Execution';
-  if ($('ptStart')) $('ptStart').textContent = isMilkingZone ? 'START MILKING' : 'Start v8.1 Sniper';
+  if ($('ptStart')) $('ptStart').textContent = isSmfn ? 'START SMFN' : isMilkingZone ? 'START MILKING' : 'Start v8.1 Sniper';
 
   const cooldownLabel = $('ptCooldown')?.closest('label');
-  if (cooldownLabel) cooldownLabel.childNodes[0].textContent = 'Batch contracts / pulse';
+  if (cooldownLabel) cooldownLabel.childNodes[0].textContent = isSmfn ? 'Bot contracts / pulse' : 'Batch contracts / pulse';
   if ($('ptCooldown')) { $('ptCooldown').min='1'; $('ptCooldown').max='2'; $('ptCooldown').step='1'; $('ptCooldown').value='2'; }
-  const maxLabel = $('ptMaxTrades')?.closest('label'); if (maxLabel) maxLabel.childNodes[0].textContent = 'Persistent max contracts';
+  const maxLabel = $('ptMaxTrades')?.closest('label'); if (maxLabel) maxLabel.childNodes[0].textContent = isSmfn ? 'Max contracts this run' : 'Persistent max contracts';
 
   if ($('ptRealGate')) {
     $('ptRealGate').innerHTML = '<strong>Guarded Real-money experiment</strong><p>Only the full v8.1 sniper lane can buy. Mandatory SL, 50-contract cap, $5 maximum stake, two open contracts maximum, and a 30-tick pause after three losses.</p><div id="v81RealMode" class="v81RealMode"><label><input id="v81RealConfirm" type="checkbox"> <span>I understand this is an unproven experiment and Real losses are possible.</span></label></div>';
@@ -109,8 +111,8 @@ function install() {
     if (ledgerHead) ledgerHead.innerHTML = '<tr><th>Time</th><th>Event</th><th>Family</th><th>Address</th><th>Score</th><th>Memory</th><th>Campaign</th><th>Batch</th><th>Speed</th><th>Actual</th><th>Shadow</th><th>Why</th></tr>';
     ledgerTable.closest('.tableWrap')?.classList.add('v8Audit');
   }
-  if ($('ptExportLedger')) $('ptExportLedger').textContent = isMilkingZone ? 'DOWNLOAD MILK CSV' : 'Export v8.1 CSV';
-  if ($('ptClearLedger')) $('ptClearLedger').textContent = isMilkingZone ? 'CLEAR MILK RESULTS' : 'Clear v8.1 cohort';
+  if ($('ptExportLedger')) $('ptExportLedger').textContent = isSmfn ? 'DOWNLOAD SMFN CSV' : isMilkingZone ? 'DOWNLOAD MILK CSV' : 'Export v8.1 CSV';
+  if ($('ptClearLedger')) $('ptClearLedger').textContent = isSmfn ? 'CLEAR SMFN RESULTS' : isMilkingZone ? 'CLEAR MILK RESULTS' : 'Clear v8.1 cohort';
 
   const patternTitle = [...document.querySelectorAll('.sectionTitle span')].find(x => x.textContent.includes('Pattern lens') || x.textContent.includes('Pattern Observatory'));
   if (patternTitle) patternTitle.textContent = 'Visible Pattern Research';

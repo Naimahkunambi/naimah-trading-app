@@ -148,6 +148,7 @@ function renderBrain() {
   set('smfnRunTrades', `${brain.runTrades || 0} contracts`);
   set('smfnRunClock', formatClock(brain.remainingMs));
   set('smfnRunPhase', brain.phase || 'IDLE');
+  if ($('ptStart') && !engine.running) $('ptStart').textContent = mode === 'AUTO' ? 'START SMFN' : 'START MANUAL MILKING';
   set('smfnSafetyState', brain.phase === 'LANDING' ? 'SAFETY LANDING' : brain.status || 'READY');
   set('smfnCmdOpen', Number(engine.openContracts || 0));
   const cooldown = Number(brain.cooldownUntil || 0) - Date.now();
