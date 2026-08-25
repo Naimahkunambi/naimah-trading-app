@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#160b32">
+  <title>SANI Milking Zone</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/milking-zone.css">
+</head>
+<body data-lab="milking-zone">
+  <main class="mzApp">
+    <header class="mzTopbar">
+      <a class="mzBrand" href="/milking-zone.html" aria-label="Milking Zone home">
+        <span class="mzCoin">S</span>
+        <span><small>SANI QUEST</small><b>MILKING ZONE</b></span>
+      </a>
+      <nav class="mzLabs" aria-label="Trading labs">
+        <a href="/">BOS LAB</a>
+        <a href="/observatory.html">MASTER / PATTERN</a>
+        <a class="active" href="/milking-zone.html">MILKING ZONE</a>
+      </nav>
+      <div class="mzHud"><span id="mzHeaderState">OBSERVE</span><b id="mzHeaderPnl">+$0.00</b></div>
+    </header>
+
+    <div class="mzWorld" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+
+    <nav class="mzChapterRail" aria-label="Milking Zone chapters">
+      <button class="active" data-chapter-target="0"><b>1</b><span>CONNECT</span></button>
+      <button data-chapter-target="1"><b>2</b><span>LIVE</span></button>
+      <button data-chapter-target="2"><b>3</b><span>MILK</span></button>
+      <button data-chapter-target="3"><b>4</b><span>RESULTS</span></button>
+      <button data-chapter-target="4"><b>5</b><span>TICK TAPE</span></button>
+    </nav>
+
+    <section class="mzStage">
+      <article class="mzChapter active" data-chapter="0" aria-labelledby="mzConnectTitle">
+        <div class="mzChapterIntro">
+          <span>CHAPTER 01</span>
+          <h1 id="mzConnectTitle">Enter the Zone</h1>
+          <p>Connect the public tick river, then load a Demo trading account. Milking Zone v1 cannot use Real money.</p>
+        </div>
+        <div class="mzSplit">
+          <section class="mzPanel mzFeedPanel">
+            <div class="mzPanelTitle"><span>MARKET PORTAL</span><b><i id="obsDot" class="dot"></i><span id="obsStatus">Disconnected</span></b></div>
+            <div class="mzForm two">
+              <label>SYMBOL<input id="obsSymbol" value="1HZ25V"></label>
+              <label>MEMORY<select id="archiveLimit"><option value="2000">2,000 ticks</option><option value="5000" selected>5,000 ticks</option><option value="10000">10,000 ticks</option></select></label>
+            </div>
+            <div class="mzButtons"><button id="obsConnect" class="mzPrimary">CONNECT LIVE</button><button id="obsDisconnect">DISCONNECT</button><button id="clearTickArchive">CLEAR TICKS</button></div>
+            <div id="obsError" class="errorBox hidden"></div>
+            <div class="mzPortalReadout"><small>ARCHIVE</small><strong id="mzArchiveCount">0</strong><span>ticks ready for the Trend Budget</span></div>
+          </section>
+
+          <section class="mzPanel">
+            <div class="mzPanelTitle"><span>DEMO PLAYER</span><b id="mzTraderConnection">OFFLINE</b></div>
+            <div class="mzForm two">
+              <label>APP ID<input id="ptAppId" autocomplete="off" placeholder="Deriv App ID"></label>
+              <label>TRADE TOKEN<input id="ptToken" type="password" autocomplete="off" placeholder="PAT / OAuth token"></label>
+            </div>
+            <div class="mzButtons"><button id="ptLoadAccounts">LOAD ACCOUNTS</button></div>
+            <label class="mzWideLabel">DEMO ACCOUNT<select id="ptAccount"><option value="">Load accounts first</option></select></label>
+            <div class="mzButtons"><button id="ptConnect" class="mzPrimary">CONNECT TRADER</button><button id="ptDisconnect">DISCONNECT</button></div>
+            <div id="traderError" class="errorBox hidden"></div>
+            <p class="mzHint">Demo only · 1-tick contracts · no martingale · existing labs stay untouched</p>
+          </section>
+        </div>
+      </article>
+
+      <article class="mzChapter" data-chapter="1" aria-labelledby="mzLiveTitle" aria-hidden="true">
+        <div class="mzChapterIntro compact">
+          <span>CHAPTER 02</span>
+          <h1 id="mzLiveTitle">Read the Mountain</h1>
+          <p>Trend chooses the side. Pattern chooses the exact tick.</p>
+        </div>
+        <div class="mzLiveGrid">
+          <section class="mzPanel mzDirectionCard">
+            <small>TREND DIRECTION</small>
+            <strong id="mzDirection">—</strong>
+            <span id="mzDirectionReason">Collecting enough ticks to draw the first trend line.</span>
+          </section>
+          <section class="mzPanel mzMeters">
+            <div><span>HEALTH</span><b id="mzHealth">0</b><meter id="mzHealthMeter" min="0" max="100" value="0"></meter></div>
+            <div><span>MATURITY</span><b id="mzMaturity">0%</b><meter id="mzMaturityMeter" min="0" max="100" value="0"></meter></div>
+            <div><span>EXHAUSTION</span><b id="mzExhaustion">0%</b><meter id="mzExhaustionMeter" min="0" max="100" value="0"></meter></div>
+          </section>
+          <section class="mzPanel mzBudgetCard">
+            <small>HISTORICAL TREND BUDGET</small>
+            <strong id="mzRemaining">—</strong>
+            <span id="mzBudgetMeta">waiting for a locked drive</span>
+          </section>
+        </div>
+        <div class="mzStatePath" aria-label="Trend Budget state machine">
+          <div data-state="OBSERVE" class="active"><b>01</b><span>OBSERVE</span><small>draw the line</small></div>
+          <i>▶</i>
+          <div data-state="DRIVE"><b>02</b><span>DRIVE</span><small>milk ×2</small></div>
+          <i>▶</i>
+          <div data-state="MATURE"><b>03</b><span>MATURE</span><small>reduce ×1</small></div>
+          <i>▶</i>
+          <div data-state="HARVEST"><b>04</b><span>HARVEST</span><small>stop adding</small></div>
+          <i>↙</i>
+          <div data-state="TURNING"><b>05</b><span>TURNING</span><small>confirm flip</small></div>
+        </div>
+        <section class="mzPanel mzMiniChart"><canvas id="mzTrendCanvas" width="1400" height="260"></canvas></section>
+      </article>
+
+      <article class="mzChapter" data-chapter="2" aria-labelledby="mzMilkTitle" aria-hidden="true">
+        <div class="mzChapterIntro compact inline">
+          <div><span>CHAPTER 03</span><h1 id="mzMilkTitle">Milk the Drive</h1></div>
+          <div class="mzScore"><small>SESSION</small><strong id="mzPnl">+$0.00</strong><span id="mzWL">0W / 0L</span></div>
+        </div>
+        <div class="mzMilkGrid">
+          <section class="mzPanel mzChartPanel">
+            <div class="mzPanelTitle"><span>LIVE MOUNTAIN MAP</span><b id="mzLiveTag">WAITING</b></div>
+            <canvas id="mzChart" width="1400" height="520"></canvas>
+            <div class="mzLegend"><span><i class="up"></i>CALL FIRE</span><span><i class="down"></i>PUT FIRE</span><span><i class="entry"></i>ENTRY / EXIT</span></div>
+          </section>
+          <aside class="mzPanel mzCockpit">
+            <div class="mzAction"><small>CURRENT ACTION</small><strong id="mzAction">OBSERVE</strong><span id="mzActionWhy">Connect live data first.</span></div>
+            <div class="mzForm two">
+              <label>STAKE $<input id="ptStake" type="number" min="0.35" step="0.01" value="1"></label>
+              <label>MAX CONTRACTS<input id="ptMaxTrades" type="number" min="1" step="1" value="60"></label>
+              <label>TAKE PROFIT $<input id="ptTakeProfit" type="number" min="0" step="0.1" value="0"></label>
+              <label>STOP LOSS $<input id="ptStopLoss" type="number" min="0" step="0.1" value="10"></label>
+              <label>BATCH<select id="ptCooldown"><option value="1">1 contract</option><option value="2" selected>Earn up to 2</option></select></label>
+            </div>
+            <div class="mzButtons vertical"><button id="ptStart" class="mzPrimary">START MILKING</button><button id="ptPause">PAUSE</button><button id="ptStop" class="mzDanger">STOP</button></div>
+            <div class="mzStatusList"><span>TRADER <b id="mzEngineState">DISCONNECTED</b></span><span>OPEN <b id="mzOpen">0</b></span><span>DECISION <b id="mzDecisionMs">— ms</b></span><span>PATTERN <b id="mzPattern">SEARCHING</b></span></div>
+          </aside>
+        </div>
+      </article>
+
+      <article class="mzChapter" data-chapter="3" aria-labelledby="mzResultsTitle" aria-hidden="true">
+        <div class="mzChapterIntro compact inline">
+          <div><span>CHAPTER 04</span><h1 id="mzResultsTitle">Treasure Room</h1></div>
+          <div class="mzScore"><small>REALIZED</small><strong id="mzResultPnl">+$0.00</strong><span id="mzResultRate">0.0% win rate</span></div>
+        </div>
+        <div class="mzResultCards">
+          <div><small>CONTRACTS</small><strong id="mzContracts">0</strong></div>
+          <div><small>WINS</small><strong id="mzWins">0</strong></div>
+          <div><small>LOSSES</small><strong id="mzLosses">0</strong></div>
+          <div><small>PEAK</small><strong id="mzPeak">+$0.00</strong></div>
+          <div><small>GIVE-BACK</small><strong id="mzGiveback">$0.00</strong></div>
+        </div>
+        <section class="mzPanel mzTablePanel">
+          <div class="mzPanelTitle"><span>TRADE RESULTS</span><b id="mzTradePage">PAGE 1</b></div>
+          <table><thead><tr><th>TIME</th><th>SIDE</th><th>STATE</th><th>PATTERN</th><th>RESULT</th><th>ENTRY → EXIT</th><th>ACK</th><th>P/L</th></tr></thead><tbody id="mzTradeBody"><tr><td colspan="8">NO TRADES YET</td></tr></tbody></table>
+          <div class="mzPager"><button id="mzTradePrev">◀ PREV</button><button id="mzTradeNext">NEXT ▶</button></div>
+        </section>
+      </article>
+
+      <article class="mzChapter" data-chapter="4" aria-labelledby="mzTapeTitle" aria-hidden="true">
+        <div class="mzChapterIntro compact inline">
+          <div><span>CHAPTER 05</span><h1 id="mzTapeTitle">Tick Tape</h1></div>
+          <div class="mzButtons"><button id="ptExportLedger" class="mzPrimary">DOWNLOAD CSV</button><button id="ptClearLedger">CLEAR RESULTS</button><button id="ptReset">RESET RUN</button></div>
+        </div>
+        <section class="mzPanel mzTablePanel tape">
+          <div class="mzPanelTitle"><span>ONE ROW PER DECISION TICK</span><b id="mzTickPage">PAGE 1</b></div>
+          <table><thead><tr><th>TIME</th><th>STATE</th><th>DIRECTION</th><th>HEALTH</th><th>MATURITY</th><th>PATTERN</th><th>DECISION</th><th>SHADOW</th><th>MS</th></tr></thead><tbody id="mzTickBody"><tr><td colspan="9">COLLECTING TICKS</td></tr></tbody></table>
+          <div class="mzPager"><button id="mzTickPrev">◀ PREV</button><button id="mzTickNext">NEXT ▶</button></div>
+        </section>
+        <div class="mzTapeFooter"><span>CSV includes Trend Budget, pattern, actual result, shadow result and execution timing.</span><b>STOP → CLEAR → RESET → START</b></div>
+      </article>
+    </section>
+
+    <footer class="mzChapterControls">
+      <button id="mzPrevChapter">◀ PREVIOUS CHAPTER</button>
+      <div><span id="mzChapterLabel">CHAPTER 1 / 5</span><i><b id="mzProgress"></b></i></div>
+      <button id="mzNextChapter" class="mzPrimary">NEXT CHAPTER ▶</button>
+    </footer>
+  </main>
+
+  <section id="mzCompat" class="card" aria-hidden="true">
+    <div class="sectionTitle"><span>Compatibility</span><small>hidden engine surface</small></div>
+    <select id="patternLength"><option value="20" selected>20</option></select><input id="similarityFloor" value="0.82"><input id="maxMatches" value="80"><button id="reanalyzeBtn"></button>
+    <span id="patternSizeStat"></span><span id="archiveCount"></span><span id="matchCount"></span><span id="avgSimilarity"></span><span id="executionOffsetStat"></span><span id="executionWindowCaption"></span><span id="canvasCaption"></span>
+    <canvas id="tickCanvas"></canvas><canvas id="patternCanvas"></canvas><div id="horizonGrid"></div><div id="executionHorizonGrid"></div><table><tbody id="patternRows"></tbody></table>
+    <canvas id="masterCanvas"></canvas>
+    <div id="ptRealGate" class="hidden"></div><span id="ptAccountPill"></span><span id="ptStatus"></span><span id="ptPnl"></span><span id="ptWL"></span><span id="ptOpen"></span>
+    <span id="mtRegime200"></span><span id="mtTrend80"></span><span id="mtSession"></span><span id="mtEntry20"></span><span id="mtChop"></span><span id="mtVolatility"></span><span id="ptEntryOffset"></span><span id="ptBought"></span><span id="ptCohortN"></span><span id="ptCohortWL"></span><span id="ptCohortPnl"></span><span id="ptBullWL"></span><span id="ptBearWL"></span><span id="ptQualified"></span><span id="ptSkipped"></span>
+    <div id="ptSignal"></div><table><tbody id="ptTradeRows"></tbody></table><table><tbody id="ptLedgerRows"></tbody></table><button id="ptResetCalibration"></button><div id="ptLogs"></div><i id="ptDot"></i>
+  </section>
+
+  <script type="module" src="/milking-zone.js"></script>
+  <script type="module" src="/observatory.js"></script>
+  <script type="module" src="/pattern-trader-v72.js"></script>
+</body>
+</html>

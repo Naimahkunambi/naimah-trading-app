@@ -141,7 +141,10 @@ function publishSnapshot() {
   lastSnapshot = buildSnapshot();
   window.dispatchEvent(new CustomEvent('sani-observatory-analysis', { detail: lastSnapshot }));
 }
-window.SaniObservatory = { getSnapshot: () => lastSnapshot ? structuredClone(lastSnapshot) : buildSnapshot() };
+window.SaniObservatory = {
+  getSnapshot: () => lastSnapshot ? structuredClone(lastSnapshot) : buildSnapshot(),
+  getTicks: () => ticks.map(tick => ({ epoch:Number(tick.epoch), quote:Number(tick.quote) }))
+};
 
 function analyze() {
   analysisQueued = false;

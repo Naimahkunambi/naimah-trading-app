@@ -1,10 +1,12 @@
 import { SaniEngine, DEFAULT_CONFIG } from './core/engine.mjs';
 import { V73UI } from './pattern-trader-v73-ui.js';
+import { TrendBudget, applyMilkingPolicy } from './core/trend-budget.mjs';
 
 const $ = id => document.getElementById(id);
 const perfNow = () => globalThis.performance?.now?.() ?? Date.now();
-const VERSION = 'v8.1';
-const SIGNAL_KEY = 'sani.sniperCampaign.signals.v8.1';
+const IS_MILKING_ZONE = document.body?.dataset?.lab === 'milking-zone';
+const VERSION = IS_MILKING_ZONE ? 'Milking Zone v1' : 'v8.1';
+const SIGNAL_KEY = IS_MILKING_ZONE ? 'sani.milkingZone.signals.v1' : 'sani.sniperCampaign.signals.v8.1';
 const LEGACY_KEYS = ['sani.sniper.setups.v7.3','sani.masterTrader.signalLedger.v7.2','sani.masterTrader.signalLedger.v7.1'];
 const OFFSET_KEY = 'sani.patternTrader.entryOffsets.v2';
 const FIXED_DURATION = 1;
@@ -22,6 +24,8 @@ let lastOtpContext = null;
 let localTicks = loadTicks();
 let lastTickKey = localTicks.length ? `${localTicks.at(-1).epoch}:${localTicks.at(-1).quote}` : '';
 const contractMeta = new Map();
+const trendBudget = IS_MILKING_ZONE ? new TrendBudget() : null;
+let trendSnapshot = trendBudget?.hydrate(localTicks) || null;
 
 const engine = new SaniEngine({
   ...DEFAULT_CONFIG,
@@ -80,7 +84,7 @@ function loadLegacy() {
 function allForUI() { return [...signals, ...legacySignals].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)); }
 function isRealAccount() { return String(selectedAccount?.account_type || '').toLowerCase() === 'real'; }
 function maxConcurrent() { return isRealAccount() ? REAL_MAX_CONCURRENT : DEMO_MAX_CONCURRENT; }
-function render() { V73UI.render({ analysis:workerAnalysis, signals:allForUI(), ticks:localTicks, engine:engine.snapshot(), batchSize:batchSize(), maxConcurrent:maxConcurrent(), accountType:isRealAccount()?'REAL':'DEMO' }); }
+function render() { V73UI.render({ analysis:workerAnalysis, signals:allForUI(), ticks:localTicks, engine:engine.snapshot(), batchSize:batchSize(), maxConcurrent:maxConcurrent(), accountType:isRealAccount()?'REAL':'DEMO', trend:trendSnapshot, lab:IS_MILKING_ZONE?'MILKING_ZONE':'SNIPER' }); }
 
 function executionOffsetEstimate() {
   try {
@@ -140,6 +144,7 @@ function postTick(tick) {
   lastTickKey = key;
   localTicks.push({ epoch, quote });
   if (localTicks.length > 10000) localTicks.splice(0, localTicks.length - 10000);
+  if (trendBudget) trendSnapshot = trendBudget.ingest({ epoch, quote }, workerAnalysis?.pattern?.direction || 'NONE');
   worker?.postMessage({ type:'TICK', tick:{epoch,quote} });
   render();
 }
@@ -170,8 +175,12 @@ function initWorker() {
 }
 
 function handleDecision(d) {
+  const milkingPolicy = IS_MILKING_ZONE ? applyMilkingPolicy(d, trendSnapshot) : null;
+  const approved = IS_MILKING_ZONE ? Boolean(d.approved && milkingPolicy?.approved) : d.approved;
+  const requestedBatch = IS_MILKING_ZONE ? Number(milkingPolicy?.batch || 0) : d.requestedBatch;
   const row = upsertSignal(d.signalId, {
-    approved:d.approved,
+    approved,
+    sniperApproved:d.approved,
     controlApproved:d.controlApproved,
     state:d.state,
     tradeDirection:d.tradeDirection,
@@ -187,12 +196,17 @@ function handleDecision(d) {
     context80:d.context80,
     context200:d.context200,
     campaign:d.campaign,
-    requestedBatch:d.requestedBatch,
+    requestedBatch,
     decisionMs:d.decisionMs,
-    why:d.why
+    milking:IS_MILKING_ZONE ? { ...trendSnapshot, policy:milkingPolicy } : undefined,
+    why:IS_MILKING_ZONE ? `${milkingPolicy?.reason || 'Trend Budget observing.'} · ${d.why}` : d.why
   });
 
-  if (!d.approved) return;
+  if (!approved) {
+    if (IS_MILKING_ZONE && d.approved) row.executionState = `MILKING_${trendSnapshot?.state || 'OBSERVE'}_BLOCK`;
+    saveSignals();
+    return;
+  }
   const s = engine.snapshot();
   if (!s.running) { row.executionState = s.connected ? 'OBSERVED' : 'DISCONNECTED'; saveSignals(); return; }
   if (s.safeBlocked) { row.executionState = 'SAFE_BLOCK'; saveSignals(); return; }
@@ -200,7 +214,7 @@ function handleDecision(d) {
   if (totalBought() >= Number($('ptMaxTrades')?.value || 60)) { row.executionState = 'CAP'; saveSignals(); engine.pause(); return; }
 
   const room = Math.max(0, maxConcurrent() - exposure());
-  const wanted = Math.min(Number(d.requestedBatch || 1), batchSize(), room, Math.max(0, Number($('ptMaxTrades')?.value || 60) - totalBought()));
+  const wanted = Math.min(Number(requestedBatch || 1), batchSize(), room, Math.max(0, Number($('ptMaxTrades')?.value || 60) - totalBought()));
   if (wanted <= 0) { row.executionState = 'EXPOSURE_FULL'; saveSignals(); return; }
 
   try {
@@ -222,7 +236,7 @@ function handleDecision(d) {
     row.executionState = sent.length ? `ORDER_SENT_X${sent.length}` : 'NOT_SENT';
     row.requestedBatch = sent.length;
     saveSignals();
-    if (sent.length) engine.log('success', `v8.1 ${d.tradeDirection} x${sent.length} · ${d.sniper?.event} ${d.sniper?.grade} · score ${Number(d.sniper?.score||0).toFixed(1)} · ${d.pattern.familyId} · ${d.decisionMs.toFixed(1)}ms.`);
+    if (sent.length) engine.log('success', `${VERSION} ${d.tradeDirection} x${sent.length} · ${trendSnapshot?.state || d.sniper?.event} · ${d.sniper?.grade} · ${d.pattern.familyId} · ${d.decisionMs.toFixed(1)}ms.`);
   } catch (err) {
     row.executionState = 'ERROR'; row.error = err.message; saveSignals(); showError(err.message);
   }
@@ -305,6 +319,7 @@ function traderConfig() {
     maxReconnectAttempts:8
   };
   if (!(config.stake > 0)) throw new Error('Stake must be greater than 0.');
+  if (IS_MILKING_ZONE && real) throw new Error('Milking Zone v1 is Demo-only while Trend Budget is being validated.');
   if (real && !$('v81RealConfirm')?.checked) throw new Error('Confirm the guarded Real-money test before connecting or starting.');
   if (real && !(config.stopLoss > 0)) throw new Error('A stop loss greater than $0 is mandatory on a Real account.');
   if (real && config.stake > 5) throw new Error('v8.1 Real test stake is capped at $5 per contract.');
@@ -358,14 +373,14 @@ function renderGate() {
 }
 
 function exportCsv() {
-  const headers = ['signal_id','created_at','sniper_approved','control_approved','event','grade','score','repeat_count','batch','trade_direction','signal_epoch','signal_quote','structure_tag','phase','pattern_family','pattern_length','edge','matches','similarity','top10','family_memory','address_memory','campaign_direction','campaign_fires','variant_control','variant_repeat','variant_length','variant_memory','variant_hysteresis','variant_structure','variant_sniper','decision_ms','execution_state','actual_contracts','actual_wins','actual_losses','actual_profit','shadow','why'];
+  const headers = ['signal_id','created_at','milking_approved','sniper_approved','control_approved','event','grade','score','repeat_count','batch','trade_direction','signal_epoch','signal_quote','trend_state','trend_direction','trend_health','trend_maturity','trend_exhaustion','trend_age_seconds','trend_remaining_low','trend_remaining_median','trend_remaining_high','trend_efficiency','trend_decelerating','structure_tag','phase','pattern_family','pattern_length','edge','matches','similarity','top10','family_memory','address_memory','campaign_direction','campaign_fires','variant_control','variant_repeat','variant_length','variant_memory','variant_hysteresis','variant_structure','variant_sniper','decision_ms','execution_state','actual_contracts','actual_wins','actual_losses','actual_profit','shadow','why'];
   const rows = signals.map(s => {
     const trades = s.actualTrades || [];
-    return [s.signalId,new Date(s.createdAt||Date.now()).toISOString(),s.approved,s.controlApproved,s.sniper?.event,s.sniper?.grade,s.sniper?.score,s.sniper?.repeatCount,s.requestedBatch,s.tradeDirection,s.signalEpoch,s.signalQuote,s.structure?.tag,s.structure?.phase,s.pattern?.familyId,s.pattern?.length,s.pattern?.edge,s.pattern?.matchCount,s.pattern?.avgSimilarity,`${s.pattern?.top10Agree||0}/${s.pattern?.top10Total||0}`,`${s.sniper?.familyMemory?.wins||0}/${s.sniper?.familyMemory?.losses||0}`,`${s.sniper?.addressMemory?.wins||0}/${s.sniper?.addressMemory?.losses||0}`,s.campaign?.direction,s.campaign?.fires,s.variants?.control,s.variants?.repeat,s.variants?.length,s.variants?.memory,s.variants?.hysteresis,s.variants?.structure,s.variants?.sniper,s.decisionMs,s.executionState,trades.length,trades.filter(t=>t.outcome==='WON').length,trades.filter(t=>t.outcome==='LOST').length,trades.reduce((a,t)=>a+(+t.profit||0),0),s.shadow?.outcome,s.why];
+    return [s.signalId,new Date(s.createdAt||Date.now()).toISOString(),s.approved,s.sniperApproved,s.controlApproved,s.sniper?.event,s.sniper?.grade,s.sniper?.score,s.sniper?.repeatCount,s.requestedBatch,s.tradeDirection,s.signalEpoch,s.signalQuote,s.milking?.state,s.milking?.direction,s.milking?.health,s.milking?.maturity,s.milking?.exhaustion,s.milking?.ageSeconds,s.milking?.remaining?.low,s.milking?.remaining?.median,s.milking?.remaining?.high,s.milking?.efficiency,s.milking?.decelerating,s.structure?.tag,s.structure?.phase,s.pattern?.familyId,s.pattern?.length,s.pattern?.edge,s.pattern?.matchCount,s.pattern?.avgSimilarity,`${s.pattern?.top10Agree||0}/${s.pattern?.top10Total||0}`,`${s.sniper?.familyMemory?.wins||0}/${s.sniper?.familyMemory?.losses||0}`,`${s.sniper?.addressMemory?.wins||0}/${s.sniper?.addressMemory?.losses||0}`,s.campaign?.direction,s.campaign?.fires,s.variants?.control,s.variants?.repeat,s.variants?.length,s.variants?.memory,s.variants?.hysteresis,s.variants?.structure,s.variants?.sniper,s.decisionMs,s.executionState,trades.length,trades.filter(t=>t.outcome==='WON').length,trades.filter(t=>t.outcome==='LOST').length,trades.reduce((a,t)=>a+(+t.profit||0),0),s.shadow?.outcome,s.why];
   });
   const csv = [headers,...rows].map(r => r.map(v => `"${String(v??'').replaceAll('"','""')}"`).join(',')).join('\n');
   const url = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
-  const a = document.createElement('a'); a.href = url; a.download = `sani-v8.1-sniper-campaign-${new Date().toISOString().replaceAll(':','-')}.csv`; a.click(); setTimeout(()=>URL.revokeObjectURL(url),500);
+  const a = document.createElement('a'); a.href = url; a.download = `${IS_MILKING_ZONE?'sani-milking-zone':'sani-v8.1-sniper-campaign'}-${new Date().toISOString().replaceAll(':','-')}.csv`; a.click(); setTimeout(()=>URL.revokeObjectURL(url),500);
 }
 
 function bindControls() {
@@ -384,11 +399,11 @@ function bindControls() {
   $('v81RealConfirm')?.addEventListener('change', renderGate);
   $('ptConnect').onclick = async () => { clearError(); try { traderConfig(); lastOtpContext = auth(); $('ptConnect').disabled = true; await engine.connect(freshWs); } catch(e) { showError(e.message); } finally { renderGate(); } };
   $('ptDisconnect').onclick = () => { engine.disconnect(); lastOtpContext = null; };
-  $('ptStart').onclick = () => { clearError(); try { auth(); traderConfig(); engine.start(); engine.log('info',`v8.1 armed on ${isRealAccount()?'REAL':'DEMO'}: only the full sniper lane can buy. Six comparison variants remain shadow-only.`); } catch(e) { showError(e.message); } };
+  $('ptStart').onclick = () => { clearError(); try { auth(); traderConfig(); engine.start(); engine.log('info',IS_MILKING_ZONE ? 'Milking Zone armed on Demo: Trend Budget chooses the side, sniper patterns choose the exact tick.' : `v8.1 armed on ${isRealAccount()?'REAL':'DEMO'}: only the full sniper lane can buy. Six comparison variants remain shadow-only.`); } catch(e) { showError(e.message); } };
   $('ptPause').onclick = () => engine.pause();
   $('ptStop').onclick = () => engine.stop();
-  $('ptReset').onclick = () => { try { engine.resetSession(); worker?.postMessage({type:'RESET'}); } catch(e) { showError(e.message); } };
-  $('ptClearLedger').onclick = () => { if (confirm('Clear the fresh v8.1 sniper cohort?')) { signals=[]; localStorage.removeItem(SIGNAL_KEY); render(); } };
+  $('ptReset').onclick = () => { try { engine.resetSession(); worker?.postMessage({type:'RESET'}); if (trendBudget) trendSnapshot = trendBudget.hydrate(localTicks); render(); } catch(e) { showError(e.message); } };
+  $('ptClearLedger').onclick = () => { if (confirm(IS_MILKING_ZONE ? 'Clear the Milking Zone cohort?' : 'Clear the fresh v8.1 sniper cohort?')) { signals=[]; localStorage.removeItem(SIGNAL_KEY); render(); } };
   $('ptResetCalibration').onclick = () => { if (confirm('Reset measured execution offset?')) { localStorage.removeItem(OFFSET_KEY); worker?.postMessage({type:'CONFIG',executionOffset:1}); render(); } };
   $('ptExportLedger').onclick = exportCsv;
   for (const id of ['ptStake','ptTakeProfit','ptStopLoss','ptMaxTrades','ptCooldown']) $(id)?.addEventListener('change', () => { try { if (!engine.snapshot().running) traderConfig(); render(); } catch(e) { showError(e.message); } });
@@ -411,6 +426,17 @@ engine.subscribe(state => {
 
 window.addEventListener('sani-observatory-analysis', event => {
   const t = event.detail;
+  if (IS_MILKING_ZONE && Number(t?.archiveCount || 0) > localTicks.length + 10 && typeof window.SaniObservatory?.getTicks === 'function') {
+    const feedTicks = window.SaniObservatory.getTicks().filter(row => Number.isFinite(+row.epoch) && Number.isFinite(+row.quote)).sort((a,b)=>a.epoch-b.epoch).slice(-10000);
+    if (feedTicks.length) {
+      localTicks = feedTicks;
+      lastTickKey = `${feedTicks.at(-1).epoch}:${feedTicks.at(-1).quote}`;
+      trendSnapshot = trendBudget?.hydrate(localTicks) || trendSnapshot;
+      worker?.postMessage({ type:'INIT', ticks:localTicks, executionOffset:executionOffsetEstimate(), memoryRows:workerMemoryRows() });
+      render();
+      return;
+    }
+  }
   if (t?.epoch !== undefined && t?.quote !== undefined) postTick(t);
 });
 window.addEventListener('resize', render);

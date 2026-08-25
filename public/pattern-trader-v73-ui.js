@@ -272,6 +272,7 @@ function renderChart() {
 function render(data = {}) {
   latest = { ...latest, ...data, signals:data.signals || latest.signals || [] };
   renderDashboard(); renderLedger(); renderTrades(); renderChart();
+  window.dispatchEvent(new CustomEvent('sani-v81-ui-render', { detail:latest }));
 }
 
 export const V73UI = { install, render };

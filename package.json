@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node server.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check public/app.js && node --check public/core/bos.mjs && node --check public/core/shadow-lab.mjs && node --check public/core/protocol.mjs && node --check public/core/engine.mjs && node --check public/core/sniper-campaign.mjs && node --check public/pattern-trader-v73-worker.js && node --check public/pattern-trader-v73.js && node --check public/pattern-trader-v73-ui.js && node --check api/accounts.js && node --check api/otp.js && node --check worker-lib.mjs && node --check worker.mjs && node --check worker-server.mjs && node --check server.mjs",
+    "check": "node --check public/app.js && node --check public/observatory.js && node --check public/core/bos.mjs && node --check public/core/shadow-lab.mjs && node --check public/core/protocol.mjs && node --check public/core/engine.mjs && node --check public/core/sniper-campaign.mjs && node --check public/core/trend-budget.mjs && node --check public/pattern-trader-v73-worker.js && node --check public/pattern-trader-v73.js && node --check public/pattern-trader-v73-ui.js && node --check public/milking-zone.js && node --check api/accounts.js && node --check api/otp.js && node --check worker-lib.mjs && node --check worker.mjs && node --check worker-server.mjs && node --check server.mjs",
     "worker": "node worker.mjs",
     "worker:server": "node worker-server.mjs"
   }
