@@ -13,30 +13,31 @@ test('planner labels estimates as evidence-only and scales target stake', () => 
   assert.equal(plan.breakEvenRate, 52);
 });
 
-test('auto mode routes the current map direction immediately', () => {
+test('auto mode routes the original v8 signal instead of the slower map direction', () => {
   const brain = new SmfnBrain();
   brain.start({ now:0, basePnl:0, baseTrades:0 });
-  const result = brain.evaluate({ now:1000, trend:trend('UP','DRIVE'), harvest:{blocked:false}, sourceDecision:source('CALL'), totalPnl:0, totalTrades:0 });
+  const result = brain.evaluate({ now:1000, trend:trend('DOWN','MATURE'), harvest:{blocked:false}, sourceDecision:source('CALL'), totalPnl:0, totalTrades:0 });
   assert.equal(result.approved, true);
   assert.equal(result.allowedDirection, 'CALL');
   assert.equal(brain.snapshot().activeLane, 'UP');
 });
 
-test('SMFN sniper rejects 8T and 12T micro seeds and permits 20T evidence', () => {
-  assert.equal(isSmfnSniperEntry({ milkCandidate:true, patternLength:8 }), false);
-  assert.equal(isSmfnSniperEntry({ milkCandidate:true, patternLength:12 }), false);
+test('SMFN accepts every original v8 entry length without retrospective 20T filtering', () => {
+  assert.equal(isSmfnSniperEntry({ milkCandidate:true, patternLength:8 }), true);
+  assert.equal(isSmfnSniperEntry({ milkCandidate:true, patternLength:12 }), true);
   assert.equal(isSmfnSniperEntry({ milkCandidate:true, patternLength:20 }), true);
   assert.equal(isSmfnSniperEntry({ milkCandidate:false, patternLength:20 }), false);
 });
 
-test('live trend sync changes the one active route between decisions', () => {
+test('live trend sync cannot overwrite the bot selected by an entry signal', () => {
   const brain = new SmfnBrain();
   brain.start({ now:0, trend:{ ...trend('UP','DRIVE'), epoch:100 } });
+  brain.evaluate({ now:1, trend:trend('UP','DRIVE'), sourceDecision:{ ...source('CALL'), signalEpoch:101 } });
   assert.equal(brain.snapshot().allowedDirection, 'CALL');
   brain.syncTrend(trend('DOWN','MATURE'), 140);
   const snapshot = brain.snapshot();
-  assert.equal(snapshot.allowedDirection, 'PUT');
-  assert.deepEqual(snapshot.routeHistory.map(row => row.lane), ['CALL','PUT']);
+  assert.equal(snapshot.allowedDirection, 'CALL');
+  assert.deepEqual(snapshot.routeHistory.map(row => row.lane), ['CALL']);
 });
 
 test('terminal completion clears stale route and records BOT OFF', () => {
@@ -49,16 +50,17 @@ test('terminal completion clears stale route and records BOT OFF', () => {
   assert.equal(snapshot.routeHistory.at(-1).lane, 'NONE');
 });
 
-test('opposite bot never coexists with the active lane', () => {
+test('a new source signal switches the one active bot without coexistence', () => {
   const brain = new SmfnBrain();
   brain.start({ now:0 });
   brain.evaluate({ now:1, trend:trend('DOWN'), harvest:{blocked:false}, sourceDecision:source('PUT') });
-  const blocked = brain.evaluate({ now:4, trend:trend('DOWN'), harvest:{blocked:false}, sourceDecision:source('CALL') });
-  assert.equal(blocked.approved, false);
-  assert.equal(blocked.allowedDirection, 'PUT');
+  const switched = brain.evaluate({ now:4, trend:trend('DOWN'), harvest:{blocked:false}, sourceDecision:source('CALL') });
+  assert.equal(switched.approved, true);
+  assert.equal(switched.allowedDirection, 'CALL');
+  assert.equal(brain.snapshot().activeLane, 'UP');
 });
 
-test('drive, mature, turning and harvest keep the mapped bot on', () => {
+test('drive, mature, turning and harvest do not block a qualified source signal', () => {
   for (const state of ['DRIVE','MATURE','TURNING','HARVEST']) {
     const brain = new SmfnBrain(); brain.start({ now:0 });
     const result = brain.evaluate({ now:1, trend:trend('UP',state,99), harvest:{blocked:true}, sourceDecision:source('CALL') });
@@ -67,15 +69,16 @@ test('drive, mature, turning and harvest keep the mapped bot on', () => {
   }
 });
 
-test('a missing map reading does not erase the last active bot', () => {
+test('no source entry switches both bots off between signals', () => {
   const brain = new SmfnBrain(); brain.start({ now:0 });
   brain.evaluate({ now:1, trend:trend('UP','DRIVE'), sourceDecision:source('CALL') });
-  const held = brain.evaluate({ now:2, trend:{ direction:'NONE', state:'OBSERVE' }, sourceDecision:source('CALL') });
-  assert.equal(held.allowedDirection, 'CALL');
-  assert.equal(held.approved, true);
+  const waiting = brain.evaluate({ now:2, trend:{ direction:'NONE', state:'OBSERVE' }, sourceDecision:{ approved:false, tradeDirection:'CALL' } });
+  assert.equal(waiting.allowedDirection, 'NONE');
+  assert.equal(waiting.approved, false);
+  assert.equal(brain.snapshot().activeLane, 'NONE');
 });
 
-test('losses do not pause or clear the routed bot', () => {
+test('losses do not pause the next qualified source signal', () => {
   const brain = new SmfnBrain(); brain.start({ now:0 });
   brain.evaluate({ now:1, trend:trend('DOWN','DRIVE'), sourceDecision:source('PUT') });
   brain.registerResult(-1, 2);
