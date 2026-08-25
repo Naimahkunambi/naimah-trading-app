@@ -5,6 +5,7 @@ const clock = ms => {
   const s=Math.max(0,Math.floor(Number(ms||0)/1000));
   return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
 };
+const conf = (arb,prediction) => Number(arb?.confidence ?? prediction?.confidence ?? 0);
 
 const stable = {headline:'',text:'',action:'',direction:'',confidence:'',key:'',changedAt:0,lastSnapshot:null};
 
@@ -55,17 +56,17 @@ function thoughtFor(detail){
   if(phase==='RECOVER')return{
     headline:'I AM RECOVERING SELECTIVELY.',
     text:`Run ${money(mission.runPnl)}. I am not chasing the deficit. I am only paying for actions whose retained utility is positive. ${brain.lastInsight||mission.reason||''}`,
-    action:'RECOVER',direction:arb.tradeDirection||'NONE',confidence:`${Number(arb.confidence??prediction.confidence||0).toFixed(0)}%`,key:`RECOVER:${brain.generation}:${mission.lastReview?.at||0}`
+    action:'RECOVER',direction:arb.tradeDirection||'NONE',confidence:`${conf(arb,prediction).toFixed(0)}%`,key:`RECOVER:${brain.generation}:${mission.lastReview?.at||0}`
   };
   if(phase==='PROTECT')return{
     headline:'THE PROFIT NOW HAS A FLOOR.',
     text:`Peak ${money(mission.peakPnl)}. Protected floor ${money(mission.protectedFloor)}. Current ${money(mission.runPnl)}. I will keep SANI shadow-running beside me and I will step back if my edge decays.`,
-    action:'PROTECT',direction:arb.tradeDirection||'NONE',confidence:`${Number(arb.confidence??prediction.confidence||0).toFixed(0)}%`,key:`PROTECT:${Math.floor(Number(mission.peakPnl||0))}:${mission.reviewCount}`
+    action:'PROTECT',direction:arb.tradeDirection||'NONE',confidence:`${conf(arb,prediction).toFixed(0)}%`,key:`PROTECT:${Math.floor(Number(mission.peakPnl||0))}:${mission.reviewCount}`
   };
   if(phase==='WORK')return{
     headline:"I'VE EARNED THE RIGHT TO WORK.",
     text:`I am executing the highest-utility action I know for this state while SANI remains my shadow benchmark. ${brain.lastInsight||mission.reason||''}`,
-    action:arb.action||'WORK',direction:arb.tradeDirection||'NONE',confidence:`${Number(arb.confidence??prediction.confidence||0).toFixed(0)}%`,key:`WORK:${arb.action}:${brain.generation}:${mission.reviewCount}`
+    action:arb.action||'WORK',direction:arb.tradeDirection||'NONE',confidence:`${conf(arb,prediction).toFixed(0)}%`,key:`WORK:${arb.action}:${brain.generation}:${mission.reviewCount}`
   };
   return{headline:'I AM READING THE ROOM.',text:brain.lastInsight||brain.lastLesson||'I am waiting for a mission.',action:'LISTEN',direction:'NONE',confidence:'',key:`IDLE:${brain.generation}`};
 }
@@ -73,11 +74,10 @@ function thoughtFor(detail){
 function shouldAccept(next){
   if(!stable.key)return true;
   if(next.key===stable.key)return false;
-  const major = next.action!==stable.action || next.headline!==stable.headline;
-  if(major && Date.now()-stable.changedAt>1800)return true;
+  const major=next.action!==stable.action||next.headline!==stable.headline;
+  if(major&&Date.now()-stable.changedAt>1800)return true;
   return Date.now()-stable.changedAt>6500;
 }
-
 function applyStable(){
   if(!stable.headline)return;
   if($('libraVoiceHeadline')&&$('libraVoiceHeadline').textContent!==stable.headline)$('libraVoiceHeadline').textContent=stable.headline;
@@ -86,7 +86,6 @@ function applyStable(){
   if($('libraVoiceDirection')&&$('libraVoiceDirection').textContent!==stable.direction)$('libraVoiceDirection').textContent=stable.direction;
   if($('libraVoiceConfidence')&&stable.confidence&&$('libraVoiceConfidence').textContent!==stable.confidence)$('libraVoiceConfidence').textContent=stable.confidence;
 }
-
 function render(detail){
   installUi();stable.lastSnapshot=detail;
   const mission=detail.mission||{},brain=detail.brain||{},shadows=detail.shadows||{};
@@ -103,12 +102,8 @@ function render(detail){
   const finished=Boolean(mission.status&&!['ACTIVE','IDLE','PAUSED'].includes(mission.status));
   if($('libraMissionNext'))$('libraMissionNext').hidden=!finished;
   if($('libraMissionRecommendation'))$('libraMissionRecommendation').textContent=mission.reason||'I am reviewing the run.';
-
-  const next=thoughtFor(detail);
-  if(shouldAccept(next)){Object.assign(stable,next,{changedAt:Date.now()});}
-  applyStable();
+  const next=thoughtFor(detail);if(shouldAccept(next))Object.assign(stable,next,{changedAt:Date.now()});applyStable();
 }
-
 window.addEventListener('libra-state',event=>render(event.detail||{}));
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',installUi,{once:true});else installUi();
 setInterval(applyStable,120);
