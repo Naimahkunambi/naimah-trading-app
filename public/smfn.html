@@ -87,13 +87,14 @@
               <div><small>RUN P/L</small><strong id="smfnMapPnl">+$0.00</strong><span id="smfnDirectionReason">The map is forming.</span></div>
             </div>
             <div class="smfnMapTools">
+              <span class="smfnHistoryTools"><button id="smfnMapOlder" type="button">◀ OLDER</button><button id="smfnMapNewer" type="button">NEWER ▶</button><button id="smfnMapLive" type="button">LIVE NOW</button></span>
               <button id="smfnZoomIn" type="button">ZOOM +</button><button id="smfnZoomOut" type="button">ZOOM −</button><button id="smfnMapFreeze" type="button">FREEZE MAP</button><button id="smfnMapDraw" type="button">DRAW</button><button id="smfnMapClearInk" type="button">CLEAR INK</button>
               <span class="smfnInkColors"><button type="button" data-map-color="#ffd45b" class="active" aria-label="Gold ink"></button><button type="button" data-map-color="#59f5ed" aria-label="Cyan ink"></button><button type="button" data-map-color="#ff6680" aria-label="Red ink"></button></span>
               <label>LABEL<select id="smfnMapLabel"><option value="unlabelled">Unlabelled</option><option value="clear-uptrend">Clear uptrend</option><option value="clear-downtrend">Clear downtrend</option><option value="reversal">Reversal</option><option value="good-entry">Good entry</option><option value="bad-entry">Bad entry</option><option value="missed-entry">Missed entry</option></select></label>
               <button id="smfnSaveMap" class="smfnPrimary" type="button">SAVE MAP PNG</button><button id="smfnSaveCase" type="button">SAVE TRAINING CASE</button>
             </div>
             <canvas id="smfnTrendCanvas" width="1800" height="760"></canvas>
-            <div class="smfnMapFooter"><div class="smfnLegend"><span><i class="raw"></i>PRICE</span><span><i class="trend"></i>DRAWN TREND</span><span><i class="projected"></i>PROJECTED DIRECTION</span><span><i class="trade"></i>ENTRY</span><span><i class="exit"></i>EXIT</span></div><span id="smfnNarratorWhy">Freeze affects only the picture. The bot keeps running.</span></div>
+            <div class="smfnMapFooter"><div class="smfnLegend"><span><i class="raw"></i>PRICE</span><span><i class="trend"></i>FOOTPRINT</span><span><i class="route"></i>BOT ROUTE</span><span><i class="projected"></i>SMFN PROPOSAL</span><span><i class="trade"></i>ENTRY</span><span><i class="exit"></i>EXIT</span></div><span id="smfnNarratorWhy">OLDER freezes an auditable past frame. LIVE NOW returns to the moving map.</span></div>
           </div>
         </section>
       </article>
@@ -106,7 +107,7 @@
         </div>
         <div class="smfnModeGrid">
           <label class="smfnModeCard"><input type="radio" name="smfnMode" value="MANUAL"><span><b>MANUAL MILKING</b><em>You are the brain</em><small>Exactly the existing Milking Zone behavior. No SMFN direction gate is added.</small></span></label>
-          <label class="smfnModeCard selected"><input type="radio" name="smfnMode" value="AUTO" checked><span><b>SMFN AUTO</b><em>SMFN is the brain</em><small>The wider map keeps CALL or PUT switched on continuously; original v8 entries flow only through that side.</small></span></label>
+          <label class="smfnModeCard selected"><input type="radio" name="smfnMode" value="AUTO" checked><span><b>SMFN AUTO</b><em>SMFN is the brain</em><small>The wider footprint owns CALL or PUT continuously. Only an aligned 20-tick setup may fire; 8T/12T micro seeds are watched, not traded.</small></span></label>
         </div>
         <div class="smfnPlanGrid">
           <section class="smfnWindow">
@@ -131,7 +132,7 @@
               <div class="smfnForecastHero"><small>OBSERVED RANGE</small><strong id="smfnForecastRange">—</strong><span id="smfnForecastNote">Calculating from today’s exports…</span></div>
               <div class="smfnForecastStats"><div><small>EXPECTED CONTRACTS</small><b id="smfnForecastTrades">—</b></div><div><small>CENTRAL ESTIMATE</small><b id="smfnForecastExpected">—</b></div><div><small>SUGGESTED STAKE</small><b id="smfnSuggestedStake">—</b></div><div><small>BREAK-EVEN W/R</small><b id="smfnBreakEven">52.0%</b></div></div>
               <div id="smfnFeasibility" class="smfnFeasibility">Set a mission to check feasibility.</div>
-              <p>Benchmark only: 3 earlier Demo windows · 80 MATURE-aligned contracts · 62W / 18L. Continuous routing is a new revision and must build its own evidence; future results can be lower or negative.</p>
+              <p>Latest continuous Demo audit: all entries 98W / 102L (−$34.54). The 20T cohort was 26W / 16L (+$24.02), while 8T/12T entries lost. SMFN now uses 20T as entry evidence; this is a small retrospective sample, not a promise.</p>
             </div>
           </section>
         </div>

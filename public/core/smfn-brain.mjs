@@ -1,18 +1,18 @@
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Number(value) || 0));
 
 export const SMFN_CALIBRATION = Object.freeze({
-  label: '25 Aug demo evidence',
-  windows: 3,
-  contracts: 80,
-  wins: 62,
-  losses: 18,
-  winRate: 0.775,
-  winRateLow: 0.672,
-  winRateHigh: 0.853,
+  label: '25 Aug 20T cohort',
+  windows: 1,
+  contracts: 42,
+  wins: 26,
+  losses: 16,
+  winRate: 0.619,
+  winRateLow: 0.468,
+  winRateHigh: 0.750,
   payoutPerStake: 0.923,
-  contractsPerMinute: 2.66,
+  contractsPerMinute: 5.3,
   contractsPerMinuteLow: 1.0,
-  contractsPerMinuteHigh: 2.66
+  contractsPerMinuteHigh: 5.3
 });
 
 export function estimateSmfnPlan(input = {}, calibration = SMFN_CALIBRATION) {
@@ -51,6 +51,10 @@ export function estimateSmfnPlan(input = {}, calibration = SMFN_CALIBRATION) {
   };
 }
 
+export function isSmfnSniperEntry({ milkCandidate = false, patternLength = 0 } = {}) {
+  return Boolean(milkCandidate && Number(patternLength) >= 20);
+}
+
 export class SmfnBrain {
   constructor(config = {}) {
     this.defaults = {
@@ -81,6 +85,7 @@ export class SmfnBrain {
     this.baseTrades = 0;
     this.cooldownUntil = 0;
     this.lossStreak = 0;
+    this.routeHistory = [];
     this.lastReason = 'Set a plan, connect Demo, then arm SMFN.';
     this.lastDecision = null;
     return this.snapshot();
@@ -115,7 +120,9 @@ export class SmfnBrain {
     this.lockCount = 0;
     this.cooldownUntil = 0;
     this.lossStreak = 0;
+    this.routeHistory = [];
     if (this.config.mode !== 'MANUAL') this.updateLane(trend);
+    if (this.activeLane !== 'NONE') this.recordRoute(Number(trend?.epoch || 0));
     this.phase = this.config.mode === 'MANUAL' ? 'MANUAL' : this.activeLane === 'NONE' ? 'SCANNING' : 'ACTIVE';
     this.status = this.phase;
     this.lastReason = this.config.mode === 'MANUAL'
@@ -129,9 +136,8 @@ export class SmfnBrain {
   pause(reason = 'SMFN paused by Naimah.') {
     if (!['COMPLETE','HARD_STOP','STOPPED'].includes(this.status)) this.status = 'PAUSED';
     this.phase = 'PAUSED';
-    this.activeLane = 'NONE';
-    this.lockCandidate = 'NONE';
-    this.lockCount = 0;
+    this.clearLane();
+    this.recordRoute(Math.floor(Date.now() / 1000));
     this.lastReason = reason;
     return this.snapshot();
   }
@@ -139,9 +145,8 @@ export class SmfnBrain {
   stop(reason = 'SMFN stopped.') {
     this.status = 'STOPPED';
     this.phase = 'STOPPED';
-    this.activeLane = 'NONE';
-    this.lockCandidate = 'NONE';
-    this.lockCount = 0;
+    this.clearLane();
+    this.recordRoute(Math.floor(Date.now() / 1000));
     this.lastReason = reason;
     return this.snapshot();
   }
@@ -152,6 +157,32 @@ export class SmfnBrain {
 
   runPnl(totalPnl = 0) { return Number(totalPnl || 0) - this.basePnl; }
   runTrades(totalTrades = 0) { return Math.max(0, Number(totalTrades || 0) - this.baseTrades); }
+
+  clearLane() {
+    this.activeLane = 'NONE';
+    this.lockCandidate = 'NONE';
+    this.lockCount = 0;
+  }
+
+  recordRoute(epoch = 0) {
+    const lane = this.activeLane === 'UP' ? 'CALL' : this.activeLane === 'DOWN' ? 'PUT' : 'NONE';
+    if (this.routeHistory.at(-1)?.lane === lane) return;
+    this.routeHistory.push({ epoch:Number(epoch) || 0, lane, direction:this.activeLane, at:Date.now() });
+    this.routeHistory = this.routeHistory.slice(-500);
+  }
+
+  syncTrend(trend, epoch = 0) {
+    if (this.config.mode === 'MANUAL' || !this.isRunning()) return this.snapshot();
+    const previous = this.activeLane;
+    this.updateLane(trend);
+    if (this.activeLane !== previous) {
+      this.recordRoute(epoch);
+      if (this.phase !== 'LANDING') this.phase = 'ACTIVE';
+      this.status = this.phase;
+      this.lastReason = `${this.activeLane === 'UP' ? 'CALL' : 'PUT'} BOT now follows the sustained ${this.activeLane} footprint. The opposite bot is locked.`;
+    }
+    return this.snapshot();
+  }
 
   registerResult(profit, now = Date.now()) {
     if (!(Number(profit) < 0)) {
@@ -169,16 +200,19 @@ export class SmfnBrain {
     if (this.startedAt == null || !this.isRunning()) return { stop:true, phase:this.phase, runPnl, runTrades };
     if (runPnl <= -Math.abs(this.config.hardStop)) {
       this.status = 'HARD_STOP'; this.phase = 'HARD_STOP';
+      this.clearLane(); this.recordRoute(Math.floor(Number(now) / 1000));
       this.lastReason = `Hard stop reached at ${runPnl.toFixed(2)}. SMFN will not chase the loss.`;
       return { stop:true, phase:this.phase, runPnl, runTrades };
     }
     if (runPnl >= this.config.targetProfit && this.config.targetProfit > 0) {
       this.status = 'COMPLETE'; this.phase = 'COMPLETE';
+      this.clearLane(); this.recordRoute(Math.floor(Number(now) / 1000));
       this.lastReason = `Target reached at +$${runPnl.toFixed(2)}. New purchases are closed.`;
       return { stop:true, phase:this.phase, runPnl, runTrades };
     }
     if (runTrades >= this.config.maxTrades) {
       this.status = 'COMPLETE'; this.phase = 'COMPLETE';
+      this.clearLane(); this.recordRoute(Math.floor(Number(now) / 1000));
       this.lastReason = `The ${this.config.maxTrades}-contract run cap was reached.`;
       return { stop:true, phase:this.phase, runPnl, runTrades };
     }
@@ -189,6 +223,7 @@ export class SmfnBrain {
         return { stop:false, phase:this.phase, runPnl, runTrades };
       }
       this.status = 'COMPLETE'; this.phase = 'COMPLETE';
+      this.clearLane(); this.recordRoute(Math.floor(Number(now) / 1000));
       this.lastReason = runPnl < this.config.recoveryTarget
         ? `Safety Landing expired at ${runPnl.toFixed(2)}. SMFN stopped instead of chasing.`
         : `The timed run finished at ${runPnl >= 0 ? '+' : ''}$${runPnl.toFixed(2)}.`;
@@ -248,12 +283,12 @@ export class SmfnBrain {
     this.status = gate.phase === 'LANDING' ? 'LANDING' : 'ACTIVE';
     this.phase = gate.phase === 'LANDING' ? 'LANDING' : 'ACTIVE';
     const reason = !sourceDecision?.approved
-      ? `${allowedDirection} BOT stays on; waiting for the original v8 entry.`
+      ? sourceDecision?.waitReason || `${allowedDirection} BOT stays on; waiting for the 20-tick SMFN sniper entry.`
       : !sameSide
         ? `${sourceDecision.tradeDirection} entry was ignored. The map is routing only ${allowedDirection}.`
       : !landingGrade
         ? `Safety Landing rejected grade ${grade || '—'}; only A/B evidence may trade.`
-          : `${allowedDirection} BOT routed the original v8 entry. The opposite bot remains locked.`;
+          : `${allowedDirection} BOT fired a 20-tick SMFN sniper entry. The opposite bot remains locked.`;
     const result = {
       approved,
       batch:approved ? (gate.phase === 'LANDING' ? 1 : this.config.batch) : 0,
@@ -288,6 +323,7 @@ export class SmfnBrain {
       runTrades,
       lossStreak:this.lossStreak,
       cooldownUntil:this.cooldownUntil,
+      routeHistory:this.routeHistory.map(row => ({ ...row })),
       reason:this.lastReason,
       config:{ ...this.config },
       lastDecision:this.lastDecision

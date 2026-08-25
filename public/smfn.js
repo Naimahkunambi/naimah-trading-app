@@ -1,4 +1,5 @@
 import { estimateSmfnPlan, SMFN_CALIBRATION } from './core/smfn-brain.mjs';
+import { routeAt, routeSegments, tradeAuditPoint, visibleTickWindow } from './core/smfn-map-history.mjs';
 
 const $ = id => document.getElementById(id);
 const set = (id, value) => { if ($(id)) $(id).textContent = value; };
@@ -11,6 +12,7 @@ const mapZoomLevels = [60,120,200,300,500];
 let mapZoomIndex = 1;
 let mapFrozen = false;
 let mapSnapshot = null;
+let mapHistoryOffset = 0;
 let mapDrawEnabled = false;
 let mapInkColor = '#ffd45b';
 let mapInk = [];
@@ -167,8 +169,8 @@ function renderBrain() {
   $('smfnPutLane')?.classList.toggle('active', putActive);
   set('smfnCallState', mode === 'MANUAL' ? 'MANUAL' : callActive ? 'ACTIVE' : 'LOCKED');
   set('smfnPutState', mode === 'MANUAL' ? 'MANUAL' : putActive ? 'ACTIVE' : 'LOCKED');
-  set('smfnCallWhy', mode === 'MANUAL' ? 'Existing Milking logic decides every CALL.' : callActive ? 'UP map keeps CALL switched on. Original v8 entries may flow.' : 'Locked while the map routes PUT.');
-  set('smfnPutWhy', mode === 'MANUAL' ? 'Existing Milking logic decides every PUT.' : putActive ? 'DOWN map keeps PUT switched on. Original v8 entries may flow.' : 'Locked while the map routes CALL.');
+  set('smfnCallWhy', mode === 'MANUAL' ? 'Existing Milking logic decides every CALL.' : callActive ? 'UP footprint keeps CALL on. Only aligned 20T sniper entries may fire.' : 'Locked while the footprint routes PUT.');
+  set('smfnPutWhy', mode === 'MANUAL' ? 'Existing Milking logic decides every PUT.' : putActive ? 'DOWN footprint keeps PUT on. Only aligned 20T sniper entries may fire.' : 'Locked while the footprint routes CALL.');
   renderResults(latest.signals || []);
   renderTape(latest.signals || []);
 }
@@ -193,31 +195,44 @@ function ema(values, period) {
 
 function displayedMap() {
   const source = mapFrozen && mapSnapshot ? mapSnapshot : latest;
-  const ticks = (source.ticks || []).slice(-mapZoomLevels[mapZoomIndex]);
-  const start = Number(ticks[0]?.epoch || 0), end = Number(ticks.at(-1)?.epoch || 0);
-  const signals = (source.signals || []).filter(signal => Number(signal.signalEpoch) >= start && Number(signal.signalEpoch) <= end);
-  return { source, ticks, signals, start, end };
+  const window = visibleTickWindow(source.ticks || [], mapZoomLevels[mapZoomIndex], mapHistoryOffset);
+  mapHistoryOffset = window.offset;
+  const { ticks, start, end } = window;
+  const orderedSignals = (source.signals || [])
+    .filter(signal => Number.isFinite(Number(signal.signalEpoch)))
+    .sort((a,b) => Number(a.signalEpoch) - Number(b.signalEpoch));
+  const signals = orderedSignals.filter(signal => Number(signal.signalEpoch) >= start && Number(signal.signalEpoch) <= end);
+  const anchorSignal = orderedSignals.filter(signal => Number(signal.signalEpoch) <= end).at(-1) || null;
+  const startSignal = orderedSignals.filter(signal => Number(signal.signalEpoch) <= start).at(-1) || null;
+  const auditSignals = startSignal && !signals.includes(startSignal) ? [startSignal, ...signals] : signals;
+  return { source, ticks, signals, auditSignals, anchorSignal, start, end, ...window };
 }
 
-function updateMapTag() {
-  const mode = mapFrozen ? (mapDrawEnabled ? 'FROZEN · DRAW' : 'FROZEN') : 'LIVE';
-  set('smfnChartTag', `${mode} · LAST ${mapZoomLevels[mapZoomIndex]} TICKS`);
+function updateMapTag(frame = displayedMap()) {
+  const mode = frame.offset > 0
+    ? `HISTORY · ${frame.offset + frame.ticks.length}→${frame.offset + 1} TICKS AGO`
+    : mapFrozen ? (mapDrawEnabled ? 'FROZEN · DRAW' : 'FROZEN') : 'LIVE';
+  set('smfnChartTag', `${mode} · ${frame.ticks.length || mapZoomLevels[mapZoomIndex]} TICKS`);
   const freezeButton = $('smfnMapFreeze');
   freezeButton?.classList.toggle('active', mapFrozen);
   if (freezeButton) freezeButton.textContent = mapFrozen ? 'GO LIVE' : 'FREEZE MAP';
+  if ($('smfnMapOlder')) $('smfnMapOlder').disabled = frame.maxOffset <= 0 || frame.offset >= frame.maxOffset;
+  if ($('smfnMapNewer')) $('smfnMapNewer').disabled = frame.offset <= 0;
+  $('smfnMapLive')?.classList.toggle('active', !mapFrozen && frame.offset === 0);
   $('smfnMapDraw')?.classList.toggle('active', mapDrawEnabled);
   $('smfnTrendCanvas')?.classList.toggle('drawing', mapDrawEnabled);
 }
 
 function freezeMap() {
   mapSnapshot = {
-    ticks:(latest.ticks || []).slice(-600).map(row => ({...row})),
+    ticks:(latest.ticks || []).slice(-10000).map(row => ({...row})),
     signals:(latest.signals || []).map(signal => ({...signal, actualTrades:(signal.actualTrades || []).map(trade => ({...trade}))})),
     trend:{...(latest.trend || {})},
     smfn:{...(latest.smfn || {})},
     engine:{...(latest.engine || {})}
   };
   mapFrozen = true;
+  mapHistoryOffset = 0;
   updateMapTag();
   drawChart();
 }
@@ -225,10 +240,22 @@ function freezeMap() {
 function setMapLive() {
   mapFrozen = false;
   mapSnapshot = null;
+  mapHistoryOffset = 0;
   mapDrawEnabled = false;
   activeMapStroke = null;
   mapInk = [];
   updateMapTag();
+  drawChart();
+}
+
+function moveMapHistory(direction) {
+  if (!mapFrozen) freezeMap();
+  const current = visibleTickWindow((mapSnapshot || latest).ticks || [], mapZoomLevels[mapZoomIndex], mapHistoryOffset);
+  const step = Math.max(20, Math.floor(mapZoomLevels[mapZoomIndex] * .65));
+  mapHistoryOffset = Math.max(0, Math.min(current.maxOffset, current.offset + direction * step));
+  mapDrawEnabled = false;
+  activeMapStroke = null;
+  mapInk = [];
   drawChart();
 }
 
@@ -259,18 +286,31 @@ function drawChart() {
   ctx.clearRect(0,0,width,height);
   ctx.fillStyle='#020a11';ctx.fillRect(0,0,width,height);
   const frame=displayedMap(), rows=frame.ticks;
-  updateMapTag();
+  updateMapTag(frame);
   if(rows.length<2){ctx.fillStyle='#6e8da0';ctx.font='12px monospace';ctx.fillText('WAITING FOR LIVE TICKS',18,28);drawMapInk(ctx,width,height);return}
   const quotes=rows.map(row=>Number(row.quote));
   const smoothed=ema(quotes,Math.max(6,Math.round(rows.length/12)));
-  const source=frame.source, trend=source.trend || latest.trend || {}, lane=source.smfn?.allowedDirection || latest.smfn?.allowedDirection;
+  const source=frame.source;
+  const pastFrame=frame.offset>0;
+  const trend=pastFrame ? (frame.anchorSignal?.milking || source.trend || {}) : (source.trend || latest.trend || {});
+  let lane=pastFrame
+    ? frame.anchorSignal?.smfn?.allowedDirection || routeAt(source.smfn?.routeHistory || [], frame.end)
+    : source.smfn?.allowedDirection || latest.smfn?.allowedDirection;
+  if (!['CALL','PUT'].includes(lane)) lane='NONE';
   const direction=trend.direction || (lane==='CALL'?'UP':lane==='PUT'?'DOWN':'NONE');
   const recentStart=smoothed[Math.max(0,smoothed.length-Math.min(40,smoothed.length))];
   const rawSpan=Math.max(...quotes)-Math.min(...quotes)||1;
   const sign=lane==='CALL'||direction==='UP'?1:lane==='PUT'||direction==='DOWN'?-1:Math.sign(smoothed.at(-1)-recentStart)||1;
-  const projected=smoothed.at(-1)+sign*Math.min(rawSpan*.28,Math.max(Math.abs(smoothed.at(-1)-recentStart)*.7,rawSpan*.06));
+  const modelTarget=Number(trend.targetQuote?.median);
+  const modelDelta=modelTarget-smoothed.at(-1);
+  const slopeStep=Math.min(rawSpan*.38,Math.max(Math.abs(smoothed.at(-1)-recentStart)*.7,rawSpan*.06));
+  const proposedStep=Number.isFinite(modelTarget)&&Math.sign(modelDelta)===sign
+    ? Math.min(rawSpan*.48,Math.max(rawSpan*.06,Math.abs(modelDelta)))
+    : slopeStep;
+  const projected=smoothed.at(-1)+sign*proposedStep;
+  const trades=flattenTrades(frame.signals).reverse().map(({signal,trade}) => ({signal,trade,audit:tradeAuditPoint(signal,trade,rows)}));
   const allY=[...quotes,projected];
-  for(const signal of frame.signals) for(const trade of signal.actualTrades || []) { if(Number.isFinite(+trade.entrySpot))allY.push(+trade.entrySpot);if(Number.isFinite(+trade.exitSpot))allY.push(+trade.exitSpot); }
+  for(const {audit} of trades){if(Number.isFinite(audit.entrySpot))allY.push(audit.entrySpot);if(Number.isFinite(audit.exitSpot))allY.push(audit.exitSpot)}
   const rawMin=Math.min(...allY),rawMax=Math.max(...allY),pad=(rawMax-rawMin||1)*.09,min=rawMin-pad,max=rawMax+pad,span=max-min||1;
   const start=frame.start,end=frame.end,left=24,top=38,bottom=height-32,plotRight=Math.max(left+120,width-(width<760?92:180));
   const xFor=epoch=>left+(Number(epoch)-start)/Math.max(1,end-start)*(plotRight-left);
@@ -280,24 +320,38 @@ function drawChart() {
   for(let i=0;i<=6;i+=1){const y=top+(bottom-top)*i/6;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(width-12,y);ctx.stroke()}
   ctx.fillStyle='rgba(255,212,91,.035)';ctx.fillRect(plotRight,top,width-plotRight-12,bottom-top);
   ctx.strokeStyle='rgba(255,212,91,.35)';ctx.setLineDash([4,6]);ctx.beginPath();ctx.moveTo(plotRight,top);ctx.lineTo(plotRight,bottom);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle='#6f8fa1';ctx.font='9px monospace';ctx.fillText('NOW',plotRight+6,top+12);
+  ctx.fillStyle='#6f8fa1';ctx.font='9px monospace';ctx.fillText(pastFrame?'PAST FRAME':'NOW',plotRight+6,top+12);
   for(const [value,y] of [[max,top+4],[(max+min)/2,(top+bottom)/2],[min,bottom]]){ctx.fillStyle='#567488';ctx.font='9px monospace';ctx.fillText(Number(value).toFixed(2),width-78,y);}
   if(lane==='CALL'||lane==='PUT'){
     ctx.fillStyle=lane==='CALL'?'rgba(182,255,102,.07)':'rgba(255,102,128,.07)';ctx.fillRect(0,0,width,height);
   }
+  const segments=routeSegments(frame.auditSignals,start,end);
+  if(!segments.length&&lane!=='NONE')segments.push({lane,start,end});
+  segments.forEach((segment,index)=>{
+    if(segment.lane==='NONE')return;
+    const segmentEnd=segments[index+1]?.start ?? end;
+    const x1=xFor(Math.max(start,segment.start)),x2=xFor(Math.min(end,Math.max(segment.start,segmentEnd)));
+    const color=segment.lane==='CALL'?'#b6ff66':'#ff6680';
+    ctx.strokeStyle=color;ctx.lineWidth=6;ctx.globalAlpha=.68;ctx.beginPath();ctx.moveTo(x1,top+8);ctx.lineTo(x2,top+8);ctx.stroke();ctx.globalAlpha=1;
+    ctx.fillStyle=color;ctx.font='bold 8px monospace';ctx.fillText(`${segment.lane} ON`,Math.max(left,x1+3),top+20);
+  });
   ctx.strokeStyle='rgba(95,184,255,.78)';ctx.lineWidth=1.4;ctx.beginPath();rows.forEach((row,index)=>{const x=xFor(row.epoch),y=yFor(row.quote);index?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();
   const trendColor=lane==='PUT'?'#ff6680':lane==='CALL'?'#b6ff66':'#ffd45b';
   ctx.strokeStyle=trendColor;ctx.lineWidth=3.2;ctx.shadowColor=trendColor;ctx.shadowBlur=5;ctx.beginPath();rows.forEach((row,index)=>{const x=xFor(row.epoch),y=yFor(smoothed[index]);index?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();ctx.shadowBlur=0;
   drawArrow(ctx,plotRight,yFor(smoothed.at(-1)),width-30,yFor(projected),trendColor);
-  ctx.fillStyle=trendColor;ctx.font='bold 10px monospace';ctx.fillText(`${direction} PROJECTION`,plotRight+8,Math.max(top+28,Math.min(bottom-8,yFor(projected)-9)));
+  ctx.fillStyle=trendColor;ctx.font='bold 10px monospace';ctx.fillText(`SMFN ${direction} PROPOSAL`,plotRight+8,Math.max(top+28,Math.min(bottom-8,yFor(projected)-9)));
   set('smfnMapProjection', `${direction} → ${Number(projected).toFixed(2)}`);
-  const trades=flattenTrades(frame.signals).reverse();
-  for(const {trade} of trades){
-    const entryEpoch=Number(trade.entryEpoch),exitEpoch=Number(trade.exitEpoch),entrySpot=Number(trade.entrySpot),exitSpot=Number(trade.exitSpot);
-    if(Number.isFinite(entryEpoch)&&Number.isFinite(entrySpot)&&entryEpoch>=start&&entryEpoch<=end){const x=xFor(entryEpoch),y=yFor(entrySpot);ctx.fillStyle='#59f5ed';ctx.beginPath();ctx.moveTo(x,y-7);ctx.lineTo(x-6,y+5);ctx.lineTo(x+6,y+5);ctx.closePath();ctx.fill();ctx.fillStyle='#dffffc';ctx.font='bold 8px monospace';ctx.fillText('E',x+8,y-5)}
-    if(Number.isFinite(exitEpoch)&&Number.isFinite(exitSpot)&&exitEpoch>=start&&exitEpoch<=end){const x=xFor(exitEpoch),y=yFor(exitSpot),color=trade.outcome==='WON'?'#b6ff66':'#ff6680';ctx.strokeStyle=color;ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x-5,y-5);ctx.lineTo(x+5,y+5);ctx.moveTo(x+5,y-5);ctx.lineTo(x-5,y+5);ctx.stroke();ctx.fillStyle=color;ctx.font='bold 8px monospace';ctx.fillText('X',x+8,y-5)}
+  for(const signal of frame.signals.filter(row=>row.smfnSniperReady)){
+    const epoch=Number(signal.signalEpoch),quote=Number(signal.signalQuote);
+    if(!Number.isFinite(epoch)||!Number.isFinite(quote))continue;
+    const x=xFor(epoch),y=yFor(quote);ctx.save();ctx.translate(x,y);ctx.rotate(Math.PI/4);ctx.strokeStyle='#ffd45b';ctx.lineWidth=2;ctx.strokeRect(-5,-5,10,10);ctx.restore();ctx.fillStyle='#ffd45b';ctx.font='bold 8px monospace';ctx.fillText('20T',x+8,y+12);
   }
-  ctx.fillStyle='#59f5ed';ctx.font='bold 11px monospace';ctx.fillText(`${direction} · ${trend.state||'OBSERVE'} · ${lane||'NO BOT'} · H${trend.health||0} M${trend.maturity||0}% · ${rows.length} TICKS`,left,20);
+  for(const {signal,trade,audit} of trades){
+    const {entryEpoch,exitEpoch,entrySpot,exitSpot}=audit;
+    if(Number.isFinite(entryEpoch)&&Number.isFinite(entrySpot)&&entryEpoch>=start&&entryEpoch<=end){const x=xFor(entryEpoch),y=yFor(entrySpot);ctx.fillStyle='#59f5ed';ctx.beginPath();ctx.moveTo(x,y-8);ctx.lineTo(x-7,y+6);ctx.lineTo(x+7,y+6);ctx.closePath();ctx.fill();ctx.fillStyle='#dffffc';ctx.font='bold 8px monospace';ctx.fillText(`E ${signal.tradeDirection||''}`,x+9,y-6)}
+    if(Number.isFinite(exitEpoch)&&Number.isFinite(exitSpot)&&exitEpoch>=start&&exitEpoch<=end){const x=xFor(exitEpoch),y=yFor(exitSpot),won=trade.outcome==='WON',color=won?'#b6ff66':'#ff6680';ctx.strokeStyle=color;ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x-5,y-5);ctx.lineTo(x+5,y+5);ctx.moveTo(x+5,y-5);ctx.lineTo(x-5,y+5);ctx.stroke();ctx.fillStyle=color;ctx.font='bold 8px monospace';ctx.fillText(`${won?'W':'L'} EXIT`,x+8,y-5)}
+  }
+  ctx.fillStyle='#59f5ed';ctx.font='bold 11px monospace';ctx.fillText(`${pastFrame?'PAST · ':''}${direction} · ${trend.state||'OBSERVE'} · ${lane==='NONE'?'BOT OFF':`${lane} BOT`} · H${trend.health||0} M${trend.maturity||0}% · ${rows.length} TICKS`,left,20);
   drawMapInk(ctx,width,height);
 }
 
@@ -314,12 +368,15 @@ function bindMapTools() {
   const endStroke=()=>{activeMapStroke=null};canvas.addEventListener('pointerup',endStroke);canvas.addEventListener('pointercancel',endStroke);
   $('smfnZoomIn')?.addEventListener('click',()=>{mapZoomIndex=Math.max(0,mapZoomIndex-1);mapInk=[];drawChart()});
   $('smfnZoomOut')?.addEventListener('click',()=>{mapZoomIndex=Math.min(mapZoomLevels.length-1,mapZoomIndex+1);mapInk=[];drawChart()});
+  $('smfnMapOlder')?.addEventListener('click',()=>moveMapHistory(1));
+  $('smfnMapNewer')?.addEventListener('click',()=>moveMapHistory(-1));
+  $('smfnMapLive')?.addEventListener('click',setMapLive);
   $('smfnMapFreeze')?.addEventListener('click',()=>{if(mapFrozen)setMapLive();else freezeMap()});
   $('smfnMapDraw')?.addEventListener('click',()=>{if(!mapFrozen)freezeMap();mapDrawEnabled=!mapDrawEnabled;updateMapTag()});
   $('smfnMapClearInk')?.addEventListener('click',()=>{mapInk=[];drawChart()});
   document.querySelectorAll('[data-map-color]').forEach(button=>button.addEventListener('click',()=>{mapInkColor=button.dataset.mapColor;document.querySelectorAll('[data-map-color]').forEach(item=>item.classList.toggle('active',item===button))}));
   $('smfnSaveMap')?.addEventListener('click',()=>canvas.toBlob(blob=>{if(blob)downloadMapBlob(blob,`smfn-map-${mapLabel()}-${safeMapTime()}.png`)},'image/png'));
-  $('smfnSaveCase')?.addEventListener('click',()=>{const frame=displayedMap();const payload={version:'smfn-map-case-v1',createdAt:new Date().toISOString(),label:mapLabel(),symbol:$('obsSymbol')?.value||'1HZ25V',visibleTicks:mapZoomLevels[mapZoomIndex],frozen:mapFrozen,trend:frame.source.trend||latest.trend,smfn:frame.source.smfn||latest.smfn,ticks:frame.ticks,signals:frame.signals.map(signal=>({signalId:signal.signalId,signalEpoch:signal.signalEpoch,signalQuote:signal.signalQuote,tradeDirection:signal.tradeDirection,approved:signal.approved,executionState:signal.executionState,milking:signal.milking,smfn:signal.smfn,actualTrades:signal.actualTrades||[]})),annotations:mapInk};downloadMapBlob(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}),`smfn-map-${mapLabel()}-${safeMapTime()}.json`)});
+  $('smfnSaveCase')?.addEventListener('click',()=>{const frame=displayedMap();const payload={version:'smfn-map-case-v2',createdAt:new Date().toISOString(),label:mapLabel(),symbol:$('obsSymbol')?.value||'1HZ25V',visibleTicks:frame.ticks.length,historyOffset:frame.offset,windowStartEpoch:frame.start,windowEndEpoch:frame.end,frozen:mapFrozen,trend:frame.offset>0?(frame.anchorSignal?.milking||frame.source.trend):(frame.source.trend||latest.trend),smfn:frame.source.smfn||latest.smfn,routeSegments:routeSegments(frame.auditSignals,frame.start,frame.end),ticks:frame.ticks,signals:frame.signals.map(signal=>({signalId:signal.signalId,signalEpoch:signal.signalEpoch,signalQuote:signal.signalQuote,tradeDirection:signal.tradeDirection,approved:signal.approved,smfnSniperReady:signal.smfnSniperReady,executionState:signal.executionState,milking:signal.milking,smfn:signal.smfn,actualTrades:(signal.actualTrades||[]).map(trade=>({...trade,audit:tradeAuditPoint(signal,trade,frame.ticks)}))})),annotations:mapInk};downloadMapBlob(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}),`smfn-map-${mapLabel()}-${safeMapTime()}.json`)});
   updateMapTag();
 }
 

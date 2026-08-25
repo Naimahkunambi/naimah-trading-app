@@ -1,7 +1,7 @@
 import { SaniEngine, DEFAULT_CONFIG } from './core/engine.mjs';
 import { V73UI } from './pattern-trader-v73-ui.js';
 import { TrendBudget, HarvestBrake, applyMilkingPolicy } from './core/trend-budget.mjs';
-import { SmfnBrain, estimateSmfnPlan, SMFN_CALIBRATION } from './core/smfn-brain.mjs';
+import { SmfnBrain, estimateSmfnPlan, isSmfnSniperEntry, SMFN_CALIBRATION } from './core/smfn-brain.mjs';
 
 const $ = id => document.getElementById(id);
 const perfNow = () => globalThis.performance?.now?.() ?? Date.now();
@@ -247,7 +247,8 @@ function postTick(tick) {
   lastTickKey = key;
   localTicks.push({ epoch, quote });
   if (localTicks.length > 10000) localTicks.splice(0, localTicks.length - 10000);
-  if (trendBudget) trendSnapshot = trendBudget.ingest({ epoch, quote }, workerAnalysis?.pattern?.direction || 'NONE');
+  if (trendBudget) trendSnapshot = { ...trendBudget.ingest({ epoch, quote }, workerAnalysis?.pattern?.direction || 'NONE'), epoch };
+  if (IS_SMFN) smfnBrain?.syncTrend(trendSnapshot, epoch);
   worker?.postMessage({ type:'TICK', tick:{epoch,quote} });
   render();
 }
@@ -310,13 +311,17 @@ function handleDecision(d) {
   } : d;
   const milkingPolicy = IS_MILKING_ZONE ? applyMilkingPolicy(sourceDecision, trendSnapshot, harvest) : null;
   const exact5 = IS_MILKING_ZONE ? null : milkingExact5Challenger(d);
+  const smfnSniperReady = IS_SMFN && isSmfnSniperEntry({ milkCandidate, patternLength:milkPattern?.length });
   const supervision = IS_SMFN ? smfnBrain.evaluate({
     now:Date.now(),
     trend:trendSnapshot,
     harvest,
     sourceDecision:{
-      approved:smfnBrain.config.mode === 'AUTO' ? milkCandidate : Boolean(milkingPolicy?.approved),
-      tradeDirection:milkDirection
+      approved:smfnBrain.config.mode === 'AUTO' ? smfnSniperReady : Boolean(milkingPolicy?.approved),
+      tradeDirection:milkDirection,
+      waitReason:milkCandidate && !smfnSniperReady
+        ? `${trendSnapshot?.direction === 'UP' ? 'CALL' : trendSnapshot?.direction === 'DOWN' ? 'PUT' : 'ACTIVE'} BOT stays on; ${milkPattern?.length || 'short'}T seed rejected. Waiting for 20T entry evidence.`
+        : undefined
     },
     grade:d.sniper?.grade,
     totalPnl:engine.snapshot().sessionPnL,
@@ -329,6 +334,7 @@ function handleDecision(d) {
   const row = upsertSignal(d.signalId, {
     approved,
     milkCandidate,
+    smfnSniperReady,
     sniperApproved:d.approved,
     controlApproved:d.controlApproved,
     state:d.state,
@@ -367,6 +373,7 @@ function handleDecision(d) {
   if (Number(s.cooldownRemaining || 0) > 0) { row.executionState = `RISK_COOLDOWN_${s.cooldownRemaining}`; saveSignals(); return; }
   const runBought = IS_SMFN ? smfnBrain.runTrades(engine.trades.length) : totalBought();
   if (runBought >= Number($('ptMaxTrades')?.value || 60)) { row.executionState = 'CAP'; saveSignals(); if (IS_SMFN) smfnBrain.stop('SMFN contract cap reached.'); engine.pause(); return; }
+  if (IS_SMFN && exposure() > 0) { row.executionState = 'SMFN_SNIPER_BUSY'; row.why = `${row.why} · A previous sniper batch is still pending or open; this setup expired instead of entering late.`; saveSignals(); return; }
 
   const room = Math.max(0, maxConcurrent() - exposure());
   const wanted = Math.min(Number(requestedBatch || 1), batchSize(), room, Math.max(0, Number($('ptMaxTrades')?.value || 60) - runBought));
@@ -391,7 +398,7 @@ function handleDecision(d) {
     row.executionState = sent.length ? `ORDER_SENT_X${sent.length}` : 'NOT_SENT';
     row.requestedBatch = sent.length;
     saveSignals();
-    if (sent.length) engine.log('success', `${VERSION} ${tradeDirection} x${sent.length} · ${IS_SMFN?'ONE-SIDE LOCK':'ORIGINAL V8'} · ${trendSnapshot?.state || d.sniper?.event} · ${milkPattern.familyId} · ${d.decisionMs.toFixed(1)}ms.`);
+    if (sent.length) engine.log('success', `${VERSION} ${tradeDirection} x${sent.length} · ${IS_SMFN?'20T SMFN SNIPER':'ORIGINAL V8'} · ${trendSnapshot?.state || d.sniper?.event} · ${milkPattern.familyId} · ${d.decisionMs.toFixed(1)}ms.`);
   } catch (err) {
     row.executionState = 'ERROR'; row.error = err.message; saveSignals(); showError(err.message);
   }
@@ -542,10 +549,10 @@ function renderGate() {
 }
 
 function exportCsv() {
-  const headers = ['signal_id','created_at','milking_approved','milk_candidate','harvest_blocked','sniper_approved','control_approved','event','grade','score','repeat_count','batch','trade_direction','signal_epoch','signal_quote','trend_state','trend_direction','trend_alignment','trend_timing','trend_role','trend_message','trend_health','trend_maturity','trend_exhaustion','trend_age_seconds','trend_remaining_low','trend_remaining_median','trend_remaining_high','trend_distance_remaining_low','trend_distance_remaining_median','trend_distance_remaining_high','target_quote_low','target_quote_median','target_quote_high','trend_efficiency','trend_decelerating','harvest_action','harvest_active','harvest_buffer_seconds','structure_tag','phase','pattern_family','pattern_length','edge','matches','similarity','top10','family_memory','address_memory','campaign_direction','campaign_fires','variant_control','variant_repeat','variant_length','variant_memory','variant_hysteresis','variant_structure','variant_sniper','decision_ms','execution_state','actual_contracts','actual_wins','actual_losses','actual_profit','actual_entry_epochs','actual_exit_epochs','actual_windows','shadow','smfn_status','smfn_phase','smfn_allowed_direction','smfn_action','smfn_run_pnl','smfn_reason','why'];
+  const headers = ['signal_id','created_at','milking_approved','milk_candidate','smfn_sniper_ready','harvest_blocked','sniper_approved','control_approved','event','grade','score','repeat_count','batch','trade_direction','signal_epoch','signal_quote','trend_state','trend_direction','trend_alignment','trend_timing','trend_role','trend_message','trend_health','trend_maturity','trend_exhaustion','trend_age_seconds','trend_remaining_low','trend_remaining_median','trend_remaining_high','trend_distance_remaining_low','trend_distance_remaining_median','trend_distance_remaining_high','target_quote_low','target_quote_median','target_quote_high','trend_efficiency','trend_decelerating','harvest_action','harvest_active','harvest_buffer_seconds','structure_tag','phase','pattern_family','pattern_length','edge','matches','similarity','top10','family_memory','address_memory','campaign_direction','campaign_fires','variant_control','variant_repeat','variant_length','variant_memory','variant_hysteresis','variant_structure','variant_sniper','decision_ms','execution_state','actual_contracts','actual_wins','actual_losses','actual_profit','actual_entry_epochs','actual_exit_epochs','actual_windows','actual_latency','actual_buy_ack_ms','shadow','smfn_status','smfn_phase','smfn_allowed_direction','smfn_action','smfn_run_pnl','smfn_reason','why'];
   const rows = signals.map(s => {
     const trades = s.actualTrades || [];
-    return [s.signalId,new Date(s.createdAt||Date.now()).toISOString(),s.approved,s.milkCandidate,s.harvestBlocked,s.sniperApproved,s.controlApproved,s.sniper?.event,s.sniper?.grade,s.sniper?.score,s.sniper?.repeatCount,s.requestedBatch,s.tradeDirection,s.signalEpoch,s.signalQuote,s.milking?.state,s.milking?.direction,s.milking?.policy?.alignment,s.milking?.policy?.timing,s.milking?.policy?.role,s.milking?.policy?.reason,s.milking?.health,s.milking?.maturity,s.milking?.exhaustion,s.milking?.ageSeconds,s.milking?.remaining?.low,s.milking?.remaining?.median,s.milking?.remaining?.high,s.milking?.remainingDistance?.low,s.milking?.remainingDistance?.median,s.milking?.remainingDistance?.high,s.milking?.targetQuote?.low,s.milking?.targetQuote?.median,s.milking?.targetQuote?.high,s.milking?.efficiency,s.milking?.decelerating,s.milking?.harvest?.action,s.milking?.harvest?.active,s.milking?.harvest?.bufferSeconds,s.structure?.tag,s.structure?.phase,s.pattern?.familyId,s.pattern?.length,s.pattern?.edge,s.pattern?.matchCount,s.pattern?.avgSimilarity,`${s.pattern?.top10Agree||0}/${s.pattern?.top10Total||0}`,`${s.sniper?.familyMemory?.wins||0}/${s.sniper?.familyMemory?.losses||0}`,`${s.sniper?.addressMemory?.wins||0}/${s.sniper?.addressMemory?.losses||0}`,s.campaign?.direction,s.campaign?.fires,s.variants?.control,s.variants?.repeat,s.variants?.length,s.variants?.memory,s.variants?.hysteresis,s.variants?.structure,s.variants?.sniper,s.decisionMs,s.executionState,trades.length,trades.filter(t=>t.outcome==='WON').length,trades.filter(t=>t.outcome==='LOST').length,trades.reduce((a,t)=>a+(+t.profit||0),0),trades.map(t=>t.entryEpoch).filter(Boolean).join('|'),trades.map(t=>t.exitEpoch).filter(Boolean).join('|'),trades.map(t=>t.window).filter(Boolean).join('|'),s.shadow?.outcome,s.smfn?.status,s.smfn?.phase,s.smfn?.allowedDirection,s.smfn?.action,s.smfn?.runPnl,s.smfn?.reason,s.why];
+    return [s.signalId,new Date(s.createdAt||Date.now()).toISOString(),s.approved,s.milkCandidate,s.smfnSniperReady,s.harvestBlocked,s.sniperApproved,s.controlApproved,s.sniper?.event,s.sniper?.grade,s.sniper?.score,s.sniper?.repeatCount,s.requestedBatch,s.tradeDirection,s.signalEpoch,s.signalQuote,s.milking?.state,s.milking?.direction,s.milking?.policy?.alignment,s.milking?.policy?.timing,s.milking?.policy?.role,s.milking?.policy?.reason,s.milking?.health,s.milking?.maturity,s.milking?.exhaustion,s.milking?.ageSeconds,s.milking?.remaining?.low,s.milking?.remaining?.median,s.milking?.remaining?.high,s.milking?.remainingDistance?.low,s.milking?.remainingDistance?.median,s.milking?.remainingDistance?.high,s.milking?.targetQuote?.low,s.milking?.targetQuote?.median,s.milking?.targetQuote?.high,s.milking?.efficiency,s.milking?.decelerating,s.milking?.harvest?.action,s.milking?.harvest?.active,s.milking?.harvest?.bufferSeconds,s.structure?.tag,s.structure?.phase,s.pattern?.familyId,s.pattern?.length,s.pattern?.edge,s.pattern?.matchCount,s.pattern?.avgSimilarity,`${s.pattern?.top10Agree||0}/${s.pattern?.top10Total||0}`,`${s.sniper?.familyMemory?.wins||0}/${s.sniper?.familyMemory?.losses||0}`,`${s.sniper?.addressMemory?.wins||0}/${s.sniper?.addressMemory?.losses||0}`,s.campaign?.direction,s.campaign?.fires,s.variants?.control,s.variants?.repeat,s.variants?.length,s.variants?.memory,s.variants?.hysteresis,s.variants?.structure,s.variants?.sniper,s.decisionMs,s.executionState,trades.length,trades.filter(t=>t.outcome==='WON').length,trades.filter(t=>t.outcome==='LOST').length,trades.reduce((a,t)=>a+(+t.profit||0),0),trades.map(t=>t.entryEpoch).filter(Boolean).join('|'),trades.map(t=>t.exitEpoch).filter(Boolean).join('|'),trades.map(t=>t.window).filter(Boolean).join('|'),trades.map(t=>t.latency).filter(Boolean).join('|'),trades.map(t=>t.buyAckMs).filter(Number.isFinite).join('|'),s.shadow?.outcome,s.smfn?.status,s.smfn?.phase,s.smfn?.allowedDirection,s.smfn?.action,s.smfn?.runPnl,s.smfn?.reason,s.why];
   });
   const csv = [headers,...rows].map(r => r.map(v => `"${String(v??'').replaceAll('"','""')}"`).join(',')).join('\n');
   const url = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
@@ -576,7 +583,7 @@ function bindControls() {
         smfnBrain.start({ ...smfnPlanFromForm(), now:Date.now(), basePnl:engine.snapshot().sessionPnL, baseTrades:engine.trades.length, trend:trendSnapshot });
         engine.log('info', smfnPlanFromForm().mode === 'MANUAL'
           ? 'Manual Milking is active with the original behavior unchanged.'
-          : 'SMFN armed: the live map continuously routes one side only. Original v8 entries flow through the active CALL or PUT bot.');
+          : 'SMFN armed: the sustained footprint continuously routes one side. Only aligned 20T sniper entries may fire through the active CALL or PUT bot.');
       } else {
         engine.log('info',IS_MILKING_ZONE ? 'Milking Zone armed: original frequent v8 entries fire at the selected batch. Active Harvest stops new entries inside the two-pulse projected-end buffer, then releases on continuation or a locked flip.' : `v8.1 armed on ${isRealAccount()?'REAL':'DEMO'}: only the full sniper lane can buy. Six comparison variants remain shadow-only.`);
       }

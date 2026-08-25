@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SmfnBrain, estimateSmfnPlan } from '../public/core/smfn-brain.mjs';
+import { SmfnBrain, estimateSmfnPlan, isSmfnSniperEntry } from '../public/core/smfn-brain.mjs';
 
 const trend = (direction = 'UP', state = 'MATURE', exhaustion = 50) => ({ direction, state, exhaustion });
 const source = direction => ({ approved:true, tradeDirection:direction });
@@ -20,6 +20,33 @@ test('auto mode routes the current map direction immediately', () => {
   assert.equal(result.approved, true);
   assert.equal(result.allowedDirection, 'CALL');
   assert.equal(brain.snapshot().activeLane, 'UP');
+});
+
+test('SMFN sniper rejects 8T and 12T micro seeds and permits 20T evidence', () => {
+  assert.equal(isSmfnSniperEntry({ milkCandidate:true, patternLength:8 }), false);
+  assert.equal(isSmfnSniperEntry({ milkCandidate:true, patternLength:12 }), false);
+  assert.equal(isSmfnSniperEntry({ milkCandidate:true, patternLength:20 }), true);
+  assert.equal(isSmfnSniperEntry({ milkCandidate:false, patternLength:20 }), false);
+});
+
+test('live trend sync changes the one active route between decisions', () => {
+  const brain = new SmfnBrain();
+  brain.start({ now:0, trend:{ ...trend('UP','DRIVE'), epoch:100 } });
+  assert.equal(brain.snapshot().allowedDirection, 'CALL');
+  brain.syncTrend(trend('DOWN','MATURE'), 140);
+  const snapshot = brain.snapshot();
+  assert.equal(snapshot.allowedDirection, 'PUT');
+  assert.deepEqual(snapshot.routeHistory.map(row => row.lane), ['CALL','PUT']);
+});
+
+test('terminal completion clears stale route and records BOT OFF', () => {
+  const brain = new SmfnBrain({ maxTrades:2 });
+  brain.start({ now:0, maxTrades:2, trend:{ ...trend('UP','DRIVE'), epoch:100 } });
+  const result = brain.evaluate({ now:1, trend:trend('UP','DRIVE'), sourceDecision:source('CALL'), totalTrades:2 });
+  const snapshot = brain.snapshot();
+  assert.equal(result.status, 'COMPLETE');
+  assert.equal(result.allowedDirection, 'NONE');
+  assert.equal(snapshot.routeHistory.at(-1).lane, 'NONE');
 });
 
 test('opposite bot never coexists with the active lane', () => {
