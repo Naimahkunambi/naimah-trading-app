@@ -29,7 +29,13 @@ let lastOtpContext = null;
 let localTicks = loadTicks();
 let lastTickKey = localTicks.length ? `${localTicks.at(-1).epoch}:${localTicks.at(-1).quote}` : '';
 const contractMeta = new Map();
-const trendBudget = IS_MILKING_ZONE ? new TrendBudget() : null;
+const trendBudget = IS_MILKING_ZONE ? new TrendBudget(IS_SMFN ? {
+  shortSeconds:12,
+  primarySeconds:35,
+  confirmSeconds:70,
+  flipVotes:2,
+  flipWindowSeconds:3
+} : {}) : null;
 let trendSnapshot = trendBudget?.hydrate(localTicks) || null;
 const harvestBrake = IS_MILKING_ZONE ? new HarvestBrake({ pulseLead:2 }) : null;
 const smfnBrain = IS_SMFN ? new SmfnBrain() : null;
@@ -311,17 +317,15 @@ function handleDecision(d) {
   } : d;
   const milkingPolicy = IS_MILKING_ZONE ? applyMilkingPolicy(sourceDecision, trendSnapshot, harvest) : null;
   const exact5 = IS_MILKING_ZONE ? null : milkingExact5Challenger(d);
-  const smfnSniperReady = IS_SMFN && isSmfnSniperEntry({ milkCandidate, patternLength:milkPattern?.length });
+  const smfnSniperReady = IS_SMFN && isSmfnSniperEntry({ milkCandidate });
   const supervision = IS_SMFN ? smfnBrain.evaluate({
     now:Date.now(),
     trend:trendSnapshot,
     harvest,
     sourceDecision:{
-      approved:smfnBrain.config.mode === 'AUTO' ? smfnSniperReady : Boolean(milkingPolicy?.approved),
+      approved:smfnBrain.config.mode === 'AUTO' ? milkCandidate : Boolean(milkingPolicy?.approved),
       tradeDirection:milkDirection,
-      waitReason:milkCandidate && !smfnSniperReady
-        ? `${trendSnapshot?.direction === 'UP' ? 'CALL' : trendSnapshot?.direction === 'DOWN' ? 'PUT' : 'ACTIVE'} BOT stays on; ${milkPattern?.length || 'short'}T seed rejected. Waiting for 20T entry evidence.`
-        : undefined
+      signalEpoch:d.signalEpoch
     },
     grade:d.sniper?.grade,
     totalPnl:engine.snapshot().sessionPnL,
@@ -355,7 +359,7 @@ function handleDecision(d) {
     decisionMs:d.decisionMs,
     milking:IS_MILKING_ZONE ? { ...trendSnapshot, policy:milkingPolicy, harvest, exact5 } : undefined,
     smfn:supervision || undefined,
-    harvestBlocked:Boolean(IS_MILKING_ZONE && milkCandidate && harvest?.blocked),
+    harvestBlocked:Boolean(IS_MILKING_ZONE && !IS_SMFN && milkCandidate && harvest?.blocked),
     why:IS_SMFN
       ? `${supervision?.reason || 'SMFN observing.'} · ${milkPattern?.reason || d.why}`
       : IS_MILKING_ZONE ? `${milkingPolicy?.reason || 'Trend Budget observing.'} · ${milkPattern?.reason || d.why}` : d.why
@@ -373,8 +377,6 @@ function handleDecision(d) {
   if (Number(s.cooldownRemaining || 0) > 0) { row.executionState = `RISK_COOLDOWN_${s.cooldownRemaining}`; saveSignals(); return; }
   const runBought = IS_SMFN ? smfnBrain.runTrades(engine.trades.length) : totalBought();
   if (runBought >= Number($('ptMaxTrades')?.value || 60)) { row.executionState = 'CAP'; saveSignals(); if (IS_SMFN) smfnBrain.stop('SMFN contract cap reached.'); engine.pause(); return; }
-  if (IS_SMFN && exposure() > 0) { row.executionState = 'SMFN_SNIPER_BUSY'; row.why = `${row.why} · A previous sniper batch is still pending or open; this setup expired instead of entering late.`; saveSignals(); return; }
-
   const room = Math.max(0, maxConcurrent() - exposure());
   const wanted = Math.min(Number(requestedBatch || 1), batchSize(), room, Math.max(0, Number($('ptMaxTrades')?.value || 60) - runBought));
   if (wanted <= 0) { row.executionState = 'EXPOSURE_FULL'; saveSignals(); return; }
@@ -398,7 +400,7 @@ function handleDecision(d) {
     row.executionState = sent.length ? `ORDER_SENT_X${sent.length}` : 'NOT_SENT';
     row.requestedBatch = sent.length;
     saveSignals();
-    if (sent.length) engine.log('success', `${VERSION} ${tradeDirection} x${sent.length} · ${IS_SMFN?'20T SMFN SNIPER':'ORIGINAL V8'} · ${trendSnapshot?.state || d.sniper?.event} · ${milkPattern.familyId} · ${d.decisionMs.toFixed(1)}ms.`);
+    if (sent.length) engine.log('success', `${VERSION} ${tradeDirection} x${sent.length} · ORIGINAL V8 FLOW · ${trendSnapshot?.state || d.sniper?.event} · ${milkPattern.familyId} · ${d.decisionMs.toFixed(1)}ms.`);
   } catch (err) {
     row.executionState = 'ERROR'; row.error = err.message; saveSignals(); showError(err.message);
   }
@@ -583,7 +585,7 @@ function bindControls() {
         smfnBrain.start({ ...smfnPlanFromForm(), now:Date.now(), basePnl:engine.snapshot().sessionPnL, baseTrades:engine.trades.length, trend:trendSnapshot });
         engine.log('info', smfnPlanFromForm().mode === 'MANUAL'
           ? 'Manual Milking is active with the original behavior unchanged.'
-          : 'SMFN armed: the sustained footprint continuously routes one side. Only aligned 20T sniper entries may fire through the active CALL or PUT bot.');
+          : 'SMFN armed: every original v8 entry selects exactly one bot and fires immediately. The wider footprint remains visible but cannot hold a stale side.');
       } else {
         engine.log('info',IS_MILKING_ZONE ? 'Milking Zone armed: original frequent v8 entries fire at the selected batch. Active Harvest stops new entries inside the two-pulse projected-end buffer, then releases on continuation or a locked flip.' : `v8.1 armed on ${isRealAccount()?'REAL':'DEMO'}: only the full sniper lane can buy. Six comparison variants remain shadow-only.`);
       }

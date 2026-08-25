@@ -1,5 +1,5 @@
 import { estimateSmfnPlan, SMFN_CALIBRATION } from './core/smfn-brain.mjs';
-import { routeAt, routeSegments, tradeAuditPoint, visibleTickWindow } from './core/smfn-map-history.mjs';
+import { routeSegments, tradeAuditPoint, visibleTickWindow } from './core/smfn-map-history.mjs';
 
 const $ = id => document.getElementById(id);
 const set = (id, value) => { if ($(id)) $(id).textContent = value; };
@@ -56,7 +56,8 @@ function renderForecast() {
     minutes:Number($('smfnDuration')?.value || 30),
     target:Number($('ptTakeProfit')?.value || 0),
     stake:Number($('ptStake')?.value || 1),
-    batch:Number($('ptCooldown')?.value || 2)
+    batch:Number($('ptCooldown')?.value || 2),
+    maxTrades:Number($('ptMaxTrades')?.value || 200)
   });
   set('smfnForecastRange', `${money(plan.lowProfit)} → ${money(plan.highProfit)}`);
   set('smfnForecastNote', `${plan.minutes} min · $${plan.stake.toFixed(2)} stake · ${plan.batch} per qualified entry`);
@@ -87,6 +88,26 @@ function flattenTrades(signals = []) {
     }
   }
   return rows.sort((a,b) => b.at - a.at);
+}
+
+function groupedTradeAudits(signals = [], ticks = []) {
+  return signals.flatMap(signal => {
+    const trades = signal.actualTrades || [];
+    if (!trades.length) return [];
+    const audits = trades.map(trade => ({ trade, audit:tradeAuditPoint(signal, trade, ticks) }));
+    const firstEntry = audits.find(row => Number.isFinite(row.audit.entryEpoch) && Number.isFinite(row.audit.entrySpot))?.audit || {};
+    const lastExit = [...audits].reverse().find(row => Number.isFinite(row.audit.exitEpoch) && Number.isFinite(row.audit.exitSpot))?.audit || {};
+    return [{
+      signal,
+      contracts:trades.length,
+      wins:trades.filter(trade => trade.outcome === 'WON').length,
+      losses:trades.filter(trade => trade.outcome === 'LOST').length,
+      entryEpoch:firstEntry.entryEpoch,
+      entrySpot:firstEntry.entrySpot,
+      exitEpoch:lastExit.exitEpoch,
+      exitSpot:lastExit.exitSpot
+    }];
+  });
 }
 
 function renderResults(signals = []) {
@@ -139,7 +160,7 @@ function renderBrain() {
   set('smfnHeaderState', brain.status || (engine.connected ? 'READY' : 'OFFLINE'));
   set('smfnHeaderPnl', money(engine.sessionPnL));
   set('smfnMapPnl', money(brain.runPnl));
-  set('smfnTickerText', `${mode} · ${direction} ${state} · ${lane} LANE · ${brain.reason || 'WAITING'}`);
+  set('smfnTickerText', `${mode} · ${direction} ${state} · ${lane === 'NONE' ? 'BOTS OFF' : `${lane} SIGNAL`} · ${brain.reason || 'WAITING'}`);
   set('smfnDirection', direction === 'UP' ? '▲ UP' : direction === 'DOWN' ? '▼ DOWN' : '—');
   set('smfnTrendState', state);
   set('smfnDirectionReason', trend.reason || 'The map is forming.');
@@ -151,7 +172,7 @@ function renderBrain() {
   set('smfnRemaining', Number.isFinite(Number(remaining)) ? `~${Math.max(0,Math.round(Number(remaining) / 60)) || '<1'} MIN` : '—');
   set('smfnRemainingMeta', Number.isFinite(Number(remaining)) ? `${trend.remaining.low ?? 0}–${trend.remaining.high ?? 0}s historical range` : 'waiting for direction');
   set('smfnLiveLane', lane);
-  set('smfnNarratorHeadline', lane !== 'NONE' ? `${lane} BOT ON` : 'WAITING FOR DIRECTION');
+  set('smfnNarratorHeadline', lane !== 'NONE' ? `${lane} ENTRY FIRED` : 'WAITING FOR V8 ENTRY');
   set('smfnNarratorWhy', brain.reason || trend.reason || 'Connect live data to begin.');
   set('smfnCommandAction', decision.action || brain.status || 'NOT ARMED');
   set('smfnCommandReason', decision.reason || brain.reason || 'Connect, choose a plan, then start.');
@@ -162,15 +183,15 @@ function renderBrain() {
   if ($('ptStart') && !engine.running) $('ptStart').textContent = mode === 'AUTO' ? 'START SMFN' : 'START MANUAL MILKING';
   set('smfnSafetyState', brain.phase === 'LANDING' ? 'SAFETY LANDING' : brain.status || 'READY');
   set('smfnCmdOpen', Number(engine.openContracts || 0));
-  set('smfnCmdCooldown', 'CONTINUOUS');
+  set('smfnCmdCooldown', 'SIGNAL-BY-SIGNAL');
   const callActive = lane === 'CALL';
   const putActive = lane === 'PUT';
   $('smfnCallLane')?.classList.toggle('active', callActive);
   $('smfnPutLane')?.classList.toggle('active', putActive);
-  set('smfnCallState', mode === 'MANUAL' ? 'MANUAL' : callActive ? 'ACTIVE' : 'LOCKED');
-  set('smfnPutState', mode === 'MANUAL' ? 'MANUAL' : putActive ? 'ACTIVE' : 'LOCKED');
-  set('smfnCallWhy', mode === 'MANUAL' ? 'Existing Milking logic decides every CALL.' : callActive ? 'UP footprint keeps CALL on. Only aligned 20T sniper entries may fire.' : 'Locked while the footprint routes PUT.');
-  set('smfnPutWhy', mode === 'MANUAL' ? 'Existing Milking logic decides every PUT.' : putActive ? 'DOWN footprint keeps PUT on. Only aligned 20T sniper entries may fire.' : 'Locked while the footprint routes CALL.');
+  set('smfnCallState', mode === 'MANUAL' ? 'MANUAL' : callActive ? 'FIRED' : 'READY');
+  set('smfnPutState', mode === 'MANUAL' ? 'MANUAL' : putActive ? 'FIRED' : 'READY');
+  set('smfnCallWhy', mode === 'MANUAL' ? 'Existing Milking logic decides every CALL.' : callActive ? 'The original v8 signal selected CALL for this entry only.' : 'Ready; it fires only when the next v8 entry says CALL.');
+  set('smfnPutWhy', mode === 'MANUAL' ? 'Existing Milking logic decides every PUT.' : putActive ? 'The original v8 signal selected PUT for this entry only.' : 'Ready; it fires only when the next v8 entry says PUT.');
   renderResults(latest.signals || []);
   renderTape(latest.signals || []);
 }
@@ -203,9 +224,10 @@ function displayedMap() {
     .sort((a,b) => Number(a.signalEpoch) - Number(b.signalEpoch));
   const signals = orderedSignals.filter(signal => Number(signal.signalEpoch) >= start && Number(signal.signalEpoch) <= end);
   const anchorSignal = orderedSignals.filter(signal => Number(signal.signalEpoch) <= end).at(-1) || null;
+  const anchorEntrySignal = orderedSignals.filter(signal => signal.approved && Number(signal.signalEpoch) <= end).at(-1) || null;
   const startSignal = orderedSignals.filter(signal => Number(signal.signalEpoch) <= start).at(-1) || null;
   const auditSignals = startSignal && !signals.includes(startSignal) ? [startSignal, ...signals] : signals;
-  return { source, ticks, signals, auditSignals, anchorSignal, start, end, ...window };
+  return { source, ticks, signals, auditSignals, anchorSignal, anchorEntrySignal, start, end, ...window };
 }
 
 function updateMapTag(frame = displayedMap()) {
@@ -294,23 +316,22 @@ function drawChart() {
   const pastFrame=frame.offset>0;
   const trend=pastFrame ? (frame.anchorSignal?.milking || source.trend || {}) : (source.trend || latest.trend || {});
   let lane=pastFrame
-    ? frame.anchorSignal?.smfn?.allowedDirection || routeAt(source.smfn?.routeHistory || [], frame.end)
+    ? frame.anchorEntrySignal?.smfn?.allowedDirection || 'NONE'
     : source.smfn?.allowedDirection || latest.smfn?.allowedDirection;
   if (!['CALL','PUT'].includes(lane)) lane='NONE';
-  const direction=trend.direction || (lane==='CALL'?'UP':lane==='PUT'?'DOWN':'NONE');
-  const recentStart=smoothed[Math.max(0,smoothed.length-Math.min(40,smoothed.length))];
   const rawSpan=Math.max(...quotes)-Math.min(...quotes)||1;
-  const sign=lane==='CALL'||direction==='UP'?1:lane==='PUT'||direction==='DOWN'?-1:Math.sign(smoothed.at(-1)-recentStart)||1;
-  const modelTarget=Number(trend.targetQuote?.median);
-  const modelDelta=modelTarget-smoothed.at(-1);
-  const slopeStep=Math.min(rawSpan*.38,Math.max(Math.abs(smoothed.at(-1)-recentStart)*.7,rawSpan*.06));
-  const proposedStep=Number.isFinite(modelTarget)&&Math.sign(modelDelta)===sign
-    ? Math.min(rawSpan*.48,Math.max(rawSpan*.06,Math.abs(modelDelta)))
-    : slopeStep;
+  const footprintLookback=Math.min(smoothed.length-1,Math.max(12,Math.round(smoothed.length*.16)));
+  const recentStart=smoothed[Math.max(0,smoothed.length-1-footprintLookback)];
+  const footprintDelta=smoothed.at(-1)-recentStart;
+  const direction=Math.abs(footprintDelta)>=rawSpan*.025
+    ? (footprintDelta>0?'UP':'DOWN')
+    : (trend.direction || 'FLAT');
+  const sign=direction==='UP'?1:direction==='DOWN'?-1:Math.sign(footprintDelta)||1;
+  const proposedStep=Math.min(rawSpan*.38,Math.max(Math.abs(footprintDelta)*.7,rawSpan*.06));
   const projected=smoothed.at(-1)+sign*proposedStep;
-  const trades=flattenTrades(frame.signals).reverse().map(({signal,trade}) => ({signal,trade,audit:tradeAuditPoint(signal,trade,rows)}));
+  const trades=groupedTradeAudits(frame.signals,rows);
   const allY=[...quotes,projected];
-  for(const {audit} of trades){if(Number.isFinite(audit.entrySpot))allY.push(audit.entrySpot);if(Number.isFinite(audit.exitSpot))allY.push(audit.exitSpot)}
+  for(const trade of trades){if(Number.isFinite(trade.entrySpot))allY.push(trade.entrySpot);if(Number.isFinite(trade.exitSpot))allY.push(trade.exitSpot)}
   const rawMin=Math.min(...allY),rawMax=Math.max(...allY),pad=(rawMax-rawMin||1)*.09,min=rawMin-pad,max=rawMax+pad,span=max-min||1;
   const start=frame.start,end=frame.end,left=24,top=38,bottom=height-32,plotRight=Math.max(left+120,width-(width<760?92:180));
   const xFor=epoch=>left+(Number(epoch)-start)/Math.max(1,end-start)*(plotRight-left);
@@ -322,36 +343,18 @@ function drawChart() {
   ctx.strokeStyle='rgba(255,212,91,.35)';ctx.setLineDash([4,6]);ctx.beginPath();ctx.moveTo(plotRight,top);ctx.lineTo(plotRight,bottom);ctx.stroke();ctx.setLineDash([]);
   ctx.fillStyle='#6f8fa1';ctx.font='9px monospace';ctx.fillText(pastFrame?'PAST FRAME':'NOW',plotRight+6,top+12);
   for(const [value,y] of [[max,top+4],[(max+min)/2,(top+bottom)/2],[min,bottom]]){ctx.fillStyle='#567488';ctx.font='9px monospace';ctx.fillText(Number(value).toFixed(2),width-78,y);}
-  if(lane==='CALL'||lane==='PUT'){
-    ctx.fillStyle=lane==='CALL'?'rgba(182,255,102,.07)':'rgba(255,102,128,.07)';ctx.fillRect(0,0,width,height);
-  }
-  const segments=routeSegments(frame.auditSignals,start,end);
-  if(!segments.length&&lane!=='NONE')segments.push({lane,start,end});
-  segments.forEach((segment,index)=>{
-    if(segment.lane==='NONE')return;
-    const segmentEnd=segments[index+1]?.start ?? end;
-    const x1=xFor(Math.max(start,segment.start)),x2=xFor(Math.min(end,Math.max(segment.start,segmentEnd)));
-    const color=segment.lane==='CALL'?'#b6ff66':'#ff6680';
-    ctx.strokeStyle=color;ctx.lineWidth=6;ctx.globalAlpha=.68;ctx.beginPath();ctx.moveTo(x1,top+8);ctx.lineTo(x2,top+8);ctx.stroke();ctx.globalAlpha=1;
-    ctx.fillStyle=color;ctx.font='bold 8px monospace';ctx.fillText(`${segment.lane} ON`,Math.max(left,x1+3),top+20);
-  });
   ctx.strokeStyle='rgba(95,184,255,.78)';ctx.lineWidth=1.4;ctx.beginPath();rows.forEach((row,index)=>{const x=xFor(row.epoch),y=yFor(row.quote);index?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();
-  const trendColor=lane==='PUT'?'#ff6680':lane==='CALL'?'#b6ff66':'#ffd45b';
+  const trendColor=direction==='DOWN'?'#ff6680':direction==='UP'?'#b6ff66':'#ffd45b';
   ctx.strokeStyle=trendColor;ctx.lineWidth=3.2;ctx.shadowColor=trendColor;ctx.shadowBlur=5;ctx.beginPath();rows.forEach((row,index)=>{const x=xFor(row.epoch),y=yFor(smoothed[index]);index?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();ctx.shadowBlur=0;
   drawArrow(ctx,plotRight,yFor(smoothed.at(-1)),width-30,yFor(projected),trendColor);
   ctx.fillStyle=trendColor;ctx.font='bold 10px monospace';ctx.fillText(`SMFN ${direction} PROPOSAL`,plotRight+8,Math.max(top+28,Math.min(bottom-8,yFor(projected)-9)));
   set('smfnMapProjection', `${direction} → ${Number(projected).toFixed(2)}`);
-  for(const signal of frame.signals.filter(row=>row.smfnSniperReady)){
-    const epoch=Number(signal.signalEpoch),quote=Number(signal.signalQuote);
-    if(!Number.isFinite(epoch)||!Number.isFinite(quote))continue;
-    const x=xFor(epoch),y=yFor(quote);ctx.save();ctx.translate(x,y);ctx.rotate(Math.PI/4);ctx.strokeStyle='#ffd45b';ctx.lineWidth=2;ctx.strokeRect(-5,-5,10,10);ctx.restore();ctx.fillStyle='#ffd45b';ctx.font='bold 8px monospace';ctx.fillText('20T',x+8,y+12);
+  for(const trade of trades){
+    const {signal,entryEpoch,exitEpoch,entrySpot,exitSpot,contracts,wins,losses}=trade;
+    if(Number.isFinite(entryEpoch)&&Number.isFinite(entrySpot)&&entryEpoch>=start&&entryEpoch<=end){const x=xFor(entryEpoch),y=yFor(entrySpot);ctx.fillStyle=signal.tradeDirection==='PUT'?'#ff6680':'#59f5ed';ctx.beginPath();ctx.moveTo(x,y-8);ctx.lineTo(x-7,y+6);ctx.lineTo(x+7,y+6);ctx.closePath();ctx.fill();ctx.fillStyle='#dffffc';ctx.font='bold 8px monospace';ctx.fillText(`E ${signal.tradeDirection||''}${contracts>1?` ×${contracts}`:''}`,x+9,y-6)}
+    if(Number.isFinite(exitEpoch)&&Number.isFinite(exitSpot)&&exitEpoch>=start&&exitEpoch<=end){const x=xFor(exitEpoch),y=yFor(exitSpot),won=wins>losses,color=won?'#b6ff66':'#ff6680';ctx.strokeStyle=color;ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x-5,y-5);ctx.lineTo(x+5,y+5);ctx.moveTo(x+5,y-5);ctx.lineTo(x-5,y+5);ctx.stroke();ctx.fillStyle=color;ctx.font='bold 8px monospace';ctx.fillText(`${wins}W/${losses}L EXIT`,x+8,y-5)}
   }
-  for(const {signal,trade,audit} of trades){
-    const {entryEpoch,exitEpoch,entrySpot,exitSpot}=audit;
-    if(Number.isFinite(entryEpoch)&&Number.isFinite(entrySpot)&&entryEpoch>=start&&entryEpoch<=end){const x=xFor(entryEpoch),y=yFor(entrySpot);ctx.fillStyle='#59f5ed';ctx.beginPath();ctx.moveTo(x,y-8);ctx.lineTo(x-7,y+6);ctx.lineTo(x+7,y+6);ctx.closePath();ctx.fill();ctx.fillStyle='#dffffc';ctx.font='bold 8px monospace';ctx.fillText(`E ${signal.tradeDirection||''}`,x+9,y-6)}
-    if(Number.isFinite(exitEpoch)&&Number.isFinite(exitSpot)&&exitEpoch>=start&&exitEpoch<=end){const x=xFor(exitEpoch),y=yFor(exitSpot),won=trade.outcome==='WON',color=won?'#b6ff66':'#ff6680';ctx.strokeStyle=color;ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x-5,y-5);ctx.lineTo(x+5,y+5);ctx.moveTo(x+5,y-5);ctx.lineTo(x-5,y+5);ctx.stroke();ctx.fillStyle=color;ctx.font='bold 8px monospace';ctx.fillText(`${won?'W':'L'} EXIT`,x+8,y-5)}
-  }
-  ctx.fillStyle='#59f5ed';ctx.font='bold 11px monospace';ctx.fillText(`${pastFrame?'PAST · ':''}${direction} · ${trend.state||'OBSERVE'} · ${lane==='NONE'?'BOT OFF':`${lane} BOT`} · H${trend.health||0} M${trend.maturity||0}% · ${rows.length} TICKS`,left,20);
+  ctx.fillStyle='#59f5ed';ctx.font='bold 11px monospace';ctx.fillText(`${pastFrame?'PAST · ':''}${direction} FOOTPRINT · ${trend.state||'OBSERVE'} · ${lane==='NONE'?'WAITING ENTRY':`LAST ${lane}`} · H${trend.health||0} M${trend.maturity||0}% · ${rows.length} TICKS`,left,20);
   drawMapInk(ctx,width,height);
 }
 
