@@ -1,0 +1,88 @@
+/* Retro scroll and replay controls layered over the fixed chapter shell. */
+.mzChapter {
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--mz-gold) #090414;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  padding-bottom: 34px;
+}
+
+.mzChapter::-webkit-scrollbar,
+.mzTablePanel::-webkit-scrollbar {
+  width: 13px;
+  height: 13px;
+}
+
+.mzChapter::-webkit-scrollbar-track,
+.mzTablePanel::-webkit-scrollbar-track {
+  background: #090414;
+  border-left: 2px solid #4b337d;
+}
+
+.mzChapter::-webkit-scrollbar-thumb,
+.mzTablePanel::-webkit-scrollbar-thumb {
+  background: var(--mz-gold);
+  border: 3px solid #090414;
+  box-shadow: inset -2px -2px #c76e00;
+}
+
+.mzReplayBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 8px;
+  color: #9d8ec1;
+  font-size: 9px;
+}
+
+.mzReplayBar > div {
+  display: flex;
+  gap: 5px;
+}
+
+.mzReplayBar button {
+  border: 2px solid #090414;
+  background: #2a1750;
+  color: #bdaee0;
+  padding: 5px 8px;
+  font: 900 8px "Courier New", monospace;
+  box-shadow: 2px 2px #07030e;
+}
+
+.mzReplayBar button:disabled { opacity: .35; }
+.mzReplayBar button[data-chart-nav="live"] { background: var(--mz-gold); color: #321700; }
+.mzMiniChart { display: flex; flex-direction: column; }
+.mzMiniChart canvas { min-height: 160px; flex: 1; }
+.mzLegend .setup { background: var(--mz-cyan); }
+.mzLegend .exit { background: transparent; border: 2px solid var(--mz-green); }
+.mzResultCards { grid-template-columns: repeat(7, 1fr); }
+
+.mzTablePanel {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.mzTablePanel thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #1a0d38;
+}
+
+.mzPager {
+  position: sticky;
+  bottom: 0;
+  background: #1a0d38;
+  padding-bottom: 4px;
+}
+
+@media (max-width: 1100px) {
+  .mzResultCards { grid-template-columns: repeat(4, 1fr); }
+}
+
+@media (max-width: 700px) {
+  .mzReplayBar { align-items: flex-start; flex-direction: column; }
+  .mzResultCards { grid-template-columns: 1fr 1fr; }
+}

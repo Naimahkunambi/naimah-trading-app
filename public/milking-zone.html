@@ -7,6 +7,7 @@
   <title>SANI Milking Zone</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/milking-zone.css">
+  <link rel="stylesheet" href="/milking-zone-scroll.css">
 </head>
 <body data-lab="milking-zone">
   <main class="mzApp">
@@ -101,7 +102,10 @@
           <i>↙</i>
           <div data-state="TURNING"><b>05</b><span>TURNING</span><small>confirm flip</small></div>
         </div>
-        <section class="mzPanel mzMiniChart"><canvas id="mzTrendCanvas" width="1400" height="260"></canvas></section>
+        <section class="mzPanel mzMiniChart">
+          <div class="mzReplayBar"><span class="mzChartWindow">LIVE · LATEST TICKS</span><div><button data-chart-nav="older">◀ OLDER</button><button data-chart-nav="newer">NEWER ▶</button><button data-chart-nav="live">LIVE</button></div></div>
+          <canvas id="mzTrendCanvas" width="1400" height="260"></canvas>
+        </section>
       </article>
 
       <article class="mzChapter" data-chapter="2" aria-labelledby="mzMilkTitle" aria-hidden="true">
@@ -112,8 +116,9 @@
         <div class="mzMilkGrid">
           <section class="mzPanel mzChartPanel">
             <div class="mzPanelTitle"><span>LIVE MOUNTAIN MAP</span><b id="mzLiveTag">WAITING</b></div>
+            <div class="mzReplayBar"><span class="mzChartWindow">LIVE · LATEST TICKS</span><div><button data-chart-nav="older">◀ OLDER</button><button data-chart-nav="newer">NEWER ▶</button><button data-chart-nav="live">LIVE</button></div></div>
             <canvas id="mzChart" width="1400" height="520"></canvas>
-            <div class="mzLegend"><span><i class="up"></i>CALL FIRE</span><span><i class="down"></i>PUT FIRE</span><span><i class="entry"></i>ENTRY / EXIT</span></div>
+            <div class="mzLegend"><span><i class="up"></i>CALL FIRE</span><span><i class="down"></i>PUT FIRE</span><span><i class="setup"></i>SNIPER SETUP</span><span><i class="entry"></i>E ENTRY</span><span><i class="exit"></i>X EXIT</span></div>
           </section>
           <aside class="mzPanel mzCockpit">
             <div class="mzAction"><small>CURRENT ACTION</small><strong id="mzAction">OBSERVE</strong><span id="mzActionWhy">Connect live data first.</span></div>
@@ -125,7 +130,7 @@
               <label>BATCH<select id="ptCooldown"><option value="1">1 contract</option><option value="2" selected>Earn up to 2</option></select></label>
             </div>
             <div class="mzButtons vertical"><button id="ptStart" class="mzPrimary">START MILKING</button><button id="ptPause">PAUSE</button><button id="ptStop" class="mzDanger">STOP</button></div>
-            <div class="mzStatusList"><span>TRADER <b id="mzEngineState">DISCONNECTED</b></span><span>OPEN <b id="mzOpen">0</b></span><span>DECISION <b id="mzDecisionMs">— ms</b></span><span>PATTERN <b id="mzPattern">SEARCHING</b></span></div>
+            <div class="mzStatusList"><span>TRADER <b id="mzEngineState">DISCONNECTED</b></span><span>OPEN <b id="mzOpen">0</b></span><span>DECISION <b id="mzDecisionMs">— ms</b></span><span>PATTERN <b id="mzPattern">SEARCHING</b></span><span>SNIPER SETUPS <b id="mzSetups">0</b></span><span>TREND BLOCKED <b id="mzBlocked">0</b></span></div>
           </aside>
         </div>
       </article>
@@ -141,11 +146,13 @@
           <div><small>LOSSES</small><strong id="mzLosses">0</strong></div>
           <div><small>PEAK</small><strong id="mzPeak">+$0.00</strong></div>
           <div><small>GIVE-BACK</small><strong id="mzGiveback">$0.00</strong></div>
+          <div><small>SNIPER SETUPS</small><strong id="mzResultSetups">0</strong></div>
+          <div><small>TREND BLOCKED</small><strong id="mzResultBlocked">0</strong></div>
         </div>
         <section class="mzPanel mzTablePanel">
           <div class="mzPanelTitle"><span>TRADE RESULTS</span><b id="mzTradePage">PAGE 1</b></div>
           <table><thead><tr><th>TIME</th><th>SIDE</th><th>STATE</th><th>PATTERN</th><th>RESULT</th><th>ENTRY → EXIT</th><th>ACK</th><th>P/L</th></tr></thead><tbody id="mzTradeBody"><tr><td colspan="8">NO TRADES YET</td></tr></tbody></table>
-          <div class="mzPager"><button id="mzTradePrev">◀ PREV</button><button id="mzTradeNext">NEXT ▶</button></div>
+          <div class="mzPager"><button id="mzTradeLatest">LIVE / LATEST</button><button id="mzTradePrev">◀ NEWER</button><button id="mzTradeNext">OLDER ▶</button></div>
         </section>
       </article>
 
@@ -157,7 +164,7 @@
         <section class="mzPanel mzTablePanel tape">
           <div class="mzPanelTitle"><span>ONE ROW PER DECISION TICK</span><b id="mzTickPage">PAGE 1</b></div>
           <table><thead><tr><th>TIME</th><th>STATE</th><th>DIRECTION</th><th>HEALTH</th><th>MATURITY</th><th>PATTERN</th><th>DECISION</th><th>SHADOW</th><th>MS</th></tr></thead><tbody id="mzTickBody"><tr><td colspan="9">COLLECTING TICKS</td></tr></tbody></table>
-          <div class="mzPager"><button id="mzTickPrev">◀ PREV</button><button id="mzTickNext">NEXT ▶</button></div>
+          <div class="mzPager"><button id="mzTickLatest">LIVE / LATEST</button><button id="mzTickPrev">◀ NEWER</button><button id="mzTickNext">OLDER ▶</button></div>
         </section>
         <div class="mzTapeFooter"><span>CSV includes Trend Budget, pattern, actual result, shadow result and execution timing.</span><b>STOP → CLEAR → RESET → START</b></div>
       </article>

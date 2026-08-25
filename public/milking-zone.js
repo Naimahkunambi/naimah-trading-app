@@ -7,6 +7,7 @@ let currentChapter = Math.max(0, Math.min(chapters.length - 1, Number(location.h
 let latest = { ticks:[], signals:[], engine:{}, analysis:null, trend:null };
 let tradePage = 0;
 let tickPage = 0;
+let chartOffset = 0;
 
 function showChapter(index) {
   currentChapter = Math.max(0, Math.min(chapters.length - 1, index));
@@ -21,6 +22,7 @@ function showChapter(index) {
   $('mzPrevChapter').disabled = currentChapter === 0;
   $('mzNextChapter').disabled = currentChapter === chapters.length - 1;
   history.replaceState(null, '', `#chapter-${currentChapter + 1}`);
+  chapters[currentChapter].scrollTop = 0;
   requestAnimationFrame(drawCharts);
 }
 
@@ -49,6 +51,8 @@ function renderState() {
   const analysis = latest.analysis || {};
   const signals = freshSignals();
   const trades = settledTrades();
+  const sniperSetups = signals.filter(signal => signal.sniperApproved).length;
+  const trendBlocked = signals.filter(signal => signal.sniperApproved && !signal.approved).length;
   const wins = trades.filter(row => row.trade.outcome === 'WON').length;
   const losses = trades.filter(row => row.trade.outcome === 'LOST').length;
   const pnl = trades.reduce((sum, row) => sum + Number(row.trade.profit || 0), 0);
@@ -79,6 +83,8 @@ function renderState() {
   setText('mzOpen', Number(engine.openContracts || 0));
   setText('mzDecisionMs', Number.isFinite(Number(analysis.decisionMs)) ? `${Number(analysis.decisionMs).toFixed(2)} ms` : '— ms');
   setText('mzPattern', analysis.pattern?.familyId || 'SEARCHING');
+  setText('mzSetups', sniperSetups);
+  setText('mzBlocked', trendBlocked);
   setText('mzLiveTag', `${trend.direction || 'NONE'} · ${trend.state || 'OBSERVE'}`);
   const last = signals[0];
   const action = trend.state === 'HARVEST' ? 'BANK / WAIT' : last?.approved ? `${last.tradeDirection} ×${last.requestedBatch || 1}` : trend.state || 'OBSERVE';
@@ -92,6 +98,8 @@ function renderState() {
   setText('mzLosses', losses);
   setText('mzPeak', money(peak));
   setText('mzGiveback', `$${Math.max(0, peak - pnl).toFixed(2)}`);
+  setText('mzResultSetups', sniperSetups);
+  setText('mzResultBlocked', trendBlocked);
   renderTrades(trades);
   renderTickTape(signals);
   drawCharts();
@@ -134,7 +142,18 @@ function canvasSize(canvas) {
 function drawCanvas(canvas, compact = false) {
   if (!canvas || !canvas.offsetParent) return;
   const { context:ctx, width, height } = canvasSize(canvas);
-  const ticks = (latest.ticks || []).slice(compact ? -140 : -240);
+  const allTicks = latest.ticks || [];
+  const windowSize = compact ? 140 : 240;
+  const maxOffset = Math.max(0, allTicks.length - Math.min(windowSize, allTicks.length));
+  chartOffset = Math.min(chartOffset, maxOffset);
+  const end = Math.max(0, allTicks.length - chartOffset);
+  const start = Math.max(0, end - windowSize);
+  const ticks = allTicks.slice(start, end);
+  document.querySelectorAll('.mzChartWindow').forEach(label => {
+    label.textContent = chartOffset ? `${chartOffset} TICKS BEHIND LIVE` : `LIVE · LATEST ${Math.min(windowSize, allTicks.length)} TICKS`;
+  });
+  document.querySelectorAll('[data-chart-nav="newer"], [data-chart-nav="live"]').forEach(button => { button.disabled = chartOffset === 0; });
+  document.querySelectorAll('[data-chart-nav="older"]').forEach(button => { button.disabled = chartOffset >= maxOffset; });
   ctx.fillStyle = '#090515'; ctx.fillRect(0, 0, width, height);
   ctx.strokeStyle = 'rgba(111,84,171,.28)'; ctx.lineWidth = 1;
   for (let x = 0; x <= width; x += 32) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
@@ -154,14 +173,42 @@ function drawCanvas(canvas, compact = false) {
   const signals = freshSignals().filter(signal => Number(signal.signalEpoch) >= startEpoch && Number(signal.signalEpoch) <= endEpoch);
   for (const signal of signals) {
     const x=xFor(signal.signalEpoch), y=yFor(signal.signalQuote);
+    if (signal.sniperApproved && !signal.approved) {
+      ctx.strokeStyle = '#4ff4d2';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(Math.round(x)-3, Math.round(y)-3, 7, 7);
+      ctx.fillStyle = '#4ff4d2';
+      ctx.font = 'bold 9px monospace';
+      ctx.fillText('S', x+6, y-6);
+    }
     if (signal.approved) {
       ctx.fillStyle = signal.tradeDirection === 'CALL' ? '#62f58f' : '#ff4f67';
       ctx.fillRect(Math.round(x)-3, Math.round(y)-3, 7, 7);
       ctx.font='bold 10px monospace'; ctx.fillText(signal.tradeDirection === 'CALL' ? 'C' : 'P', x+6, y-6);
     }
     for (const trade of signal.actualTrades || []) {
-      if (Number.isFinite(Number(trade.entryEpoch)) && Number.isFinite(Number(trade.entrySpot))) { ctx.fillStyle='#ffd257'; ctx.fillRect(xFor(trade.entryEpoch)-2,yFor(trade.entrySpot)-2,5,5); }
-      if (Number.isFinite(Number(trade.exitEpoch)) && Number.isFinite(Number(trade.exitSpot))) { ctx.strokeStyle=trade.outcome==='WON'?'#62f58f':'#ff4f67';ctx.strokeRect(xFor(trade.exitEpoch)-3,yFor(trade.exitSpot)-3,7,7); }
+      const hasEntry = Number.isFinite(Number(trade.entryEpoch)) && Number.isFinite(Number(trade.entrySpot));
+      const hasExit = Number.isFinite(Number(trade.exitEpoch)) && Number.isFinite(Number(trade.exitSpot));
+      if (hasEntry && hasExit) {
+        ctx.save();
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = trade.outcome === 'WON' ? '#62f58f' : '#ff4f67';
+        ctx.beginPath();
+        ctx.moveTo(xFor(trade.entryEpoch), yFor(trade.entrySpot));
+        ctx.lineTo(xFor(trade.exitEpoch), yFor(trade.exitSpot));
+        ctx.stroke();
+        ctx.restore();
+      }
+      if (hasEntry) {
+        const entryX=xFor(trade.entryEpoch), entryY=yFor(trade.entrySpot);
+        ctx.fillStyle='#ffd257'; ctx.fillRect(entryX-3,entryY-3,7,7);
+        ctx.font='bold 10px monospace'; ctx.fillText('E',entryX+6,entryY-7);
+      }
+      if (hasExit) {
+        const exitX=xFor(trade.exitEpoch), exitY=yFor(trade.exitSpot);
+        ctx.strokeStyle=trade.outcome==='WON'?'#62f58f':'#ff4f67';ctx.strokeRect(exitX-4,exitY-4,9,9);
+        ctx.fillStyle=trade.outcome==='WON'?'#62f58f':'#ff4f67';ctx.font='bold 10px monospace';ctx.fillText('X',exitX+7,exitY-7);
+      }
     }
   }
   ctx.fillStyle='#ffd257';ctx.font='bold 11px monospace';ctx.fillText(`${trend.direction || 'NONE'} · ${trend.state || 'OBSERVE'} · H${trend.health || 0} · M${trend.maturity || 0}%`,16,20);
@@ -171,8 +218,17 @@ function drawCharts() { drawCanvas($('mzTrendCanvas'), true); drawCanvas($('mzCh
 
 $('mzTradePrev').addEventListener('click', () => { tradePage=Math.max(0,tradePage-1); renderState(); });
 $('mzTradeNext').addEventListener('click', () => { tradePage+=1; renderState(); });
+$('mzTradeLatest').addEventListener('click', () => { tradePage=0; renderState(); });
 $('mzTickPrev').addEventListener('click', () => { tickPage=Math.max(0,tickPage-1); renderState(); });
 $('mzTickNext').addEventListener('click', () => { tickPage+=1; renderState(); });
+$('mzTickLatest').addEventListener('click', () => { tickPage=0; renderState(); });
+document.querySelectorAll('[data-chart-nav]').forEach(button => button.addEventListener('click', () => {
+  const action = button.dataset.chartNav;
+  if (action === 'older') chartOffset += 180;
+  if (action === 'newer') chartOffset = Math.max(0, chartOffset - 180);
+  if (action === 'live') chartOffset = 0;
+  drawCharts();
+}));
 window.addEventListener('resize', drawCharts);
 window.addEventListener('sani-v81-ui-render', event => { latest = event.detail || latest; renderState(); });
 showChapter(currentChapter);
