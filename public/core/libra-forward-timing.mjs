@@ -1,8 +1,7 @@
 import { analyzeMountain } from './libra-mountain.mjs';
 
-const STORAGE_KEY='sani.libra.forward-timing.v9';
+const STORAGE_KEY='sani.libra.forward-timing.v10';
 const PAYOUT=.92;
-const MIN_FORWARD_EDGE=60;
 const LATENCY_OUTLIER_MS=1500;
 const LATENCY_HOLD_MS=8000;
 const validDirection=v=>['CALL','PUT'].includes(v);
@@ -10,11 +9,11 @@ const money=v=>`${Number(v||0)>=0?'+':'-'}$${Math.abs(Number(v||0)).toFixed(2)}`
 
 function bucket(){return{trades:0,wins:0,losses:0,pnl:0,recent:[]}}
 function fresh(){return{
-  version:9,minForwardEdge:MIN_FORWARD_EDGE,passes:bucket(),rejects:bucket(),lastDecision:null,
-  lastLesson:'v9 uses SANI\'s own T+1→T+2 historical edge as the forward probability. Libra only checks mountain side, late-state risk and execution latency. No second fake predictor stacked on top.',
+  version:10,passes:bucket(),rejects:bucket(),lastDecision:null,
+  lastLesson:'v10 trades BEFORE confirmation: SANI setup + locked mountain + WAIT_PULLBACK_END. PULLBACK_END is already late for the 1-tick paid hand.',
   paidAckMs:[],paidSlips:[],latencyHoldUntil:0,lastAckMs:0
 }}
-function load(){try{const raw=JSON.parse(localStorage.getItem(STORAGE_KEY)||'null'),f=fresh();return raw&&raw.version===9?{...f,...raw,passes:{...f.passes,...(raw.passes||{}),recent:Array.isArray(raw.passes?.recent)?raw.passes.recent.slice(-300):[]},rejects:{...f.rejects,...(raw.rejects||{}),recent:Array.isArray(raw.rejects?.recent)?raw.rejects.recent.slice(-300):[]}}:f}catch{return fresh()}}
+function load(){try{const raw=JSON.parse(localStorage.getItem(STORAGE_KEY)||'null'),f=fresh();return raw&&raw.version===10?{...f,...raw,passes:{...f.passes,...(raw.passes||{}),recent:Array.isArray(raw.passes?.recent)?raw.passes.recent.slice(-300):[]},rejects:{...f.rejects,...(raw.rejects||{}),recent:Array.isArray(raw.rejects?.recent)?raw.rejects.recent.slice(-300):[]}}:f}catch{return fresh()}}
 const state=load();
 let latest={ticks:[],signals:[],mission:{}},mountain=analyzeMountain([]),installed=false;
 const captured=new Map(),settled=new Set();
@@ -32,21 +31,31 @@ function evaluateForward(signal,m=mountain){
   const direction=signal?.direction||signal?.sourceDirection||signal?.patternMeta?.sourceDirection||'NONE';
   const regime=String(signal?.libra?.regime||signal?.patternMeta?.regime||'UNKNOWN');
   const edge=saniEdge(signal),moment=m?.entryMode||'NO_TRADE';
-  const diagnostic={edge,regime,moment};
-  const sniper={score:Number(edge.toFixed(1)),entryClass:edge>=MIN_FORWARD_EDGE?'FORWARD_EDGE_PASS':'FORWARD_EDGE_WAIT'};
+  const diagnostic={edge,regime,moment,confirmation:Number(m?.confirmation||0)};
+  const sniper={score:null,entryClass:moment==='WAIT_PULLBACK_END'?'AHEAD_OF_TURN':'NO_ENTRY'};
 
-  if(!signal?.sourceApproved||!validDirection(direction))return rejected('SANI QUIET','NONE','No qualified SANI forward setup.',m,{diagnostic,sniper,regime});
-  if(latencyHeld())return rejected('LATENCY HOLD',direction,`Recent Deriv ACK was ${Number(state.lastAckMs||0).toFixed(0)}ms. I will not buy a 1-tick contract through a late execution pipe.`,m,{diagnostic,sniper,regime});
+  if(!signal?.sourceApproved||!validDirection(direction))return rejected('SANI QUIET','NONE','No qualified SANI setup.',m,{diagnostic,sniper,regime});
+  if(latencyHeld())return rejected('LATENCY HOLD',direction,`Recent Deriv ACK was ${Number(state.lastAckMs||0).toFixed(0)}ms. The 1-tick pipe is late, so do not send.`,m,{diagnostic,sniper,regime});
   if(!m?.ready||!['UP','DOWN'].includes(m.direction))return rejected('NO LOCKED MOUNTAIN',direction,`No locked campaign direction (${m?.direction||'NONE'}).`,m,{diagnostic,sniper,regime});
-  if(m.allowedDirection!==direction)return rejected('WRONG MOUNTAIN SIDE',direction,`${m.direction} campaign allows ${m.allowedDirection}; SANI ${direction} is blocked until important structure reverses.`,m,{diagnostic,sniper,regime});
-  if(edge<MIN_FORWARD_EDGE)return rejected('FORWARD EDGE WAIT',direction,`SANI's actual executable T+1→T+2 edge is ${edge.toFixed(1)}%, below ${MIN_FORWARD_EDGE}%.`,m,{diagnostic,sniper,regime});
-  if(moment==='LATE_OR_WAIT')return rejected('LATE · BLOCK',direction,`SANI predicts ${direction}, but Libra's structure says LATE_OR_WAIT. Latest paid evidence showed this window underperforming.`,m,{diagnostic,sniper,regime});
+  if(m.allowedDirection!==direction)return rejected('WRONG MOUNTAIN SIDE',direction,`${m.direction} campaign allows ${m.allowedDirection}; SANI ${direction} is blocked until important structure actually reverses.`,m,{diagnostic,sniper,regime});
 
-  return{
-    allowed:true,action:'FORWARD EDGE PASS',direction,
-    reason:`PREDICT BEFORE ENTRY: SANI's historical T+1→T+2 edge is ${edge.toFixed(1)}%. Locked ${m.direction} mountain agrees. ${moment} and ${regime} are context, not confirmation waits. SEND NOW.`,
-    mountain:m,forwardOffset:1,diagnostic,sniper,regime,forecastProbability:edge/100
-  };
+  // WAIT_PULLBACK_END is deliberately the paid state. It means the pullback exists but
+  // the turn has NOT yet accumulated the four confirmations required for PULLBACK_END.
+  // Across five independent Demo audits this aligned state produced 85W/62L (57.8%)
+  // in the executable T+1→T+2 shadow, while aligned EXHAUSTION was below break-even.
+  if(moment==='WAIT_PULLBACK_END'){
+    return{
+      allowed:true,action:'AHEAD OF TURN',direction,
+      reason:`PREDICT, DO NOT CONFIRM: ${m.direction} mountain is locked and SANI already proposes ${direction} while the opposite move is still a pullback. Confirmation is only ${Number(m.confirmation||0)}/6. SEND before PULLBACK_END. SANI edge ${edge.toFixed(1)}% is diagnostic, not a veto.`,
+      mountain:m,forwardOffset:1,diagnostic,sniper,regime
+    };
+  }
+
+  if(moment==='PULLBACK_END')return rejected('CONFIRMED TOO LATE',direction,'The turn is already confirmed. For a 1-tick paid contract this is the state we were arriving late to. Keep it shadow.',m,{diagnostic,sniper,regime});
+  if(moment==='EXHAUSTION')return rejected('EXHAUSTION · BLOCK',direction,'Mountain direction remains valid, but progression is flattening. Latest multi-run evidence puts aligned EXHAUSTION below break-even.',m,{diagnostic,sniper,regime});
+  if(moment==='LATE_OR_WAIT')return rejected('LATE · BLOCK',direction,'Correct mountain side, but there is no fresh pullback. Do not enter mid-leg.',m,{diagnostic,sniper,regime});
+  if(moment==='EARLY_MOMENTUM')return rejected('DIRECT MOMENTUM · SHADOW',direction,'Direct mountain with no proper pullback stays shadow until it has its own independent paid evidence.',m,{diagnostic,sniper,regime});
+  return rejected('WAIT',direction,`No predictive pullback window: ${moment}.`,m,{diagnostic,sniper,regime});
 }
 
 function install(){
@@ -68,8 +77,8 @@ function study(){
     }
     if(!settled.has(row.signalId)&&['WON','LOST'].includes(row.shadow?.outcome)){
       const lesson=captured.get(row.signalId);if(!lesson)continue;const won=row.shadow.outcome==='WON',pnl=won?PAYOUT:-1,target=lesson.decision?.allowed?state.passes:state.rejects;
-      record(target,won,pnl,{signalId:row.signalId,signalAt:lesson.signalAt,direction:lesson.direction,regime:lesson.regime,mountainDirection:lesson.mountain?.direction||'NONE',moment:lesson.mountain?.entryMode||'NO_TRADE',action:lesson.decision?.action||'WAIT',edge:lesson.edge,entry:row.shadow?.entry,exit:row.shadow?.exit,entryEpoch:row.shadow?.entryEpoch,exitEpoch:row.shadow?.exitEpoch,executionOffset:row.shadow?.executionOffset});
-      const p=summary(state.passes);state.lastLesson=`FORWARD EDGE v9: eligible set ${p.trades}T · ${p.winRate.toFixed(1)}% · ${money(p.pnl)}.`;settled.add(row.signalId);captured.delete(row.signalId);save();
+      record(target,won,pnl,{signalId:row.signalId,signalAt:lesson.signalAt,direction:lesson.direction,regime:lesson.regime,mountainDirection:lesson.mountain?.direction||'NONE',moment:lesson.mountain?.entryMode||'NO_TRADE',confirmation:lesson.mountain?.confirmation,action:lesson.decision?.action||'WAIT',edge:lesson.edge,entry:row.shadow?.entry,exit:row.shadow?.exit,entryEpoch:row.shadow?.entryEpoch,exitEpoch:row.shadow?.exitEpoch,executionOffset:row.shadow?.executionOffset});
+      const p=summary(state.passes);state.lastLesson=`AHEAD-OF-TURN v10: eligible executable set ${p.trades}T · ${p.winRate.toFixed(1)}% · ${money(p.pnl)}.`;settled.add(row.signalId);captured.delete(row.signalId);save();
     }
   }
 }
@@ -77,6 +86,6 @@ function study(){
 window.addEventListener('libra-state',event=>{latest=event.detail||latest;mountain=analyzeMountain(latest.ticks||[]);install();study()});
 window.addEventListener('libra-teacher-paid',event=>{const d=event.detail||{},ack=Number(d.buyAckMs);if(Number.isFinite(ack)){state.lastAckMs=ack;state.paidAckMs.push(ack);if(ack>LATENCY_OUTLIER_MS)state.latencyHoldUntil=Date.now()+LATENCY_HOLD_MS}if(Number.isFinite(Number(d.entrySpot))&&Number.isFinite(Number(d.signalQuote)))state.paidSlips.push(Number(d.entrySpot)-Number(d.signalQuote));save()});
 
-function snapshot(){return{version:'Forward Timing v9 · SANI Forward Edge',minForwardEdge:MIN_FORWARD_EDGE,latencyHeld:latencyHeld(),latencyHoldUntil:state.latencyHoldUntil,lastAckMs:state.lastAckMs,passes:summary(state.passes),rejects:summary(state.rejects),recent:recent(state.passes.recent,30),medianBuyAckMs:median(state.paidAckMs),medianEntrySlip:median(state.paidSlips),lastDecision:state.lastDecision,lastLesson:state.lastLesson,mountain}}
+function snapshot(){return{version:'Forward Timing v10 · Ahead Of Turn',latencyHeld:latencyHeld(),latencyHoldUntil:state.latencyHoldUntil,lastAckMs:state.lastAckMs,passes:summary(state.passes),rejects:summary(state.rejects),recent:recent(state.passes.recent,30),medianBuyAckMs:median(state.paidAckMs),medianEntrySlip:median(state.paidSlips),lastDecision:state.lastDecision,lastLesson:state.lastLesson,mountain}}
 window.LIBRA_FORWARD_TIMING={snapshot,evaluate:(signal)=>evaluateForward(signal,analyzeMountain(latest.ticks||[])),reset:()=>{localStorage.removeItem(STORAGE_KEY);location.reload()}};
 install();
