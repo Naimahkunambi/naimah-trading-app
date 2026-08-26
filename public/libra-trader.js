@@ -44,7 +44,7 @@ function freshMission() {
     reviewStartedAt:0, nextReviewAt:0, reviewCount:0, lastReview:null,
     basePnl:0, baseTrades:0, targetProfit:30, hardStop:15, maxTrades:200,
     durationMinutes:30, goal:650, peakPnl:0, protectedFloor:0,
-    reason:'Connect, then start Libra. SANI and Libra will begin together in shadow.',
+    reason:'Connect, then start Libra. SANI studies first, then SANI works under Libra-taught rules.',
     recommendation:'WAIT'
   };
 }
@@ -64,6 +64,8 @@ function missionRunTrades(){return Math.max(0,totalSettled()-Number(mission.base
 function missionPlanFromForm(){return{durationMinutes:Math.max(1,Math.min(720,Number($('libraDuration')?.value||30))),targetProfit:Math.max(0,Number($('ptTakeProfit')?.value||30)),hardStop:Math.max(.35,Number($('ptStopLoss')?.value||15)),maxTrades:Math.max(1,Math.min(5000,Math.round(Number($('ptMaxTrades')?.value||200)))),goal:Math.max(0,Number($('libraGoal')?.value||650))}}
 function money(value){return `${Number(value||0)>=0?'+':'-'}$${Math.abs(Number(value||0)).toFixed(2)}`}
 function sniperMission(since=0){try{return window.LIBRA_SNIPER?.missionSnapshot?.(since)||null}catch{return null}}
+function teacherMission(since=0){try{return window.LIBRA_TEACHER?.missionSnapshot?.(since)||null}catch{return null}}
+function teacherLive(){try{return window.LIBRA_TEACHER?.snapshot?.()||null}catch{return null}}
 
 function missionSignals(since=0){return signals.filter(row=>row.missionId===mission.id&&Number(row.createdAt||0)>=since)}
 function shadowSummary(since=0){
@@ -81,9 +83,9 @@ function checkMission(now=Date.now()){
   if(mission.status!=='ACTIVE')return{stop:true,runPnl,runTrades,status:mission.status};
   mission.peakPnl=Math.max(Number(mission.peakPnl||0),runPnl);
   if(mission.peakPnl>=5)mission.protectedFloor=Math.max(Number(mission.protectedFloor||0),Math.max(1,mission.peakPnl*.6));
-  if(runPnl<=-Math.abs(mission.hardStop)){mission.status='HARD STOP';mission.reason=`Hard stop reached at ${money(runPnl)}. I stop.`}
-  else if(mission.targetProfit>0&&runPnl>=mission.targetProfit){mission.status='TARGET';mission.reason=`Mission target reached at ${money(runPnl)}. I lock the win.`}
-  else if(mission.phase!=='LEARN'&&mission.protectedFloor>0&&runPnl<=mission.protectedFloor&&mission.peakPnl>mission.protectedFloor+.75){mission.status='PROTECTED STOP';mission.reason=`I protected ${money(mission.protectedFloor)} after peaking at ${money(mission.peakPnl)}.`}
+  if(runPnl<=-Math.abs(mission.hardStop)){mission.status='HARD STOP';mission.reason=`Hard stop reached at ${money(runPnl)}. SANI stops.`}
+  else if(mission.targetProfit>0&&runPnl>=mission.targetProfit){mission.status='TARGET';mission.reason=`Mission target reached at ${money(runPnl)}. SANI locks the win.`}
+  else if(mission.phase!=='LEARN'&&mission.protectedFloor>0&&runPnl<=mission.protectedFloor&&mission.peakPnl>mission.protectedFloor+.75){mission.status='PROTECTED STOP';mission.reason=`Profit floor ${money(mission.protectedFloor)} protected after peak ${money(mission.peakPnl)}.`}
   else if(runTrades>=mission.maxTrades){mission.status='CAP';mission.reason=`The ${mission.maxTrades}-contract cap is complete.`}
   else if(now>=mission.deadlineAt){mission.status='TIME';mission.reason=`The mission clock ended at ${money(runPnl)}.`}
   if(mission.status!=='ACTIVE'&&engine.running)engine.pause();
@@ -94,7 +96,7 @@ function checkMission(now=Date.now()){
 function makeSnapshot(){
   const engineState=engine.snapshot(),prediction=brain.predict(localTicks),brainState=brain.snapshot(),gate=checkMission();
   const allShadow=mission.id?shadowSummary(mission.startedAt):shadowSummary(Number.MAX_SAFE_INTEGER);
-  return{version:LIBRA_VERSION,ticks:localTicks,signals:[...signals].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)),engine:engineState,analysis:workerAnalysis,trend:trendSnapshot,prediction,brain:brainState,arbitration:lastArbitration,shadows:allShadow,sniper:sniperMission(mission.startedAt),mission:{...mission,runPnl:gate.runPnl,runTrades:gate.runTrades,remainingMs:mission.deadlineAt?Math.max(0,mission.deadlineAt-Date.now()):0,reviewRemainingMs:mission.nextReviewAt?Math.max(0,mission.nextReviewAt-Date.now()):0},accountType:selectedAccount?String(selectedAccount.account_type||'DEMO').toUpperCase():'NONE'}
+  return{version:LIBRA_VERSION,ticks:localTicks,signals:[...signals].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)),engine:engineState,analysis:workerAnalysis,trend:trendSnapshot,prediction,brain:brainState,arbitration:lastArbitration,shadows:allShadow,sniper:sniperMission(mission.startedAt),teacher:teacherMission(mission.startedAt),mission:{...mission,runPnl:gate.runPnl,runTrades:gate.runTrades,remainingMs:mission.deadlineAt?Math.max(0,mission.deadlineAt-Date.now()):0,reviewRemainingMs:mission.nextReviewAt?Math.max(0,mission.nextReviewAt-Date.now()):0},accountType:selectedAccount?String(selectedAccount.account_type||'DEMO').toUpperCase():'NONE'}
 }
 function publish(){const detail=makeSnapshot();window.dispatchEvent(new CustomEvent('libra-state',{detail}));return detail}
 
@@ -135,13 +137,11 @@ function sourceFromDecision(decision){
   const approved=Boolean(decision?.controlApproved),tradeDirection=baseline.direction==='UP'?'CALL':baseline.direction==='DOWN'?'PUT':decision?.tradeDirection;
   return{approved,tradeDirection:['CALL','PUT'].includes(tradeDirection)?tradeDirection:'NONE',signalEpoch:decision?.signalEpoch,signalQuote:decision?.signalQuote,familyId:baseline.familyId||pattern.familyId,edge:baseline.edge??pattern.edge,why:approved?'Original v8 baseline qualified.':'Original v8 baseline is quiet.',intent:{familyId:baseline.familyId||pattern.familyId,patternDirection:baseline.direction||pattern.direction,edge:baseline.edge??pattern.edge,avgSimilarity:pattern.avgSimilarity,matchCount:pattern.matchCount,top10Agree:pattern.top10Agree,top10Total:pattern.top10Total,sameTagCount:pattern.sameTagCount,samePhaseCount:pattern.samePhaseCount,structureTag:structure.tag,phase:structure.phase,repeatCount:sniper.repeatCount,sniperScore:sniper.score,familyRate:sniper.familyMemory?.rate,familySamples:sniper.familyMemory?.total,addressRate:sniper.addressMemory?.rate,addressSamples:sniper.addressMemory?.total}}
 }
-function saniPaidDecision(source,shadowArb){return{...shadowArb,action:source.approved?'SANI PASS':'SANI QUIET',approved:Boolean(source.approved&&['CALL','PUT'].includes(source.tradeDirection)),tradeDirection:source.approved?source.tradeDirection:'NONE',reason:source.approved?`SANI supplies the ${source.tradeDirection} setup. Libra's final sniper gate decides whether this exact moment deserves money.`:'SANI has no paid setup on this decision.'}}
-function choosePaidDecision(source,shadowArb,runPnl){
+function saniPaidDecision(source,shadowArb){return{...shadowArb,action:source.approved?'SANI WORK':'SANI QUIET',approved:Boolean(source.approved&&['CALL','PUT'].includes(source.tradeDirection)),tradeDirection:source.approved?source.tradeDirection:'NONE',reason:source.approved?`SANI supplies the ${source.tradeDirection} setup. Libra Teacher applies the learned mountain, reversal and timing policy before SANI may execute.`:'SANI has no setup on this decision.'}}
+function choosePaidDecision(source,shadowArb){
   if(mission.phase==='LEARN'||mission.authorityMode==='NONE')return null;
-  if(['SANI_LEADS','SNIPER_FILTER'].includes(mission.authorityMode))return saniPaidDecision(source,shadowArb);
-  const libra=brain.decide({ticks:localTicks,sourceDecision:source,openContracts:exposure(),runPnl,mode:'PAID'});
-  if(mission.authorityMode==='TEAM'||mission.authorityMode==='LIBRA_CONTROLS')return libra;
-  return null;
+  // SANI is the only paid hand. Libra never invents a separate paid LEAD/REPLACE trade here.
+  return saniPaidDecision(source,shadowArb);
 }
 function storeDecision(decision,source,shadowArb,paidArb){
   const finalArb=paidArb||shadowArb,armed=window.LIBRA_SNIPER?.preArmed?.()||{};
@@ -151,56 +151,47 @@ function handleDecision(decision){
   if(!decision?.signalId)return;
   const source=sourceFromDecision(decision);if(mission.status!=='ACTIVE')return;
   const gate=checkMission();if(gate.stop)return;
-  const shadowArb=brain.decide({ticks:localTicks,sourceDecision:source,openContracts:0,runPnl:gate.runPnl,mode:'SHADOW'}),paidArb=choosePaidDecision(source,shadowArb,gate.runPnl),row=storeDecision(decision,source,shadowArb,paidArb);
+  const shadowArb=brain.decide({ticks:localTicks,sourceDecision:source,openContracts:0,runPnl:gate.runPnl,mode:'SHADOW'}),paidArb=choosePaidDecision(source,shadowArb),row=storeDecision(decision,source,shadowArb,paidArb);
   shadowPending.set(decision.signalId,{epoch:Number(decision.signalEpoch),quote:Number(decision.signalQuote),sourceApproved:source.approved,sourceDirection:source.tradeDirection,action:shadowArb.action,libraDirection:shadowArb.tradeDirection,signature:shadowArb.signature,regime:shadowArb.regime,confidence:shadowArb.confidence,horizons:shadowArb.horizons});
-  if(mission.phase==='LEARN'||!paidArb){row.executionState='SHADOW_ONLY';row.approved=false;row.tradeDirection='NONE';lastArbitration={...shadowArb,action:'SHADOW LEARN',approved:false,tradeDirection:shadowArb.tradeDirection,shadowDirection:shadowArb.tradeDirection,at:Date.now(),signalId:decision.signalId};saveSignals();publish();return}
+  if(mission.phase==='LEARN'||!paidArb){row.executionState='SHADOW_ONLY';row.approved=false;row.tradeDirection='NONE';lastArbitration={...shadowArb,action:'LIBRA SCHOOL',approved:false,tradeDirection:shadowArb.tradeDirection,shadowDirection:shadowArb.tradeDirection,at:Date.now(),signalId:decision.signalId};saveSignals();publish();return}
   const arbitration=paidArb;lastArbitration={...arbitration,at:Date.now(),signalId:decision.signalId};
-  if(!arbitration.approved||!['CALL','PUT'].includes(arbitration.tradeDirection)){row.executionState=`${mission.authorityMode}_${String(arbitration.action).replaceAll(' ','_')}`;saveSignals();publish();return}
+  if(!arbitration.approved||!['CALL','PUT'].includes(arbitration.tradeDirection)){row.executionState='SANI_QUIET';saveSignals();publish();return}
   const state=engine.snapshot();if(!state.running){row.executionState='PAID_ENGINE_PAUSED';saveSignals();publish();return}if(state.safeBlocked){row.executionState='SAFE_BLOCK';saveSignals();publish();return}if(exposure()>=MAX_CONCURRENT){row.executionState='EXPOSURE_FULL';saveSignals();publish();return}
   try{
     traderConfig();const room=Math.max(0,MAX_CONCURRENT-exposure()),wanted=Math.min(batchSize(),room,Math.max(0,mission.maxTrades-missionRunTrades())),sent=[];
-    for(let slot=1;slot<=wanted;slot+=1){const didSend=engine.execute({direction:arbitration.tradeDirection,structure:`${mission.authorityMode.toLowerCase()}-${String(arbitration.action).toLowerCase().replaceAll(' ','-')}-${source.familyId||decision.structure?.tag||'state'}`,epoch:decision.signalEpoch,quote:decision.signalQuote,detectedPerf:perfNow(),detectedWallMs:Date.now(),patternMeta:{signalId:decision.signalId,slot,action:arbitration.action,authorityMode:mission.authorityMode,sourceDirection:source.tradeDirection,libraDirection:arbitration.tradeDirection,regime:arbitration.regime,confidence:arbitration.confidence}});if(didSend)sent.push(slot)}
-    row.requestedBatch=sent.length;row.executionState=sent.length?`ORDER_SENT_X${sent.length}`:'SNIPER_BLOCKED';if(sent.length)engine.log('success',`${mission.authorityMode} · ${arbitration.action} · ${arbitration.tradeDirection} x${sent.length}.`)
+    for(let slot=1;slot<=wanted;slot+=1){const didSend=engine.execute({direction:arbitration.tradeDirection,structure:`sani-work-${source.familyId||decision.structure?.tag||'state'}`,epoch:decision.signalEpoch,quote:decision.signalQuote,detectedPerf:perfNow(),detectedWallMs:Date.now(),patternMeta:{signalId:decision.signalId,slot,action:'SANI WORK',authorityMode:mission.authorityMode,sourceDirection:source.tradeDirection,libraDirection:source.tradeDirection,regime:shadowArb.regime,confidence:shadowArb.confidence}});if(didSend)sent.push(slot)}
+    row.requestedBatch=sent.length;row.executionState=sent.length?`ORDER_SENT_X${sent.length}`:'TEACHER_BLOCKED';if(sent.length)engine.log('success',`SANI WORK · ${arbitration.tradeDirection} x${sent.length}.`)
   }catch(error){row.executionState='ERROR';row.error=error.message;showError(error.message)}
   saveSignals();publish();
 }
 
 function reviewMission(force=false){
   if(mission.status!=='ACTIVE')return;if(!force&&Date.now()<mission.nextReviewAt)return;
-  const now=Date.now(),freshBlock=shadowSummary(mission.reviewStartedAt),cumulative=shadowSummary(mission.startedAt),brainState=brain.snapshot(),sniper=sniperMission(mission.startedAt);
-  mission.reviewCount+=1;mission.lastReview={at:now,block:freshBlock,cumulative,sniper,brain:{actionAccuracy:brainState.actionAccuracy,shadowLessons:brainState.shadowLessons,generation:brainState.generation,lastLesson:brainState.lastLesson,lastInsight:brainState.lastInsight}};mission.reviewStartedAt=now;mission.nextReviewAt=now+REVIEW_MS;
+  const now=Date.now(),freshBlock=shadowSummary(mission.reviewStartedAt),cumulative=shadowSummary(mission.startedAt),brainState=brain.snapshot(),sniper=sniperMission(mission.startedAt),teacher=teacherMission(mission.startedAt),teacherNow=teacherLive();
+  mission.reviewCount+=1;mission.lastReview={at:now,block:freshBlock,cumulative,sniper,teacher,brain:{actionAccuracy:brainState.actionAccuracy,shadowLessons:brainState.shadowLessons,generation:brainState.generation,lastLesson:brainState.lastLesson,lastInsight:brainState.lastInsight}};mission.reviewStartedAt=now;mission.nextReviewAt=now+REVIEW_MS;
   const enough=cumulative.comparable>=25&&brainState.shadowLessons>=20;
-  const saniReady=enough&&cumulative.sani.trades>=12&&cumulative.sani.pnl>0&&cumulative.sani.winRate>BREAK_EVEN;
-  const libraReady=enough&&cumulative.libra.trades>=12&&cumulative.libra.pnl>0&&cumulative.libra.winRate>BREAK_EVEN;
-  const sniperReady=Boolean(sniper&&sniper.sniper.trades>=12&&sniper.sniper.pnl>0&&sniper.sniper.winRate>BREAK_EVEN+2);
+  const teacherReady=Boolean(enough&&teacherNow?.workReady);
 
   if(mission.phase==='LEARN'){
-    if(sniperReady){
-      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode='SNIPER_FILTER';
-      mission.reason=`Seven-minute review: the broad streams are not my paid trigger anymore. SANI still finds setups; my filtered SANI sniper subset has ${sniper.sniper.trades} entries at ${sniper.sniper.winRate.toFixed(1)}% ${money(sniper.sniper.pnl)}, above ${BREAK_EVEN.toFixed(1)}% break-even. Paid Demo unlocks SNIPER ONLY. GOOD, LATE and TRASH remain shadow. SANI all-stream ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}; broad Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}.`;
-      mission.recommendation='SNIPER_FILTER';engine.start();
-    }else if(saniReady&&libraReady){
-      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode=cumulative.libra.pnl>cumulative.sani.pnl?'LIBRA_CONTROLS':'TEAM';mission.reason=`Seven-minute review: both broad systems have edge. SANI ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}; Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}. Paid trading starts, with the sniper gate still protecting the final entry.`;mission.recommendation=mission.authorityMode;engine.start();
-    }else if(saniReady){
-      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode='SANI_LEADS';mission.reason=`Seven-minute review: SANI is above break-even at ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}. SANI supplies paid setups; Libra's sniper gate still decides whether each exact moment qualifies.`;mission.recommendation='SANI_LEADS';engine.start();
-    }else if(libraReady){
-      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode='LIBRA_CONTROLS';mission.reason=`Seven-minute review: broad Libra has edge at ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}. Paid Demo begins, but the final sniper gate remains mandatory.`;mission.recommendation='LIBRA_CONTROLS';engine.start();
+    if(teacherReady){
+      mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode='SANI_WORK';
+      const allowed=teacher?.allowed||{trades:0,winRate:0,pnl:0},blocked=teacher?.blocked||{trades:0,winRate:0,pnl:0};
+      mission.reason=`School review complete. Libra is ${teacherNow.stage||'APPRENTICE'} and has enough SANI-context observations to supervise Demo work. SANI is now the only paid hand. Libra does not trade separately; she teaches and gates SANI using mountain law, reversal discipline and entry timing. Taught-pass study: ${allowed.trades} entries at ${Number(allowed.winRate||0).toFixed(1)}% ${money(allowed.pnl)}. Blocked/waited study: ${blocked.trades} entries at ${Number(blocked.winRate||0).toFixed(1)}% ${money(blocked.pnl)}.`;
+      mission.recommendation='SANI_WORK';engine.start();
     }else{
-      mission.authorityMode='NONE';const sniperText=sniper?` Sniper subset: ${sniper.sniper.trades} entries, ${sniper.sniper.winRate.toFixed(1)}% ${money(sniper.sniper.pnl)}; rejected entries: ${sniper.rejected.trades}, ${sniper.rejected.winRate.toFixed(1)}% ${money(sniper.rejected.pnl)}.`:'';
-      mission.reason=`Seven-minute review: no paid entry subset is proven yet. SANI ${cumulative.sani.winRate.toFixed(1)}% ${money(cumulative.sani.pnl)}; broad Libra ${cumulative.libra.winRate.toFixed(1)}% ${money(cumulative.libra.pnl)}.${sniperText} Nobody touches Demo money. I keep narrowing SANI setups into SNIPER versus GOOD/LATE/TRASH.`;mission.recommendation='LEARN';engine.pause();
+      mission.authorityMode='NONE';
+      mission.reason=`School review: Libra has not finished the minimum SANI-context course yet. ${teacherNow?`Degree ${teacherNow.stage}; ${teacherNow.observations} SANI observations.`:'Teacher bridge is warming up.'} Demo money stays off until SANI can be supervised by the taught rules.`;
+      mission.recommendation='LEARN';engine.pause();
     }
   }else{
-    const currentSniper=sniperMission(mission.startedAt),sniperHealthy=Boolean(currentSniper&&currentSniper.sniper.trades>=12&&currentSniper.sniper.pnl>0&&currentSniper.sniper.winRate>BREAK_EVEN+1);
-    if(mission.authorityMode==='SNIPER_FILTER'){
-      if(sniperHealthy){mission.reason=`Sniper health check: ${currentSniper.sniper.trades} filtered SANI entries are ${currentSniper.sniper.winRate.toFixed(1)}% ${money(currentSniper.sniper.pnl)}. SNIPER ONLY authority stays active; rejected setups remain shadow.`;mission.recommendation='SNIPER_FILTER';engine.start()}
-      else{mission.phase='LEARN';mission.authorityMode='NONE';mission.reason=`My sniper subset has lost its proven edge. Paid Demo pauses. I return to shadow and keep learning the entry boundary.`;mission.recommendation='LEARN';engine.pause()}
+    const audit=teacherMission(mission.startedAt),live=teacherLive();
+    if(live?.unhealthy){
+      mission.phase='LEARN';mission.authorityMode='NONE';mission.reason=`Libra's taught-entry audit degraded on recent evidence. SANI paid work pauses and Libra returns to school without forgetting the mastered base laws.`;mission.recommendation='LEARN';engine.pause();
     }else{
-      const freshEnough=freshBlock.comparable>=20,saniHealthy=freshEnough&&freshBlock.sani.trades>=10&&freshBlock.sani.pnl>0&&freshBlock.sani.winRate>BREAK_EVEN,libraHealthy=freshEnough&&freshBlock.libra.trades>=10&&freshBlock.libra.pnl>0&&freshBlock.libra.winRate>BREAK_EVEN;
-      if(sniperHealthy){mission.authorityMode='SNIPER_FILTER';mission.reason=`The sniper subset is now the cleanest edge at ${currentSniper.sniper.winRate.toFixed(1)}% ${money(currentSniper.sniper.pnl)}. I switch paid authority to SANI SETUP → LIBRA MOMENT.`;mission.recommendation='SNIPER_FILTER';engine.start()}
-      else if(!saniHealthy&&!libraHealthy&&freshEnough){mission.phase='LEARN';mission.authorityMode='NONE';mission.reason=`Latest block lost its paid edge. Paid Demo pauses and I return to entry shadowing.`;mission.recommendation='LEARN';engine.pause()}
-      else if(saniHealthy&&!libraHealthy){mission.authorityMode='SANI_LEADS';mission.reason=`Health review: SANI is the only broad edge. Libra still applies the mandatory sniper gate to each SANI setup.`;mission.recommendation='SANI_LEADS';engine.start()}
-      else if(!saniHealthy&&libraHealthy){mission.authorityMode='LIBRA_CONTROLS';mission.reason=`Health review: Libra is the only broad edge. Final sniper gate remains mandatory.`;mission.recommendation='LIBRA_CONTROLS';engine.start()}
-      else if(saniHealthy&&libraHealthy){mission.authorityMode=freshBlock.libra.pnl>freshBlock.sani.pnl?'LIBRA_CONTROLS':'TEAM';mission.reason=`Health review: both broad systems still have edge. Final paid entry remains subject to Libra's sniper gate.`;mission.recommendation=mission.authorityMode;engine.start()}
+      mission.authorityMode='SANI_WORK';
+      const allowed=audit?.allowed||{trades:0,winRate:0,pnl:0},blocked=audit?.blocked||{trades:0,winRate:0,pnl:0};
+      mission.reason=`Teacher audit: SANI remains the only paid hand. Libra keeps the taught gate active. Mission taught-pass ${allowed.trades}T at ${Number(allowed.winRate||0).toFixed(1)}% ${money(allowed.pnl)}; blocked/waited ${blocked.trades}T at ${Number(blocked.winRate||0).toFixed(1)}% ${money(blocked.pnl)}. Known rules are reflexes; uncertain timing keeps learning in shadow beside paid SANI work.`;
+      mission.recommendation='SANI_WORK';engine.start();
     }
   }
   publish();
@@ -210,6 +201,8 @@ const baseBuy=engine.onBuy.bind(engine);engine.onBuy=function(message){const pen
 const baseContract=engine.onContract.bind(engine);engine.onContract=function(contract){const id=Number(contract?.contract_id),meta=contractMeta.get(id)||this.trades.find(item=>Number(item.contractId)===id)?.patternMeta;baseContract(contract);if(!meta?.signalId||!(contract?.is_sold||contract?.is_expired))return;const trade=this.trades.find(item=>Number(item.contractId)===id);if(!trade)return;const row=upsertSignal(meta.signalId),item=row.actualTrades.find(entry=>Number(entry.contractId)===id)||{contractId:id,slot:meta.slot};Object.assign(item,{outcome:trade.status==='won'?'WON':trade.status==='lost'?'LOST':String(trade.status||'SOLD').toUpperCase(),profit:trade.profit,entrySpot:trade.entrySpot,exitSpot:trade.exitSpot,entryEpoch:trade.entryTickTime,exitEpoch:trade.exitTickTime,buyAckMs:trade.sendToAckMs});if(!row.actualTrades.some(entry=>Number(entry.contractId)===id))row.actualTrades.push(item);saveSignals();checkMission();publish()};
 engine.onTick=function(tick){this.lastTick=tick;this.ticksSeen+=1;postTick(tick);this.emit()};engine.subscribe(()=>publish());
 
+window.addEventListener('libra-teacher-decision',event=>{const detail=event.detail||{};if(!detail.signalId)return;const row=upsertSignal(detail.signalId);row.teacherAction=detail.action;row.teacherAllowed=Boolean(detail.allowed);row.teacherReason=detail.reason;row.teacherMountain=detail.mountain?.direction||'NONE';row.teacherMoment=detail.mountain?.entryMode||'NO_TRADE';row.teacherScore=detail.sniper?.score;row.teacherClass=detail.sniper?.entryClass;saveSignals()});
+
 function traderConfig(){const plan=missionPlanFromForm(),config={...engine.config,symbol:currentSymbol(),stake:Number($('ptStake')?.value||1),takeProfit:0,stopLoss:0,maxTrades:5000,duration:FIXED_DURATION,durationUnit:'t',cooldownTicks:0,executionMethod:'direct',oneOpenContract:false,maxSignalToSendMs:250,currency:selectedAccount?.currency||'USD',maxConsecutiveLosses:0,reconnect:true,maxReconnectAttempts:8};if(!(config.stake>0))throw new Error('Stake must be greater than 0.');if(String(selectedAccount?.account_type||'').toLowerCase()==='real')throw new Error('Libra is Demo-only while her adaptive policy is being validated.');if(!engine.snapshot().running)engine.setConfig(config);return{...config,...plan}}
 function auth(){const appId=$('ptAppId')?.value?.trim(),token=$('ptToken')?.value?.trim(),accountId=$('ptAccount')?.value;selectedAccount=accounts.find(account=>account.account_id===accountId)||null;if(!appId||!token)throw new Error('App ID and trade token are required.');if(!selectedAccount)throw new Error('Load and select a Deriv Demo account.');if(String(selectedAccount.account_type||'').toLowerCase()==='real')throw new Error('Choose a Demo account for Libra.');return{appId,token,accountId}}
 async function api(path,body){const response=await fetch(`/api/${path}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),cache:'no-store'}),data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||`API ${response.status}`);return data}
@@ -218,8 +211,8 @@ function showError(message){if(!$('traderError'))return;$('traderError').textCon
 function clearError(){if(!$('traderError'))return;$('traderError').textContent='';$('traderError').classList.add('hidden')}
 function renderAccounts(){const select=$('ptAccount');if(!select)return;select.innerHTML=accounts.length?'':'<option value="">No accounts found</option>';for(const account of accounts){const option=document.createElement('option');option.value=account.account_id;option.textContent=`${String(account.account_type).toUpperCase()} · ${account.account_id} · ${account.currency} ${account.balance}`;select.appendChild(option)}const saved=localStorage.getItem('sani.deriv.accountId');if(saved&&accounts.some(account=>account.account_id===saved&&String(account.account_type).toLowerCase()!=='real'))select.value=saved;const demo=accounts.find(account=>String(account.account_type).toLowerCase()!=='real');if(demo&&(!select.value||String(accounts.find(account=>account.account_id===select.value)?.account_type).toLowerCase()==='real'))select.value=demo.account_id;selectedAccount=accounts.find(account=>account.account_id===select.value)||null;publish()}
 
-function startMission(){clearError();try{auth();const plan=traderConfig();if(engine.running)engine.pause();shadowPending.clear();const now=Date.now();mission={...freshMission(),...plan,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',authorityMode:'NONE',startedAt:now,deadlineAt:now+plan.durationMinutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),reason:'First seven-minute shadow study. SANI finds virtual setups; Libra pre-arms continuously and judges the exact entry moment. Nobody spends Demo money. At review, a profitable SNIPER subset can earn paid authority even if the broad SANI and broad Libra streams are still losing.',recommendation:'LEARN'};lastArbitration={action:'SHADOW LEARN',approved:false,tradeDirection:'NONE',reason:mission.reason,at:now};publish()}catch(error){showError(error.message)}}
-function continueMission(minutes){if(!engine.snapshot().connected){showError('Connect the trader first.');return}const now=Date.now();mission.status='ACTIVE';mission.phase='LEARN';mission.authorityMode='NONE';mission.durationMinutes=minutes;mission.deadlineAt=now+minutes*60000;mission.reviewStartedAt=now;mission.nextReviewAt=now+REVIEW_MS;mission.basePnl=Number(engine.snapshot().sessionPnL||0);mission.baseTrades=totalSettled();mission.peakPnl=0;mission.protectedFloor=0;mission.reason=`New ${minutes}-minute mission. Learned memory stays. SANI finds setups; Libra goes back to shadowing the exact entry moment until the sniper subset proves itself.`;engine.pause();shadowPending.clear();publish()}
+function startMission(){clearError();try{auth();const plan=traderConfig();if(engine.running)engine.pause();shadowPending.clear();const now=Date.now();mission={...freshMission(),...plan,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',authorityMode:'NONE',startedAt:now,deadlineAt:now+plan.durationMinutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),reason:'First seven-minute SCHOOL. SANI produces virtual setups. Libra studies why SANI entered, reads the mountain, and grades the moment. After the first review, if the SANI-context course is complete, SANI starts Demo work under Libra-taught rules. Libra remains teacher and auditor, not a second paid trader.',recommendation:'LEARN'};lastArbitration={action:'LIBRA SCHOOL',approved:false,tradeDirection:'NONE',reason:mission.reason,at:now};publish()}catch(error){showError(error.message)}}
+function continueMission(minutes){if(!engine.snapshot().connected){showError('Connect the trader first.');return}const now=Date.now();mission={...mission,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',authorityMode:'NONE',startedAt:now,durationMinutes:minutes,deadlineAt:now+minutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,reviewCount:0,lastReview:null,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),peakPnl:0,protectedFloor:0,reason:`New ${minutes}-minute mission. Long-term lessons stay. Libra takes one fresh seven-minute SCHOOL block, then SANI returns to Demo work under the taught policy.`,recommendation:'LEARN'};engine.pause();shadowPending.clear();publish()}
 function bindControls(){
   $('ptLoadAccounts')?.addEventListener('click',async()=>{clearError();try{const appId=$('ptAppId').value.trim(),token=$('ptToken').value.trim();if(!appId||!token)throw new Error('App ID and trade token are required.');$('ptLoadAccounts').disabled=true;const data=await api('accounts',{appId,token});accounts=data.accounts||[];localStorage.setItem('sani.deriv.appId',appId);sessionStorage.setItem('sani.deriv.token',token);renderAccounts()}catch(error){showError(error.message)}finally{$('ptLoadAccounts').disabled=false}});
   $('ptAccount')?.addEventListener('change',()=>{localStorage.setItem('sani.deriv.accountId',$('ptAccount').value);lastOtpContext=null;selectedAccount=accounts.find(account=>account.account_id===$('ptAccount').value)||null;publish()});
@@ -229,7 +222,7 @@ function bindControls(){
   $('ptPause')?.addEventListener('click',()=>{mission.status='PAUSED';mission.reason='Mission paused. Memory retained.';engine.pause();publish()});
   $('ptStop')?.addEventListener('click',()=>{mission.status='STOPPED';mission.reason='Mission stopped. Memory retained.';engine.stop();publish()});
   $('ptReset')?.addEventListener('click',()=>{try{engine.resetSession();mission=freshMission();signals=[];shadowPending.clear();localStorage.removeItem(SIGNAL_KEY);publish()}catch(error){showError(error.message)}});
-  $('libraClearResults')?.addEventListener('click',()=>{if(confirm('Clear Libra trade results? Her learned brain will be retained.')){signals=[];shadowPending.clear();localStorage.removeItem(SIGNAL_KEY);publish()}});
+  $('libraClearResults')?.addEventListener('click',()=>{if(confirm('Clear Libra trade results? Her learned brain and SANI education will be retained.')){signals=[];shadowPending.clear();localStorage.removeItem(SIGNAL_KEY);publish()}});
   $('libraResetBrain')?.addEventListener('click',()=>{if(confirm('Erase Libra learned memory and start her brain from zero?')){brain.importState({weights:Array(14).fill(0),bias:0,updates:0,mistakes:0,correct:0,skippedFlats:0,generation:1,stateMemory:{},actionMemory:{},regimeMemory:{},horizonMemory:{},recent:[],shadowRecent:[],shadowLessons:0,shadowMistakes:0,actionWins:0,actionLosses:0,lastLesson:'Memory reset. I am learning from zero.',lastInsight:'I am rebuilding my decision memory.',lastLearnMs:0,lastUpdateAt:0});persistBrain();pendingForecast=null;window.LIBRA_SNIPER?.reset?.();publish()}})
 }
 
