@@ -1,10 +1,9 @@
 // Libra's former external shadow wrapper is retired.
-// This slot now loads the mountain/sniper learner and the teacher bridge.
-// SANI remains the execution hand; Libra learns, certifies, teaches, and audits.
+// This slot now loads the complete SCHOOL → TEACH SANI → SANI WORK bridge.
+import './core/libra-execution-base.mjs';
 import './core/libra-sniper.mjs';
-import { installTeacherExecution } from './core/libra-teacher.mjs';
-
-installTeacherExecution();
+import './core/libra-teacher.mjs';
+import './core/libra-teacher-execution.mjs';
 
 let reviewQueued=false;
 let lastReviewKey='';
