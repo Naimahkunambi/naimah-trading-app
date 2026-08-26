@@ -7,10 +7,9 @@ const perfNow = () => globalThis.performance?.now?.() ?? Date.now();
 const SIGNAL_KEY = 'sani.libra.signals.v1';
 const BRAIN_KEY = 'sani.libra.brain.v1';
 const FIXED_DURATION = 1;
-const MAX_CONCURRENT = 2;
+const MAX_CONCURRENT = 1;
 const REVIEW_MS = 7 * 60_000;
 const PAYOUT = 0.92;
-const BREAK_EVEN = 100 / (1 + PAYOUT);
 
 let worker;
 let workerAnalysis = null;
@@ -56,7 +55,7 @@ function currentSymbol(){return $('obsSymbol')?.value?.trim()||'1HZ25V'}
 function tickKey(symbol=currentSymbol()){return `sani.observatory.ticks.${symbol}`}
 function loadTicks(){try{const value=JSON.parse(localStorage.getItem(tickKey())||'[]');return Array.isArray(value)?value.map(row=>({epoch:+row.epoch,quote:+row.quote})).filter(row=>Number.isFinite(row.epoch)&&Number.isFinite(row.quote)).sort((a,b)=>a.epoch-b.epoch).slice(-10000):[]}catch{return[]}}
 function upsertSignal(id,patch={}){let row=signals.find(item=>item.signalId===id);if(!row){row={signalId:id,createdAt:Date.now(),actualTrades:[]};signals.unshift(row)}Object.assign(row,patch,{updatedAt:Date.now()});row.actualTrades||=[];saveSignals();return row}
-function batchSize(){return Math.max(1,Math.min(2,Math.round(Number($('ptCooldown')?.value||1))))}
+function batchSize(){return 1}
 function exposure(){let pending=0;for(const request of engine.pending.values())if(['buy-direct','proposal','buy-proposal'].includes(request?.kind))pending+=1;return engine.open.size+pending}
 function totalSettled(){return engine.trades.filter(trade=>['won','lost'].includes(String(trade.status||'').toLowerCase())).length}
 function missionRunPnl(){return Number(engine.snapshot().sessionPnL||0)-Number(mission.basePnl||0)}
@@ -138,11 +137,7 @@ function sourceFromDecision(decision){
   return{approved,tradeDirection:['CALL','PUT'].includes(tradeDirection)?tradeDirection:'NONE',signalEpoch:decision?.signalEpoch,signalQuote:decision?.signalQuote,familyId:baseline.familyId||pattern.familyId,edge:baseline.edge??pattern.edge,why:approved?'Original v8 baseline qualified.':'Original v8 baseline is quiet.',intent:{familyId:baseline.familyId||pattern.familyId,patternDirection:baseline.direction||pattern.direction,edge:baseline.edge??pattern.edge,avgSimilarity:pattern.avgSimilarity,matchCount:pattern.matchCount,top10Agree:pattern.top10Agree,top10Total:pattern.top10Total,sameTagCount:pattern.sameTagCount,samePhaseCount:pattern.samePhaseCount,structureTag:structure.tag,phase:structure.phase,repeatCount:sniper.repeatCount,sniperScore:sniper.score,familyRate:sniper.familyMemory?.rate,familySamples:sniper.familyMemory?.total,addressRate:sniper.addressMemory?.rate,addressSamples:sniper.addressMemory?.total}}
 }
 function saniPaidDecision(source,shadowArb){return{...shadowArb,action:source.approved?'SANI WORK':'SANI QUIET',approved:Boolean(source.approved&&['CALL','PUT'].includes(source.tradeDirection)),tradeDirection:source.approved?source.tradeDirection:'NONE',reason:source.approved?`SANI supplies the ${source.tradeDirection} setup. Libra Teacher applies the learned mountain, reversal and timing policy before SANI may execute.`:'SANI has no setup on this decision.'}}
-function choosePaidDecision(source,shadowArb){
-  if(mission.phase==='LEARN'||mission.authorityMode==='NONE')return null;
-  // SANI is the only paid hand. Libra never invents a separate paid LEAD/REPLACE trade here.
-  return saniPaidDecision(source,shadowArb);
-}
+function choosePaidDecision(source,shadowArb){if(mission.phase==='LEARN'||mission.authorityMode==='NONE')return null;return saniPaidDecision(source,shadowArb)}
 function storeDecision(decision,source,shadowArb,paidArb){
   const finalArb=paidArb||shadowArb,armed=window.LIBRA_SNIPER?.preArmed?.()||{};
   return upsertSignal(decision.signalId,{missionId:mission.id,missionPhase:mission.phase,authorityMode:mission.authorityMode,approved:Boolean(paidArb?.approved),sourceApproved:source.approved,sourceDirection:source.tradeDirection,tradeDirection:paidArb?.tradeDirection||'NONE',signalEpoch:decision.signalEpoch,signalQuote:decision.signalQuote,duration:FIXED_DURATION,structure:decision.structure,pattern:{...decision.pattern,foundationFamily:source.familyId,foundationEdge:source.edge},saniIntent:source.intent,sniper:decision.sniper,campaign:decision.campaign,decisionMs:decision.decisionMs,libra:{action:finalArb.action,shadowAction:shadowArb.action,reason:finalArb.reason,regime:finalArb.regime,direction:finalArb.direction,confidence:finalArb.confidence,probabilityUp:finalArb.probabilityUp,bestHorizon:finalArb.bestHorizon,horizons:finalArb.horizons,signature:finalArb.signature,features:finalArb.features,preArmedEpoch:armed.epoch,preArmedRegime:armed.regime,preArmedSignature:armed.signature,preArmedFeatures:armed.features,policyScore:finalArb.policyScore,policySamples:finalArb.policySamples,modelGeneration:finalArb.modelGeneration,updates:finalArb.updates,retainedStates:finalArb.retainedStates,lastLearnMs:finalArb.lastLearnMs},shadowLibra:{action:shadowArb.action,direction:shadowArb.tradeDirection,reason:shadowArb.reason,policyScore:shadowArb.policyScore,policySamples:shadowArb.policySamples},why:`${finalArb.reason} Foundation: ${source.why}`});
@@ -169,36 +164,35 @@ function reviewMission(force=false){
   if(mission.status!=='ACTIVE')return;if(!force&&Date.now()<mission.nextReviewAt)return;
   const now=Date.now(),freshBlock=shadowSummary(mission.reviewStartedAt),cumulative=shadowSummary(mission.startedAt),brainState=brain.snapshot(),sniper=sniperMission(mission.startedAt),teacher=teacherMission(mission.startedAt),teacherNow=teacherLive();
   mission.reviewCount+=1;mission.lastReview={at:now,block:freshBlock,cumulative,sniper,teacher,brain:{actionAccuracy:brainState.actionAccuracy,shadowLessons:brainState.shadowLessons,generation:brainState.generation,lastLesson:brainState.lastLesson,lastInsight:brainState.lastInsight}};mission.reviewStartedAt=now;mission.nextReviewAt=now+REVIEW_MS;
-  const enough=cumulative.comparable>=25&&brainState.shadowLessons>=20;
-  const teacherReady=Boolean(enough&&teacherNow?.workReady);
-
+  const enough=cumulative.comparable>=25&&brainState.shadowLessons>=20,teacherReady=Boolean(enough&&teacherNow?.workReady);
   if(mission.phase==='LEARN'){
     if(teacherReady){
       mission.phase=missionRunPnl()<0?'RECOVER':'WORK';mission.authorityMode='SANI_WORK';
-      const allowed=teacher?.allowed||{trades:0,winRate:0,pnl:0},blocked=teacher?.blocked||{trades:0,winRate:0,pnl:0};
-      mission.reason=`School review complete. Libra is ${teacherNow.stage||'APPRENTICE'} and has enough SANI-context observations to supervise Demo work. SANI is now the only paid hand. Libra does not trade separately; she teaches and gates SANI using mountain law, reversal discipline and entry timing. Taught-pass study: ${allowed.trades} entries at ${Number(allowed.winRate||0).toFixed(1)}% ${money(allowed.pnl)}. Blocked/waited study: ${blocked.trades} entries at ${Number(blocked.winRate||0).toFixed(1)}% ${money(blocked.pnl)}.`;
+      const allowed=teacher?.allowed||{trades:0,winRate:0,pnl:0},paid=teacher?.paid||{trades:0,winRate:0,pnl:0};
+      mission.reason=`School review complete. Libra is ${teacherNow.stage||'APPRENTICE'}. SANI is the only paid hand. Classroom taught-pass: ${allowed.trades} at ${Number(allowed.winRate||0).toFixed(1)}% ${money(allowed.pnl)}. Actual paid Demo exam: ${paid.trades} at ${Number(paid.winRate||0).toFixed(1)}% ${money(paid.pnl)}. Classroom marks can qualify supervised Demo work, but only paid evidence can certify Libra.`;
       mission.recommendation='SANI_WORK';engine.start();
     }else{
-      mission.authorityMode='NONE';
-      mission.reason=`School review: Libra has not finished the minimum SANI-context course yet. ${teacherNow?`Degree ${teacherNow.stage}; ${teacherNow.observations} SANI observations.`:'Teacher bridge is warming up.'} Demo money stays off until SANI can be supervised by the taught rules.`;
-      mission.recommendation='LEARN';engine.pause();
+      mission.authorityMode='NONE';mission.reason=`School review: minimum SANI-context course is not complete yet. ${teacherNow?`${teacherNow.stage}; ${teacherNow.observations} SANI observations.`:'Teacher bridge warming.'} Demo money stays off.`;mission.recommendation='LEARN';engine.pause();
     }
   }else{
     const audit=teacherMission(mission.startedAt),live=teacherLive();
-    if(live?.unhealthy){
-      mission.phase='LEARN';mission.authorityMode='NONE';mission.reason=`Libra's taught-entry audit degraded on recent evidence. SANI paid work pauses and Libra returns to school without forgetting the mastered base laws.`;mission.recommendation='LEARN';engine.pause();
-    }else{
-      mission.authorityMode='SANI_WORK';
-      const allowed=audit?.allowed||{trades:0,winRate:0,pnl:0},blocked=audit?.blocked||{trades:0,winRate:0,pnl:0};
-      mission.reason=`Teacher audit: SANI remains the only paid hand. Libra keeps the taught gate active. Mission taught-pass ${allowed.trades}T at ${Number(allowed.winRate||0).toFixed(1)}% ${money(allowed.pnl)}; blocked/waited ${blocked.trades}T at ${Number(blocked.winRate||0).toFixed(1)}% ${money(blocked.pnl)}. Known rules are reflexes; uncertain timing keeps learning in shadow beside paid SANI work.`;
-      mission.recommendation='SANI_WORK';engine.start();
-    }
+    if(live?.unhealthy){mission.phase='LEARN';mission.authorityMode='NONE';mission.reason=`Paid Demo audit degraded. SANI work pauses; Libra returns to school without forgetting mastered base laws.`;mission.recommendation='LEARN';engine.pause()}
+    else{mission.authorityMode='SANI_WORK';const paid=audit?.paid||{trades:0,winRate:0,pnl:0},allowed=audit?.allowed||{trades:0,winRate:0,pnl:0};mission.reason=`Teacher audit: SANI remains the only paid hand. Paid Demo exam ${paid.trades}T at ${Number(paid.winRate||0).toFixed(1)}% ${money(paid.pnl)}. Classroom taught-pass ${allowed.trades}T at ${Number(allowed.winRate||0).toFixed(1)}% ${money(allowed.pnl)}. The gap between those two is now measured, not hidden.`;mission.recommendation='SANI_WORK';engine.start()}
   }
   publish();
 }
 
 const baseBuy=engine.onBuy.bind(engine);engine.onBuy=function(message){const pending=this.pending.get(Number(message.req_id)),meta=pending?.signal?.patternMeta?{...pending.signal.patternMeta}:null;baseBuy(message);const contractId=Number(message?.buy?.contract_id),trade=this.trades.find(item=>Number(item.contractId)===contractId);if(!trade||!meta?.signalId)return;trade.signalId=meta.signalId;trade.patternMeta=meta;contractMeta.set(contractId,meta);const row=upsertSignal(meta.signalId);if(!row.actualTrades.some(item=>Number(item.contractId)===contractId))row.actualTrades.push({contractId,slot:meta.slot,outcome:'OPEN',buyAckMs:trade.sendToAckMs});saveSignals();publish()};
-const baseContract=engine.onContract.bind(engine);engine.onContract=function(contract){const id=Number(contract?.contract_id),meta=contractMeta.get(id)||this.trades.find(item=>Number(item.contractId)===id)?.patternMeta;baseContract(contract);if(!meta?.signalId||!(contract?.is_sold||contract?.is_expired))return;const trade=this.trades.find(item=>Number(item.contractId)===id);if(!trade)return;const row=upsertSignal(meta.signalId),item=row.actualTrades.find(entry=>Number(entry.contractId)===id)||{contractId:id,slot:meta.slot};Object.assign(item,{outcome:trade.status==='won'?'WON':trade.status==='lost'?'LOST':String(trade.status||'SOLD').toUpperCase(),profit:trade.profit,entrySpot:trade.entrySpot,exitSpot:trade.exitSpot,entryEpoch:trade.entryTickTime,exitEpoch:trade.exitTickTime,buyAckMs:trade.sendToAckMs});if(!row.actualTrades.some(entry=>Number(entry.contractId)===id))row.actualTrades.push(item);saveSignals();checkMission();publish()};
+const baseContract=engine.onContract.bind(engine);engine.onContract=function(contract){
+  const id=Number(contract?.contract_id),meta=contractMeta.get(id)||this.trades.find(item=>Number(item.contractId)===id)?.patternMeta;baseContract(contract);if(!meta?.signalId||!(contract?.is_sold||contract?.is_expired))return;
+  const trade=this.trades.find(item=>Number(item.contractId)===id);if(!trade)return;
+  const row=upsertSignal(meta.signalId),item=row.actualTrades.find(entry=>Number(entry.contractId)===id)||{contractId:id,slot:meta.slot};
+  Object.assign(item,{outcome:trade.status==='won'?'WON':trade.status==='lost'?'LOST':String(trade.status||'SOLD').toUpperCase(),profit:trade.profit,entrySpot:trade.entrySpot,exitSpot:trade.exitSpot,entryEpoch:trade.entryTickTime,exitEpoch:trade.exitTickTime,buyAckMs:trade.sendToAckMs});if(!row.actualTrades.some(entry=>Number(entry.contractId)===id))row.actualTrades.push(item);
+  const signalToEntryTicks=Number.isFinite(Number(trade.entryTickTime))&&Number.isFinite(Number(row.signalEpoch))?Number(trade.entryTickTime)-Number(row.signalEpoch):0;
+  row.paidSignalToEntryTicks=signalToEntryTicks;row.paidEntrySlip=Number.isFinite(Number(trade.entrySpot))&&Number.isFinite(Number(row.signalQuote))?Number(trade.entrySpot)-Number(row.signalQuote):null;row.paidBuyAckMs=trade.sendToAckMs;
+  if(['WON','LOST'].includes(item.outcome))window.LIBRA_TEACHER?.recordPaid?.({signalId:row.signalId,signalAt:row.createdAt,signalEpoch:row.signalEpoch,signalQuote:row.signalQuote,entryEpoch:trade.entryTickTime,entrySpot:trade.entrySpot,exitEpoch:trade.exitTickTime,exitSpot:trade.exitSpot,buyAckMs:trade.sendToAckMs,signalToEntryTicks,outcome:item.outcome,profit:trade.profit,regime:row.libra?.regime||'UNKNOWN',direction:row.sourceDirection||row.tradeDirection,mountainDirection:row.teacherMountain||'NONE',entryMode:row.teacherMoment||'NO_TRADE'});
+  saveSignals();checkMission();publish();
+};
 engine.onTick=function(tick){this.lastTick=tick;this.ticksSeen+=1;postTick(tick);this.emit()};engine.subscribe(()=>publish());
 
 window.addEventListener('libra-teacher-decision',event=>{const detail=event.detail||{};if(!detail.signalId)return;const row=upsertSignal(detail.signalId);row.teacherAction=detail.action;row.teacherAllowed=Boolean(detail.allowed);row.teacherReason=detail.reason;row.teacherMountain=detail.mountain?.direction||'NONE';row.teacherMoment=detail.mountain?.entryMode||'NO_TRADE';row.teacherScore=detail.sniper?.score;row.teacherClass=detail.sniper?.entryClass;saveSignals()});
@@ -211,8 +205,8 @@ function showError(message){if(!$('traderError'))return;$('traderError').textCon
 function clearError(){if(!$('traderError'))return;$('traderError').textContent='';$('traderError').classList.add('hidden')}
 function renderAccounts(){const select=$('ptAccount');if(!select)return;select.innerHTML=accounts.length?'':'<option value="">No accounts found</option>';for(const account of accounts){const option=document.createElement('option');option.value=account.account_id;option.textContent=`${String(account.account_type).toUpperCase()} · ${account.account_id} · ${account.currency} ${account.balance}`;select.appendChild(option)}const saved=localStorage.getItem('sani.deriv.accountId');if(saved&&accounts.some(account=>account.account_id===saved&&String(account.account_type).toLowerCase()!=='real'))select.value=saved;const demo=accounts.find(account=>String(account.account_type).toLowerCase()!=='real');if(demo&&(!select.value||String(accounts.find(account=>account.account_id===select.value)?.account_type).toLowerCase()==='real'))select.value=demo.account_id;selectedAccount=accounts.find(account=>account.account_id===select.value)||null;publish()}
 
-function startMission(){clearError();try{auth();const plan=traderConfig();if(engine.running)engine.pause();shadowPending.clear();const now=Date.now();mission={...freshMission(),...plan,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',authorityMode:'NONE',startedAt:now,deadlineAt:now+plan.durationMinutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),reason:'First seven-minute SCHOOL. SANI produces virtual setups. Libra studies why SANI entered, reads the mountain, and grades the moment. After the first review, if the SANI-context course is complete, SANI starts Demo work under Libra-taught rules. Libra remains teacher and auditor, not a second paid trader.',recommendation:'LEARN'};lastArbitration={action:'LIBRA SCHOOL',approved:false,tradeDirection:'NONE',reason:mission.reason,at:now};publish()}catch(error){showError(error.message)}}
-function continueMission(minutes){if(!engine.snapshot().connected){showError('Connect the trader first.');return}const now=Date.now();mission={...mission,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',authorityMode:'NONE',startedAt:now,durationMinutes:minutes,deadlineAt:now+minutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,reviewCount:0,lastReview:null,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),peakPnl:0,protectedFloor:0,reason:`New ${minutes}-minute mission. Long-term lessons stay. Libra takes one fresh seven-minute SCHOOL block, then SANI returns to Demo work under the taught policy.`,recommendation:'LEARN'};engine.pause();shadowPending.clear();publish()}
+function startMission(){clearError();try{auth();const plan=traderConfig();if(engine.running)engine.pause();shadowPending.clear();const now=Date.now();mission={...freshMission(),...plan,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',authorityMode:'NONE',startedAt:now,deadlineAt:now+plan.durationMinutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),reason:'First seven-minute SCHOOL. SANI produces virtual setups. Libra studies why SANI entered, reads the mountain, and grades the moment. After review, SANI may begin supervised Demo work. Classroom marks qualify work; only actual paid Demo performance can certify Libra.',recommendation:'LEARN'};lastArbitration={action:'LIBRA SCHOOL',approved:false,tradeDirection:'NONE',reason:mission.reason,at:now};publish()}catch(error){showError(error.message)}}
+function continueMission(minutes){if(!engine.snapshot().connected){showError('Connect the trader first.');return}const now=Date.now();mission={...mission,id:`L-${now}`,status:'ACTIVE',phase:'LEARN',authorityMode:'NONE',startedAt:now,durationMinutes:minutes,deadlineAt:now+minutes*60000,reviewStartedAt:now,nextReviewAt:now+REVIEW_MS,reviewCount:0,lastReview:null,basePnl:Number(engine.snapshot().sessionPnL||0),baseTrades:totalSettled(),peakPnl:0,protectedFloor:0,reason:`New ${minutes}-minute mission. Long-term lessons stay. Libra takes one fresh seven-minute SCHOOL block, then SANI returns to supervised Demo work.`,recommendation:'LEARN'};engine.pause();shadowPending.clear();publish()}
 function bindControls(){
   $('ptLoadAccounts')?.addEventListener('click',async()=>{clearError();try{const appId=$('ptAppId').value.trim(),token=$('ptToken').value.trim();if(!appId||!token)throw new Error('App ID and trade token are required.');$('ptLoadAccounts').disabled=true;const data=await api('accounts',{appId,token});accounts=data.accounts||[];localStorage.setItem('sani.deriv.appId',appId);sessionStorage.setItem('sani.deriv.token',token);renderAccounts()}catch(error){showError(error.message)}finally{$('ptLoadAccounts').disabled=false}});
   $('ptAccount')?.addEventListener('change',()=>{localStorage.setItem('sani.deriv.accountId',$('ptAccount').value);lastOtpContext=null;selectedAccount=accounts.find(account=>account.account_id===$('ptAccount').value)||null;publish()});
