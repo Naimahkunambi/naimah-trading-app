@@ -2,7 +2,9 @@
 // This slot now loads the mountain/sniper learner and the teacher bridge.
 // SANI remains the execution hand; Libra learns, certifies, teaches, and audits.
 import './core/libra-sniper.mjs';
-import './core/libra-teacher.mjs';
+import { installTeacherExecution } from './core/libra-teacher.mjs';
+
+installTeacherExecution();
 
 let reviewQueued=false;
 let lastReviewKey='';
