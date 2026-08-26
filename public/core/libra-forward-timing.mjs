@@ -1,17 +1,23 @@
 import { analyzeMountain } from './libra-mountain.mjs';
 
-const STORAGE_KEY='sani.libra.forward-timing.v4';
+const STORAGE_KEY='sani.libra.forward-timing.v5';
 const PAYOUT=.92;
-const PREARM_CONFIRM=3;
+const PREARM_CONFIRM=2;
 const LATENCY_OUTLIER_MS=1500;
 const LATENCY_HOLD_MS=8000;
 const validDirection=v=>['CALL','PUT'].includes(v);
 const money=v=>`${Number(v||0)>=0?'+':'-'}$${Math.abs(Number(v||0)).toFixed(2)}`;
-const clamp=(v,min,max)=>Math.max(min,Math.min(max,Number(v)||0));
 
 function bucket(){return{trades:0,wins:0,losses:0,pnl:0,recent:[]}}
-function fresh(){return{version:4,offsetTicks:1,preArmConfirm:PREARM_CONFIRM,passes:bucket(),rejects:bucket(),lastDecision:null,lastLesson:'Forward timing v4: paid = correct mountain + BUILD + PRE_PULLBACK_END + SNIPER quality + unused leg. Crossovers are transition evidence, never automatic trades.',paidAckMs:[],paidSlips:[],latencyHoldUntil:0,lastAckMs:0,lastPaidOpportunityKey:'',lastPaidOpportunityAt:0,oneShotBlocks:0}}
-function load(){try{const raw=JSON.parse(localStorage.getItem(STORAGE_KEY)||localStorage.getItem('sani.libra.forward-timing.v3')||localStorage.getItem('sani.libra.forward-timing.v2')||'null');const f=fresh();return raw&&typeof raw==='object'?{...f,...raw,version:4,passes:{...f.passes,...(raw.passes||{}),recent:Array.isArray(raw.passes?.recent)?raw.passes.recent.slice(-240):[]},rejects:{...f.rejects,...(raw.rejects||{}),recent:Array.isArray(raw.rejects?.recent)?raw.rejects.recent.slice(-240):[]}}:f}catch{return fresh()}}
+function fresh(){return{
+  version:5,offsetTicks:1,preArmConfirm:PREARM_CONFIRM,
+  passes:bucket(),rejects:bucket(),
+  lastDecision:null,
+  lastLesson:'Forward timing v5: SANI setup + locked mountain side + early pullback turn. Broad regime labels and arbitrary scores no longer veto a structurally valid pre-arm.',
+  paidAckMs:[],paidSlips:[],latencyHoldUntil:0,lastAckMs:0,
+  lastPaidOpportunityKey:'',lastPaidOpportunityAt:0,oneShotBlocks:0
+}}
+function load(){try{const raw=JSON.parse(localStorage.getItem(STORAGE_KEY)||'null'),f=fresh();return raw&&typeof raw==='object'?{...f,...raw,version:5,passes:{...f.passes,...(raw.passes||{}),recent:Array.isArray(raw.passes?.recent)?raw.passes.recent.slice(-240):[]},rejects:{...f.rejects,...(raw.rejects||{}),recent:Array.isArray(raw.rejects?.recent)?raw.rejects.recent.slice(-240):[]}}:f}catch{return fresh()}}
 const state=load();
 let latest={ticks:[],signals:[],mission:{}},mountain=analyzeMountain([]),installed=false;
 const captured=new Map(),settled=new Set();
@@ -23,7 +29,14 @@ function record(b,won,pnl,row){b.trades++;b.pnl=Number((Number(b.pnl||0)+Number(
 function median(values=[]){const a=values.map(Number).filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return 0;const m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2}
 function prearmHealthy(){const r=recent(state.passes.recent,20);return !(r.trades>=20&&(r.winRate<45||r.pnl<=-5))}
 function latencyHeld(){return Date.now()<Number(state.latencyHoldUntil||0)}
-function opportunityKey(m,direction){const leg=Number(m?.extreme?.epoch||m?.start?.epoch||0),important=Number(m?.important?.epoch||0);return validDirection(direction)&&['UP','DOWN'].includes(m?.direction)&&leg?`${direction}|${m.direction}|${leg}|${important}`:''}
+
+// A structural leg is keyed by the important HL/LH that produced the current campaign leg.
+// Do NOT key on every micro extreme, otherwise SANI gets another paid bullet every time price wiggles.
+function opportunityKey(m,direction){
+  if(!validDirection(direction)||!['UP','DOWN'].includes(m?.direction))return'';
+  const structuralEpoch=Number(m?.important?.epoch||m?.start?.epoch||0);
+  return structuralEpoch?`${direction}|${m.direction}|${structuralEpoch}`:'';
+}
 
 function regressionLast(rows,period){
   const slice=(rows||[]).slice(-Math.max(2,period));if(slice.length<2)return Number(slice.at(-1)?.quote||0);
@@ -36,53 +49,56 @@ function crossoverRead(rows=[],mountainDirection='NONE'){
   const clean=(rows||[]).slice(-40);let direction='NONE',age=99;
   for(let back=0;back<4;back++){const end=clean.length-1-back;if(end<21)break;const d=crossAt(clean,end);if(d){direction=d;age=back;break}}
   const wanted=mountainDirection==='UP'?'CALL':mountainDirection==='DOWN'?'PUT':'NONE';
-  return{direction,age,fresh:direction!=='NONE'&&age<=3,aligned:direction!== 'NONE'&&direction===wanted,counter:direction!=='NONE'&&wanted!=='NONE'&&direction!==wanted};
+  return{direction,age,fresh:direction!=='NONE'&&age<=3,aligned:direction!=='NONE'&&direction===wanted,counter:direction!=='NONE'&&wanted!=='NONE'&&direction!==wanted};
 }
-function quality(signal,m,cross){
+function diagnostic(signal,m,cross){
   const i=signal?.saniIntent||{},p=signal?.pattern||{};
-  const edge=Number(i.edge??p.foundationEdge??p.edge??0),sim=Number(i.avgSimilarity??p.avgSimilarity??0),topAgree=Number(i.top10Agree??p.top10Agree??0),topTotal=Math.max(1,Number(i.top10Total??p.top10Total??10)),saniSniper=Number(i.sniperScore??signal?.sniper?.score??0),familyRate=Number(i.familyRate||0),familySamples=Number(i.familySamples||0),addressRate=Number(i.addressRate||0),addressSamples=Number(i.addressSamples||0),confirmation=Number(m?.confirmation||0);
-  let score=0;
-  score+=clamp((edge-50)*1.5,0,27);
-  score+=clamp((sim-80)*.8,0,16);
-  score+=clamp(topAgree/topTotal*20,0,20);
-  score+=clamp(confirmation*5,0,30);
-  if(cross.aligned&&cross.fresh)score+=10;
-  if(cross.counter&&cross.fresh)score-=12;
-  if(familySamples>=6)score+=(familyRate-.5)*12;
-  if(addressSamples>=5)score+=(addressRate-.5)*10;
-  if(saniSniper>0)score=score*.78+saniSniper*.22;
-  if(edge<56)score-=12;
-  if(topAgree/topTotal<.6)score-=12;
-  score=clamp(score,0,100);
-  const grade=score>=76?'SNIPER':score>=66?'ACCEPTABLE':score>=52?'LATE':'TRASH';
-  return{score:Number(score.toFixed(1)),grade,edge,sim,topAgree,topTotal,saniSniper,confirmation,cross};
+  return{
+    family:i.familyId||p.foundationFamily||p.familyId||'UNKNOWN',
+    edge:Number(i.edge??p.foundationEdge??p.edge??0),
+    similarity:Number(i.avgSimilarity??p.avgSimilarity??0),
+    topAgree:Number(i.top10Agree??p.top10Agree??0),
+    topTotal:Number(i.top10Total??p.top10Total??0),
+    confirmation:Number(m?.confirmation||0),cross
+  };
 }
 function rejected(action,direction,reason,m,extra={}){return{allowed:false,action,direction,reason,mountain:m,forwardOffset:1,...extra}}
 
-function evaluateForward(signal,m=mountain){
+// v5 doctrine:
+// SANI proposes. Mountain direction is law. Libra enters one tick early at the pullback turn.
+// Broad Libra regimes are context only because the audit showed they were blocking many executable winners.
+// The old 0-100 score is diagnostic-only and is NOT allowed to veto a structurally valid setup.
+function evaluateForward(signal,m=mountain,rows=latest.ticks||[]){
   const direction=signal?.direction||signal?.sourceDirection||signal?.patternMeta?.sourceDirection||'NONE';
   const regime=String(signal?.libra?.regime||signal?.patternMeta?.regime||'UNKNOWN');
-  const cross=crossoverRead(latest.ticks||[],m?.direction),q=quality(signal,m,cross),sniper={score:q.score,entryClass:q.grade};
-  if(!signal?.sourceApproved||!validDirection(direction))return rejected('SANI QUIET','NONE','No qualified SANI setup to grade.',m,{cross,quality:q,sniper});
-  if(latencyHeld())return rejected('LATENCY HOLD',direction,`Recent Deriv ACK was ${Number(state.lastAckMs||0).toFixed(0)}ms. I will not risk another 1-tick entry during unstable execution.`,m,{cross,quality:q,sniper});
-  if(!m?.ready||!['UP','DOWN'].includes(m.direction))return rejected('WAIT',direction,`No locked directional mountain (${m?.direction||'NONE'}).`,m,{cross,quality:q,sniper});
-  if(regime==='CHOP')return rejected('CHOP · NO TRADE',direction,'Broad regime is CHOP. Crossovers here are transition alerts only, never paid triggers.',m,{cross,quality:q,sniper});
-  if(regime.startsWith('TRANSITION'))return rejected('TRANSITION · WAIT',direction,'Structure is transitioning. I will not pay while direction is being renegotiated.',m,{cross,quality:q,sniper});
-  if(regime.includes('EXHAUSTION'))return rejected('EXHAUSTION · NO CHASE',direction,'Mountain may still point this way, but the move is exhausted. No paid chase.',m,{cross,quality:q,sniper});
-  if(m.allowedDirection!==direction)return rejected('BLOCK',direction,`Wrong side. ${m.direction} mountain allows ${m.allowedDirection}; SANI ${direction} is forbidden until structural reversal.`,m,{cross,quality:q,sniper});
-  if(!prearmHealthy())return rejected('FORWARD RETRAIN',direction,'Recent executable-window PRE-ARM evidence degraded. Paid timing stays off while shadow evidence rebuilds.',m,{cross,quality:q,sniper});
-  if(regime.startsWith('DRIVE'))return rejected('DRIVE · SHADOW',direction,'Correct side, but DRIVE is already underway. I will study it, not chase it with a 1-tick paid contract.',m,{cross,quality:q,sniper});
+  const cross=crossoverRead(rows,m?.direction),diag=diagnostic(signal,m,cross);
+  const structuralClass=m?.entryMode==='WAIT_PULLBACK_END'&&Number(m?.confirmation||0)>=PREARM_CONFIRM?'STRUCTURAL_PREARM':m?.entryMode||'WAIT';
+  const sniper={score:null,entryClass:structuralClass};
+
+  if(!signal?.sourceApproved||!validDirection(direction))return rejected('SANI QUIET','NONE','SANI has no qualified setup to supervise.',m,{cross,diagnostic:diag,sniper,regime});
+  if(latencyHeld())return rejected('LATENCY HOLD',direction,`Recent Deriv ACK was ${Number(state.lastAckMs||0).toFixed(0)}ms. One-tick entries pause while execution is unstable.`,m,{cross,diagnostic:diag,sniper,regime});
+  if(!m?.ready||!['UP','DOWN'].includes(m.direction))return rejected('WAIT',direction,`No locked directional mountain (${m?.direction||'NONE'}).`,m,{cross,diagnostic:diag,sniper,regime});
+  if(m.allowedDirection!==direction)return rejected('BLOCK',direction,`Wrong side. ${m.direction} mountain allows ${m.allowedDirection}; SANI ${direction} stays blocked until the important structure actually reverses.`,m,{cross,diagnostic:diag,sniper,regime});
+  if(!prearmHealthy())return rejected('FORWARD RETRAIN',direction,'Recent v5 executable PRE-ARM evidence degraded. Paid timing pauses while the same structural rule rebuilds in shadow.',m,{cross,diagnostic:diag,sniper,regime});
 
   if(m.entryMode==='WAIT_PULLBACK_END'&&Number(m.confirmation||0)>=PREARM_CONFIRM){
-    if(cross.counter&&cross.fresh)return rejected('CROSS AGAINST MOUNTAIN',direction,`Fresh ${cross.direction} micro/structure cross fights the locked ${m.direction} mountain. Treat it as pullback/fakeout until the fast line crosses back with the mountain.`,m,{cross,quality:q,sniper});
-    if(q.grade!=='SNIPER')return rejected(`${q.grade} · SHADOW`,direction,`Correct side and early moment, but quality is ${q.grade} ${q.score}/100. Paid requires SNIPER ≥76. Cross ${cross.direction}${cross.fresh?` age ${cross.age}T`:' none/far'}.`,m,{cross,quality:q,sniper});
-    const alignedText=cross.aligned&&cross.fresh?` Fresh ${cross.direction} crossover confirms the turn.`:' No fresh aligned crossover, so the pattern/structure score had to carry the entry.';
-    return{allowed:true,action:'SNIPER · PRE-ARM',direction,reason:`ONE-TICK LEAD: ${m.direction} BUILD-side pullback turn ${m.confirmation}/6, quality ${q.score}/100.${alignedText} SANI predicts T+1→T+2, so send before full confirmation.`,mountain:{...m,entryMode:'PRE_PULLBACK_END'},forwardOffset:1,preArm:true,opportunityKey:opportunityKey(m,direction),cross,quality:q,sniper};
+    const crossText=cross.aligned&&cross.fresh
+      ?` Fresh ${cross.direction} micro/structure cross supports the mountain.`
+      :cross.counter&&cross.fresh
+        ?` Fresh ${cross.direction} cross is treated as pullback noise because the important ${m.important?.label||'structure'} has not reversed the ${m.direction} mountain.`
+        :' No fresh crossover is required; SANI + mountain structure carry the setup.';
+    return{
+      allowed:true,action:'PRE-ARM PASS',direction,
+      reason:`ONE-TICK LEAD: ${m.direction} mountain intact, SANI agrees, pullback turn ${m.confirmation}/6.${crossText} Broad regime ${regime} is context only, not a veto.`,
+      mountain:{...m,entryMode:'PRE_PULLBACK_END'},forwardOffset:1,preArm:true,
+      opportunityKey:opportunityKey(m,direction),cross,diagnostic:diag,sniper,regime
+    };
   }
 
-  if(m.entryMode==='PULLBACK_END')return rejected('CONFIRMED TOO LATE',direction,`${regime}: full pullback confirmation is classroom-only. Paid entry needed PRE_PULLBACK_END one tick earlier.`,m,{cross,quality:q,sniper});
-  if(m.entryMode==='EARLY_MOMENTUM')return rejected('EARLY MOMENTUM · SHADOW',direction,'Direct-mountain momentum remains shadow-only until its paid timing has independent evidence.',m,{cross,quality:q,sniper});
-  return rejected('WAIT',direction,`No paid moment: ${m.entryMode}, confirmation ${Number(m.confirmation||0)}/6, quality ${q.grade} ${q.score}/100, crossover ${cross.direction}${cross.fresh?` ${cross.age}T ago`:''}.`,m,{cross,quality:q,sniper});
+  if(m.entryMode==='PULLBACK_END')return rejected('CONFIRMED TOO LATE',direction,`${m.direction} mountain is still valid, but the pullback is already fully confirmed. Keep it shadow because the paid one-tick shot belonged 1 tick earlier.`,m,{cross,diagnostic:diag,sniper,regime});
+  if(m.entryMode==='EARLY_MOMENTUM')return rejected('EARLY MOMENTUM · SHADOW',direction,'Direct-mountain momentum remains shadow-only until its own paid Demo timing is independently proven.',m,{cross,diagnostic:diag,sniper,regime});
+  if(m.entryMode==='EXHAUSTION')return rejected('EXHAUSTION · WAIT',direction,'Mountain direction remains locked, but there is no fresh pullback-turn entry. Wait for a new structural leg instead of chasing.',m,{cross,diagnostic:diag,sniper,regime});
+  return rejected('WAIT',direction,`Correct ${m.direction} side, but no fresh early entry yet: ${m.entryMode}, confirmation ${Number(m.confirmation||0)}/6.`,m,{cross,diagnostic:diag,sniper,regime});
 }
 
 function install(){
@@ -90,17 +106,20 @@ function install(){
   installed=true;
   window.LIBRA_TEACHER.decisionFor=(signal)=>{
     mountain=analyzeMountain(latest.ticks||[]);
-    let result=evaluateForward(signal,mountain);
+    let result=evaluateForward(signal,mountain,latest.ticks||[]);
     if(result.allowed&&result.preArm){
       const key=result.opportunityKey||opportunityKey(mountain,result.direction);
       if(key&&key===state.lastPaidOpportunityKey){
         state.oneShotBlocks=Number(state.oneShotBlocks||0)+1;
-        result=rejected('LEG ALREADY USED',result.direction,'This mountain leg already spent its one paid bullet. Wait for a new structural HH/LL leg and a fresh pullback.',result.mountain,{forwardOffset:1,preArm:true,opportunityKey:key,cross:result.cross,quality:result.quality,sniper:result.sniper});
+        result=rejected('LEG ALREADY USED',result.direction,'This important HL/LH leg already used its one paid entry. Wait for a new important structural pullback before firing again.',result.mountain,{forwardOffset:1,preArm:true,opportunityKey:key,cross:result.cross,diagnostic:result.diagnostic,sniper:result.sniper,regime:result.regime});
       }else if(key){
-        state.lastPaidOpportunityKey=key;state.lastPaidOpportunityAt=Date.now();result={...result,opportunityKey:key,reason:`${result.reason} ONE-SHOT LOCK: this structural leg is now consumed.`};
+        state.lastPaidOpportunityKey=key;state.lastPaidOpportunityAt=Date.now();
+        result={...result,opportunityKey:key,reason:`${result.reason} ONE-SHOT LOCK: this important structural leg is now consumed.`};
       }
     }
-    state.lastDecision={...result,signalId:signal?.signalId,at:Date.now()};save();window.dispatchEvent(new CustomEvent('libra-forward-decision',{detail:state.lastDecision}));return result;
+    state.lastDecision={...result,signalId:signal?.signalId,at:Date.now()};save();
+    window.dispatchEvent(new CustomEvent('libra-forward-decision',{detail:state.lastDecision}));
+    return result;
   };
   return true;
 }
@@ -110,14 +129,15 @@ function study(){
     if(!row?.signalId||!row.sourceApproved||!validDirection(row.sourceDirection))continue;
     if(!captured.has(row.signalId)&&!settled.has(row.signalId)){
       const historicalTicks=(latest.ticks||[]).filter(t=>Number(t.epoch)<=Number(row.signalEpoch||Infinity));
-      const m=analyzeMountain(historicalTicks),decision=evaluateForward({...row,direction:row.sourceDirection},m);
+      const m=analyzeMountain(historicalTicks),decision=evaluateForward({...row,direction:row.sourceDirection},m,historicalTicks);
       captured.set(row.signalId,{signalId:row.signalId,signalAt:Number(row.createdAt||Date.now()),direction:row.sourceDirection,regime:row.libra?.regime||'UNKNOWN',decision,mountain:m});
     }
     if(!settled.has(row.signalId)&&['WON','LOST'].includes(row.shadow?.outcome)){
       const lesson=captured.get(row.signalId);if(!lesson)continue;
       const won=row.shadow.outcome==='WON',pnl=won?PAYOUT:-1,target=lesson.decision?.allowed?state.passes:state.rejects;
-      record(target,won,pnl,{signalId:row.signalId,signalAt:lesson.signalAt,direction:lesson.direction,regime:lesson.regime,moment:lesson.decision?.mountain?.entryMode||lesson.mountain?.entryMode||'NO_TRADE',action:lesson.decision?.action||'WAIT',quality:lesson.decision?.quality?.grade,score:lesson.decision?.quality?.score,cross:lesson.decision?.cross?.direction,entry:row.shadow?.entry,exit:row.shadow?.exit,entryEpoch:row.shadow?.entryEpoch,exitEpoch:row.shadow?.exitEpoch,executionOffset:row.shadow?.executionOffset,opportunityKey:lesson.decision?.opportunityKey||opportunityKey(lesson.mountain,lesson.direction)});
-      const p=summary(state.passes);state.lastLesson=`FORWARD CLASSROOM: paid-eligible SNIPER PRE-ARM set ${p.trades}T · ${p.winRate.toFixed(1)}% · ${money(p.pnl)}. Everything else stays shadow.`;settled.add(row.signalId);captured.delete(row.signalId);save();
+      record(target,won,pnl,{signalId:row.signalId,signalAt:lesson.signalAt,direction:lesson.direction,regime:lesson.regime,mountainDirection:lesson.mountain?.direction||'NONE',moment:lesson.decision?.mountain?.entryMode||lesson.mountain?.entryMode||'NO_TRADE',action:lesson.decision?.action||'WAIT',confirmation:lesson.mountain?.confirmation,cross:lesson.decision?.cross?.direction,entry:row.shadow?.entry,exit:row.shadow?.exit,entryEpoch:row.shadow?.entryEpoch,exitEpoch:row.shadow?.exitEpoch,executionOffset:row.shadow?.executionOffset,opportunityKey:lesson.decision?.opportunityKey||opportunityKey(lesson.mountain,lesson.direction)});
+      const p=summary(state.passes);state.lastLesson=`FORWARD CLASSROOM v5: structurally eligible PRE-ARM set ${p.trades}T · ${p.winRate.toFixed(1)}% · ${money(p.pnl)}. Broad regime labels and old score thresholds are no longer deciding the paid gate.`;
+      settled.add(row.signalId);captured.delete(row.signalId);save();
     }
   }
 }
@@ -129,6 +149,6 @@ window.addEventListener('libra-teacher-paid',event=>{
   if(Number.isFinite(Number(d.entrySpot))&&Number.isFinite(Number(d.signalQuote)))state.paidSlips.push(Number(d.entrySpot)-Number(d.signalQuote));save();
 });
 
-function snapshot(){const cross=crossoverRead(latest.ticks||[],mountain?.direction);return{version:'Forward Timing v4 · Sniper Only',offsetTicks:1,preArmConfirm:PREARM_CONFIRM,healthy:prearmHealthy(),latencyHeld:latencyHeld(),latencyHoldUntil:state.latencyHoldUntil,lastAckMs:state.lastAckMs,passes:summary(state.passes),rejects:summary(state.rejects),recent:recent(state.passes.recent,20),medianBuyAckMs:median(state.paidAckMs),medianEntrySlip:median(state.paidSlips),lastPaidOpportunityKey:state.lastPaidOpportunityKey,lastPaidOpportunityAt:state.lastPaidOpportunityAt,oneShotBlocks:state.oneShotBlocks,lastDecision:state.lastDecision,lastLesson:state.lastLesson,mountain,cross}}
-window.LIBRA_FORWARD_TIMING={snapshot,evaluate:(signal)=>evaluateForward(signal,analyzeMountain(latest.ticks||[])),reset:()=>{localStorage.removeItem(STORAGE_KEY);location.reload()}};
+function snapshot(){const cross=crossoverRead(latest.ticks||[],mountain?.direction);return{version:'Forward Timing v5 · Structural Pre-Arm',offsetTicks:1,preArmConfirm:PREARM_CONFIRM,healthy:prearmHealthy(),latencyHeld:latencyHeld(),latencyHoldUntil:state.latencyHoldUntil,lastAckMs:state.lastAckMs,passes:summary(state.passes),rejects:summary(state.rejects),recent:recent(state.passes.recent,20),medianBuyAckMs:median(state.paidAckMs),medianEntrySlip:median(state.paidSlips),lastPaidOpportunityKey:state.lastPaidOpportunityKey,lastPaidOpportunityAt:state.lastPaidOpportunityAt,oneShotBlocks:state.oneShotBlocks,lastDecision:state.lastDecision,lastLesson:state.lastLesson,mountain,cross}}
+window.LIBRA_FORWARD_TIMING={snapshot,evaluate:(signal)=>evaluateForward(signal,analyzeMountain(latest.ticks||[]),latest.ticks||[]),reset:()=>{localStorage.removeItem(STORAGE_KEY);location.reload()}};
 install();
