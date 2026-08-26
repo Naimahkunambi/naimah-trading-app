@@ -8,6 +8,7 @@ import './core/libra-sniper.mjs';
 import './core/libra-teacher.mjs';
 import './core/libra-forward-timing.mjs';
 import './core/libra-teacher-execution.mjs';
+import './core/libra-clarity-overlay.mjs';
 import './core/libra-audit-export.mjs';
 
 export {};
