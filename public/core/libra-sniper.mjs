@@ -95,7 +95,10 @@ function processSettled(){
 function summarize(rows=[]){const trades=rows.length,wins=rows.filter(r=>r.won).length,pnl=rows.reduce((a,r)=>a+Number(r.pnl||0),0);return{trades,wins,losses:trades-wins,pnl:Number(pnl.toFixed(2)),winRate:trades?wins/trades*100:0,avg:trades?pnl/trades:0}}
 function missionSnapshot(startedAt=0){const rows=state.recent.filter(r=>r.role==='SANI'&&r.signalAt>=Number(startedAt||0)),sniper=summarize(rows.filter(r=>r.entryClass==='SNIPER')),goodPlus=summarize(rows.filter(r=>['SNIPER','GOOD'].includes(r.entryClass))),rejected=summarize(rows.filter(r=>['LATE','TRASH'].includes(r.entryClass)));return{startedAt:Number(startedAt||0),all:summarize(rows),sniper,goodPlus,rejected,threshold:state.threshold,breakEven:BREAK_EVEN*100,mountain:structuredClone(mountain)}}
 function snapshot(){const sniper=summarize(state.recent.filter(r=>r.role==='SANI'&&r.entryClass==='SNIPER'));return{version:'Libra Sniper v3 · Mountain Guardian',threshold:state.threshold,learned:state.learned,states:Object.keys(state.states).length,sniperTrades:sniper.trades,sniperWinRate:sniper.winRate,sniperPnl:sniper.pnl,lastLesson:state.lastLesson,lastAssessment:state.lastAssessment,breakEven:BREAK_EVEN*100,preArmed:{...preArmed},mountain:structuredClone(mountain)}}
-function findSignal(id){return(latest.signals||[]).find(r=>r.signalId===id)||null}
+function findSignal(id){
+  const cached=(latest.signals||[]).find(r=>r.signalId===id);if(cached)return cached;
+  try{const live=window.LIBRA?.getSignals?.();return Array.isArray(live)?live.find(r=>r.signalId===id)||null:null}catch{return null}
+}
 function guardExecute(original,ctx,signal){
   const mission=latest.mission||{},signalId=signal?.patternMeta?.signalId;if(!signalId||mission.status!=='ACTIVE'||mission.phase==='LEARN')return original.call(ctx,signal);
   const row=findSignal(signalId),direction=signal?.direction||row?.sourceDirection;if(!row||!validDirection(direction)||!row.sourceApproved||direction!==row.sourceDirection)return false;
