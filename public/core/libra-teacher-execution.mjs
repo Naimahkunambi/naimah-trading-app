@@ -7,10 +7,11 @@ function findSignal(id){
   try{const rows=window.LIBRA?.getSignals?.();return Array.isArray(rows)?rows.find(r=>r.signalId===id)||null:null}catch{return null}
 }
 function emitDecision(taught,signalId){
-  const detail={...(taught||{}),signalId,at:Date.now(),mountain:taught?.mountain||window.LIBRA_TEACHER?.snapshot?.()?.mountain||null};
+  const detail={...(taught||{}),signalId,at:Date.now()};
+  // Trader/audit owns this canonical event. It now captures both normal Teacher
+  // decisions and one-tick PRE-ARM timing decisions before the order is sent.
   window.dispatchEvent(new CustomEvent('libra-teacher-decision',{detail}));
   window.dispatchEvent(new CustomEvent(taught?.allowed?'libra-teacher-pass':'libra-teacher-block',{detail}));
-  return detail;
 }
 
 SaniEngine.prototype.execute=function(signal){
