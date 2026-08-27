@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f3a9c8">
+  <title>COMET · Sani Directional Trading System</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/comet.css">
+</head>
+<body data-lab="comet">
+  <main class="cometApp">
+    <header class="cometTopbar">
+      <a class="cometBrand" href="/comet.html" aria-label="COMET home">
+        <span class="cometMark" aria-hidden="true"><i>✦</i><b>$</b></span>
+        <span><small>SANI INTELLIGENCE SYSTEM</small><strong>COMET</strong></span>
+        <em>DIRECTIONAL</em>
+      </a>
+      <nav class="cometLabs" aria-label="Trading labs">
+        <a href="/">BOS LAB</a>
+        <a href="/observatory.html">MASTER / PATTERN</a>
+        <a href="/milking-zone.html">MILKING ZONE</a>
+        <a href="/smfn.html">SMFN</a>
+        <a href="/libra.html">LIBRA</a>
+        <a class="active" href="/comet.html">COMET</a>
+      </nav>
+      <div class="cometHeaderHud"><span id="cometState">PAPER LAB</span><b id="cometPnl">+$0.00</b></div>
+    </header>
+
+    <div class="cometTicker"><span>COMET v1</span><b>TRADE THE MOVE · NOT THE TICK</b><em>PAPER CFD RESEARCH · MT5 BRIDGE NEXT</em></div>
+
+    <nav class="cometRail" aria-label="COMET pages">
+      <button class="active" data-comet-target="0"><b>01</b><span>GLAM IN</span></button>
+      <button data-comet-target="1"><b>02</b><span>MARKET MAP</span></button>
+      <button data-comet-target="2"><b>03</b><span>RISK PLAN</span></button>
+      <button data-comet-target="3"><b>04</b><span>POSITION</span></button>
+      <button data-comet-target="4"><b>05</b><span>RESULTS</span></button>
+      <button data-comet-target="5"><b>06</b><span>TAPE</span></button>
+    </nav>
+
+    <section class="cometStage">
+      <article class="cometPage active" data-comet-page="0">
+        <div class="cometHero">
+          <span>COMET_01.EXE · DOLLHOUSE MARKET</span>
+          <h1>Pretty system.<br><i>Serious direction.</i></h1>
+          <p>COMET borrows Libra's mountain logic, but it is not racing a one-tick expiry. It opens a directional paper position, defines where the thesis is wrong, and lets a real market leg breathe.</p>
+        </div>
+        <div class="cometGrid two">
+          <section class="cometCard glossy">
+            <div class="cometCardBar"><span>MARKET FEED</span><b id="cometFeedStatus">OFFLINE</b></div>
+            <div class="cometCardBody">
+              <div class="cometForm two">
+                <label>SYMBOL<input id="cometSymbol" value="1HZ25V"></label>
+                <label>DERIV APP ID<input id="cometAppId" placeholder="App ID"></label>
+              </div>
+              <div class="cometButtons"><button id="cometConnect" class="primary">CONNECT LIVE</button><button id="cometDisconnect">DISCONNECT</button></div>
+              <div class="cometPulse"><small>TICKS</small><strong id="cometTickCount">0</strong><span id="cometLastQuote">waiting for price</span></div>
+            </div>
+          </section>
+
+          <section class="cometCard">
+            <div class="cometCardBar"><span>DEMO ACCOUNT</span><b id="cometAccountStatus">NOT LOADED</b></div>
+            <div class="cometCardBody">
+              <div class="cometForm two">
+                <label>TRADE TOKEN<input id="cometToken" type="password" placeholder="PAT / OAuth token"></label>
+                <label>ACCOUNT<select id="cometAccount"><option value="">Load accounts first</option></select></label>
+              </div>
+              <div class="cometButtons"><button id="cometLoadAccounts">LOAD DEMO ACCOUNTS</button></div>
+              <p class="cometNote">v1 uses the account only as the future execution context. Positions on this page are PAPER positions until the MT5/CFD execution bridge is wired and validated.</p>
+            </div>
+          </section>
+        </div>
+        <div class="pageActions"><span>Load the room first.</span><button data-next>ENTER COMET ✦</button></div>
+      </article>
+
+      <article class="cometPage" data-comet-page="1" aria-hidden="true">
+        <div class="cometMiniHero"><span>COMET_02.EXE</span><h1>Read the whole move.</h1><p>Only actual COMET entries appear on this chart. No forest of candidate circles.</p></div>
+        <section class="cometCard mapCard">
+          <div class="marketHud">
+            <div><small>MOUNTAIN</small><strong id="mapMountain">WARMING</strong><span id="mapPermission">NONE</span></div>
+            <div><small>MOMENT</small><strong id="mapMoment">—</strong><span id="mapReason">waiting for shape</span></div>
+            <div><small>COMET HAND</small><strong id="mapHand">STAND DOWN</strong><span id="mapThesis">No position.</span></div>
+            <div><small>LIVE R</small><strong id="mapR">0.00R</strong><span id="mapRisk">risk not armed</span></div>
+          </div>
+          <canvas id="cometChart" width="1800" height="720"></canvas>
+          <div class="cometLegend"><span><i class="price"></i>PRICE</span><span><i class="structure"></i>LIBRA STRUCTURE</span><span><i class="long"></i>LONG ENTRY</span><span><i class="short"></i>SHORT ENTRY</span><span><i class="stop"></i>STOP</span><span><i class="target"></i>TARGET</span></div>
+        </section>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>SET THE RISK ✦</button></div>
+      </article>
+
+      <article class="cometPage" data-comet-page="2" aria-hidden="true">
+        <div class="cometMiniHero"><span>COMET_03.EXE</span><h1>Risk first. Glamour second.</h1><p>The stop belongs to the structure. Position size belongs to the stop.</p></div>
+        <div class="cometGrid three">
+          <section class="cometCard"><div class="cometCardBar"><span>RISK</span><b>PER POSITION</b></div><div class="cometCardBody"><label>RISK $<input id="riskDollars" type="number" min="0.1" step="0.1" value="1"></label><p>COMET normalizes the paper position so a stop-out costs approximately this amount.</p></div></section>
+          <section class="cometCard glossy"><div class="cometCardBar"><span>REWARD</span><b>R MULTIPLE</b></div><div class="cometCardBody"><label>TARGET R<input id="targetR" type="number" min="1" max="8" step="0.25" value="2"></label><p>Default: risk 1 to seek 2. The system may exit earlier if the mountain thesis breaks.</p></div></section>
+          <section class="cometCard"><div class="cometCardBar"><span>GOAL</span><b>THE SCOREBOARD</b></div><div class="cometCardBody"><label>BIG GOAL $<input id="goalDollars" type="number" min="1" step="1" value="650"></label><div class="goalBar"><i id="goalFill"></i></div><p id="goalCaption">$0 / $650</p></div></section>
+        </div>
+        <section class="cometDoctrine">
+          <b>COMET LAW</b>
+          <p><strong>UP mountain:</strong> LONG only. <strong>DOWN mountain:</strong> SHORT only. <strong>CHOP:</strong> nothing. Enter on a fresh pullback/continuation window, place the stop beyond the important HL/LH, target in R, trail only when structure earns it.</p>
+        </section>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>ARM THE DOLL ✦</button></div>
+      </article>
+
+      <article class="cometPage" data-comet-page="3" aria-hidden="true">
+        <div class="cometMiniHero"><span>COMET_04.EXE</span><h1 id="positionHeadline">Waiting for a worthy move.</h1><p id="positionSub">COMET can watch forever. It does not need to manufacture a trade.</p></div>
+        <section class="positionHero">
+          <div class="positionSide" id="positionSide">STAND DOWN</div>
+          <div class="positionNumbers">
+            <div><small>ENTRY</small><strong id="positionEntry">—</strong></div>
+            <div><small>STOP</small><strong id="positionStop">—</strong></div>
+            <div><small>TARGET</small><strong id="positionTarget">—</strong></div>
+            <div><small>LIVE P/L</small><strong id="positionPnl">+$0.00</strong></div>
+            <div><small>R</small><strong id="positionR">0.00R</strong></div>
+          </div>
+          <p id="positionReason">No directional thesis is armed.</p>
+        </section>
+        <div class="cometButtons commandButtons"><button id="startAuto" class="primary">START AUTO PAPER</button><button id="pauseAuto">PAUSE</button><button id="closePosition">CLOSE POSITION</button><button id="resetComet">RESET PAPER SESSION</button></div>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>SEE THE RECEIPTS ✦</button></div>
+      </article>
+
+      <article class="cometPage" data-comet-page="4" aria-hidden="true">
+        <div class="cometMiniHero"><span>COMET_05.EXE</span><h1>Did the move pay?</h1><p>No vanity metric gets to outrank realized paper P/L.</p></div>
+        <div class="resultGrid">
+          <div><small>REALIZED</small><strong id="statPnl">+$0.00</strong></div>
+          <div><small>TRADES</small><strong id="statTrades">0</strong></div>
+          <div><small>WIN RATE</small><strong id="statWinRate">0.0%</strong></div>
+          <div><small>BEST</small><strong id="statBest">+$0.00</strong></div>
+          <div><small>WORST</small><strong id="statWorst">$0.00</strong></div>
+          <div><small>MAX DRAWDOWN</small><strong id="statDrawdown">$0.00</strong></div>
+        </div>
+        <section class="cometCard tableCard"><div class="cometCardBar"><span>POSITION RESULTS</span><b>LATEST FIRST</b></div><div class="tableWrap"><table><thead><tr><th>TIME</th><th>SIDE</th><th>ENTRY</th><th>EXIT</th><th>WHY</th><th>R</th><th>P/L</th></tr></thead><tbody id="resultsBody"><tr><td colspan="7">No positions closed yet.</td></tr></tbody></table></div></section>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>OPEN THE TAPE ✦</button></div>
+      </article>
+
+      <article class="cometPage" data-comet-page="5" aria-hidden="true">
+        <div class="cometMiniHero"><span>COMET_06.EXE</span><h1>The diary remembers.</h1><p>Every entry and exit keeps the mountain, moment, stop, target and reason that existed at decision time.</p></div>
+        <section class="cometCard tapeCard"><div class="cometCardBar"><span>COMET TAPE</span><b id="tapeCount">0 EVENTS</b></div><div id="tapeList" class="tapeList"><p>Nothing yet.</p></div></section>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-comet-target="1">RETURN TO MARKET MAP ✦</button></div>
+      </article>
+    </section>
+
+    <footer class="cometFooter"><span>COMET · DIRECTION + DISTANCE + RISK</span><b>GOAL <i id="footerGoal">$650</i></b><em>PAPER CFD LAB</em></footer>
+  </main>
+  <script type="module" src="/comet.js"></script>
+</body>
+</html>
