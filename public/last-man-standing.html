@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f2a6c8">
+  <title>LAST MAN STANDING · Sani Adaptive Directional Lab</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/last-man-standing.css">
+</head>
+<body data-lab="last-man-standing">
+  <main class="lmsApp">
+    <header class="lmsTopbar">
+      <a class="lmsBrand" href="/last-man-standing.html">
+        <span class="lmsBadge"><i>★</i><b>1</b></span>
+        <span><small>SANI INTELLIGENCE SYSTEM</small><strong>LAST MAN STANDING</strong></span>
+        <em>ADAPTIVE RUNNER</em>
+      </a>
+      <nav class="lmsLabs">
+        <a href="/">BOS LAB</a><a href="/observatory.html">MASTER / PATTERN</a><a href="/milking-zone.html">MILKING ZONE</a><a href="/smfn.html">SMFN</a><a href="/libra.html">LIBRA</a><a href="/comet.html">COMET</a><a class="active" href="/last-man-standing.html">LAST MAN</a>
+      </nav>
+      <div class="lmsHud"><span id="lmsState">PAPER LAB</span><b id="lmsPnl">+$0.00</b></div>
+    </header>
+
+    <div class="lmsTicker"><span>PLAYER 01</span><b>ONLY THE TREND SURVIVES</b><em>RETRO DOLLHOUSE · PAPER CFD RESEARCH</em></div>
+
+    <nav class="lmsRail">
+      <button class="active" data-lms-target="0"><b>01</b><span>CHECK IN</span></button>
+      <button data-lms-target="1"><b>02</b><span>TREND ROOM</span></button>
+      <button data-lms-target="2"><b>03</b><span>APPETITE</span></button>
+      <button data-lms-target="3"><b>04</b><span>LAST MAN</span></button>
+      <button data-lms-target="4"><b>05</b><span>SCORE</span></button>
+      <button data-lms-target="5"><b>06</b><span>TAPE</span></button>
+    </nav>
+
+    <section class="lmsStage">
+      <article class="lmsPage active" data-lms-page="0">
+        <div class="lmsHero">
+          <span>LMS_01.EXE · DOLLHOUSE ARCADE</span>
+          <h1>Don't die for a target.<br><i>Survive the trend.</i></h1>
+          <p>LAST MAN STANDING is a separate experiment. COMET stays untouched. Libra still identifies the mountain; this system decides how much risk the trend deserves, how far the target should live, and when profit has earned protection.</p>
+        </div>
+        <div class="lmsGrid two">
+          <section class="lmsCard shine"><div class="lmsCardBar"><span>MARKET FEED</span><b id="lmsFeedStatus">OFFLINE</b></div><div class="lmsCardBody">
+            <div class="lmsForm two"><label>SYMBOL<input id="lmsSymbol" value="1HZ25V"></label><label>DERIV APP ID<input id="lmsAppId" placeholder="App ID"></label></div>
+            <div class="lmsButtons"><button id="lmsConnect" class="primary">CONNECT LIVE</button><button id="lmsDisconnect">DISCONNECT</button></div>
+            <div class="lmsPulse"><small>TICKS</small><strong id="lmsTickCount">0</strong><span id="lmsLastQuote">waiting for price</span></div>
+          </div></section>
+          <section class="lmsCard"><div class="lmsCardBar"><span>DEMO ACCOUNT</span><b id="lmsAccountStatus">NOT LOADED</b></div><div class="lmsCardBody">
+            <div class="lmsForm two"><label>TRADE TOKEN<input id="lmsToken" type="password" placeholder="PAT / OAuth token"></label><label>ACCOUNT<select id="lmsAccount"><option value="">Load accounts first</option></select></label></div>
+            <div class="lmsButtons"><button id="lmsLoadAccounts">LOAD DEMO ACCOUNTS</button></div>
+            <p class="lmsNote">Paper positions only. The risk engine is intentionally capped and adaptive; it never increases beyond the maximum risk you set.</p>
+          </div></section>
+        </div>
+        <div class="pageActions"><span>Insert coin. Load the room.</span><button data-next>ENTER THE ARCADE ★</button></div>
+      </article>
+
+      <article class="lmsPage" data-lms-page="1" aria-hidden="true">
+        <div class="lmsMiniHero"><span>LMS_02.EXE</span><h1>The trend gets a health bar.</h1><p>Direction is Libra's mountain. Strength decides whether we grab, cruise, run, or stand down.</p></div>
+        <section class="lmsCard mapCard">
+          <div class="trendHud">
+            <div><small>MOUNTAIN</small><strong id="trendMountain">WARMING</strong><span id="trendPermission">NONE</span></div>
+            <div><small>MOMENT</small><strong id="trendMoment">—</strong><span id="trendReason">waiting for shape</span></div>
+            <div><small>TREND POWER</small><strong id="trendPower">0/100</strong><div class="powerBar"><i id="powerFill"></i></div></div>
+            <div><small>RECOMMENDED MODE</small><strong id="trendMode">STAND DOWN</strong><span id="trendModeReason">No tradable leg yet.</span></div>
+            <div><small>LIVE HAND</small><strong id="trendHand">SCANNING</strong><span id="trendThesis">No position.</span></div>
+          </div>
+          <div class="lmsMapTools" id="lmsMapTools"><button data-act="older">◀ OLDER</button><button data-act="newer">NEWER ▶</button><button data-act="live">LIVE NOW</button><button data-act="zin">ZOOM +</button><button data-act="zout">ZOOM −</button><button data-act="freeze">FREEZE</button><button data-act="draw">DRAW</button><button data-act="clear">CLEAR INK</button><button class="swatch" data-color="#87e7d4"></button><button class="swatch purple" data-color="#c9a2db"></button><button class="swatch gold" data-color="#e8c56c"></button><button data-act="png">SAVE MAP PNG</button><button data-act="case">SAVE TRAINING CASE</button></div>
+          <div class="lmsChartWrap"><canvas id="lmsChart" width="1800" height="720"></canvas><canvas id="lmsInk" class="lmsInk"></canvas></div>
+          <div class="lmsLegend"><span><i class="price"></i>PRICE</span><span><i class="structure"></i>LIBRA STRUCTURE</span><span><i class="long"></i>LONG</span><span><i class="short"></i>SHORT</span><span><i class="stop"></i>PROTECTED STOP</span><span><i class="target"></i>DYNAMIC TARGET</span></div>
+        </section>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>CHOOSE APPETITE ★</button></div>
+      </article>
+
+      <article class="lmsPage" data-lms-page="2" aria-hidden="true">
+        <div class="lmsMiniHero"><span>LMS_03.EXE</span><h1>Risk is a ceiling, not a dare.</h1><p>You choose the maximum. LAST MAN STANDING decides how much of it the current trend has earned.</p></div>
+        <div class="lmsGrid three">
+          <section class="lmsCard"><div class="lmsCardBar"><span>MAX RISK</span><b>PER POSITION</b></div><div class="lmsCardBody"><label>MAX RISK $<input id="riskCap" type="number" min="0.1" step="0.1" value="1"></label><p>The adaptive engine may use less. It cannot risk more than this cap.</p></div></section>
+          <section class="lmsCard shine"><div class="lmsCardBar"><span>MODE CONTROL</span><b id="modeControlLabel">AUTO</b></div><div class="lmsCardBody"><div class="modeButtons"><button class="active" data-mode="AUTO">AUTO</button><button data-mode="GRAB">GRAB</button><button data-mode="CRUISE">CRUISE</button><button data-mode="LAST_MAN">LAST MAN</button></div><p>Manual modes never override a safety stand-down. AUTO is the default.</p></div></section>
+          <section class="lmsCard"><div class="lmsCardBar"><span>GOAL</span><b>THE SCOREBOARD</b></div><div class="lmsCardBody"><label>BIG GOAL $<input id="goalDollars" type="number" min="1" step="1" value="650"></label><div class="goalBar"><i id="goalFill"></i></div><p id="goalCaption">$0 / $650</p></div></section>
+        </div>
+
+        <div class="modeDeck">
+          <article class="modeCard grab"><span>MODE 1</span><h3>GRAB</h3><b>WEAK BUT CLEAN</b><p>Use about <strong>40%</strong> of your risk cap. Seek roughly <strong>0.8R</strong>. Protect quickly. This mode is for a tradable pullback without enough power to marry the trend.</p></article>
+          <article class="modeCard cruise"><span>MODE 2</span><h3>CRUISE</h3><b>HEALTHY TREND</b><p>Use about <strong>70%</strong> of the cap. Seek roughly <strong>1.6R</strong>. Give the move more breathing room while progressively locking profit.</p></article>
+          <article class="modeCard last"><span>MODE 3</span><h3>LAST MAN</h3><b>STRONG TREND</b><p>Use up to <strong>100%</strong> of the cap. Start around <strong>3R</strong>; a strong runner may earn an extension. Trail later and wider so noise cannot bully us out.</p></article>
+        </div>
+        <section class="lmsDoctrine"><b>THE GREED FIREWALL</b><p>Risk never rises because we are excited. Targets only extend when trend power remains strong. Profit protection can tighten automatically; it can never move backwards and give locked profit away.</p></section>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>ARM LAST MAN ★</button></div>
+      </article>
+
+      <article class="lmsPage" data-lms-page="3" aria-hidden="true">
+        <div class="lmsMiniHero"><span>LMS_04.EXE</span><h1 id="positionHeadline">Waiting for somebody worth defending.</h1><p id="positionSub">No trade is a valid position.</p></div>
+        <section class="positionHero">
+          <div class="positionBanner"><span id="positionMode">STAND DOWN</span><b id="positionSide">NO POSITION</b><em id="positionPower">0/100 POWER</em></div>
+          <div class="positionNumbers">
+            <div><small>RISK USED</small><strong id="positionRisk">$0.00</strong></div><div><small>ENTRY</small><strong id="positionEntry">—</strong></div><div><small>STOP</small><strong id="positionStop">—</strong></div><div><small>TARGET</small><strong id="positionTarget">—</strong></div><div><small>LIVE R</small><strong id="positionR">0.00R</strong></div><div><small>LOCKED R</small><strong id="positionLocked">0.00R</strong></div><div><small>LIVE P/L</small><strong id="positionPnl">+$0.00</strong></div>
+          </div>
+          <div class="protectionMeter"><span>UNPROTECTED</span><i id="protectFill"></i><b id="protectCaption">waiting to earn protection</b></div>
+          <p id="positionReason">Trend has not earned a position.</p>
+        </section>
+        <div class="lmsButtons commandButtons"><button id="startAuto" class="primary">START AUTO PAPER</button><button id="pauseAuto">PAUSE</button><button id="closePosition">CLOSE POSITION</button><button id="resetLms">RESET PAPER SESSION</button></div>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>CHECK THE SCORE ★</button></div>
+      </article>
+
+      <article class="lmsPage" data-lms-page="4" aria-hidden="true">
+        <div class="lmsMiniHero"><span>LMS_05.EXE</span><h1>Scoreboard, not storytelling.</h1><p>Every mode must justify its seat at the table.</p></div>
+        <div class="resultGrid"><div><small>REALIZED</small><strong id="statPnl">+$0.00</strong></div><div><small>TRADES</small><strong id="statTrades">0</strong></div><div><small>WIN RATE</small><strong id="statWinRate">0.0%</strong></div><div><small>AVG R</small><strong id="statAvgR">0.00R</strong></div><div><small>PROFIT FACTOR</small><strong id="statPf">0.00</strong></div><div><small>MAX DRAWDOWN</small><strong id="statDrawdown">$0.00</strong></div></div>
+        <div class="modeStats" id="modeStats"><div>GRAB <b>0T · $0</b></div><div>CRUISE <b>0T · $0</b></div><div>LAST MAN <b>0T · $0</b></div></div>
+        <section class="lmsCard tableCard"><div class="lmsCardBar"><span>POSITION RESULTS</span><span><button id="lmsExportCsv" class="miniButton">EXPORT CSV</button> <b>LATEST FIRST</b></span></div><div class="tableWrap"><table><thead><tr><th>TIME</th><th>MODE</th><th>SIDE</th><th>POWER</th><th>RISK</th><th>WHY</th><th>R</th><th>P/L</th></tr></thead><tbody id="resultsBody"><tr><td colspan="8">No positions closed yet.</td></tr></tbody></table></div></section>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>OPEN THE TAPE ★</button></div>
+      </article>
+
+      <article class="lmsPage" data-lms-page="5" aria-hidden="true">
+        <div class="lmsMiniHero"><span>LMS_06.EXE</span><h1>The arcade remembers every life.</h1><p>Entry power, chosen mode, risk, target extensions, trail locks and exit reason are retained.</p></div>
+        <section class="lmsCard tapeCard"><div class="lmsCardBar"><span>LAST MAN TAPE</span><b id="tapeCount">0 EVENTS</b></div><div id="tapeList" class="tapeList"><p>Nothing yet.</p></div></section>
+        <div class="pageActions"><button data-prev>◀ BACK</button><button data-lms-target="1">RETURN TO TREND ROOM ★</button></div>
+      </article>
+    </section>
+
+    <footer class="lmsFooter"><span>LAST MAN STANDING · ADAPT OR DIE</span><b>GOAL <i id="footerGoal">$650</i></b><em>COMET REMAINS UNTOUCHED</em></footer>
+  </main>
+  <script type="module" src="/last-man-standing.js"></script>
+</body>
+</html>
