@@ -3,6 +3,7 @@ import { SaniEngine } from './engine.mjs';
 let latest={mission:{},accountType:'NONE',signals:[],ticks:[]};
 const original=globalThis.__LIBRA_ORIGINAL_SANI_EXECUTE__||SaniEngine.prototype.execute;
 const perfNow=()=>globalThis.performance?.now?.()??Date.now();
+const MAX_SIGNAL_WALL_AGE_MS=850;
 
 // FAST PATH: libra-state already carries the live signal objects. Do not call
 // window.LIBRA.getSignals() on every order because that API structured-clones
@@ -39,27 +40,36 @@ SaniEngine.prototype.execute=function(signal){
 
   const liveEpoch=Number((latest.ticks||[]).at(-1)?.epoch||0),signalEpoch=Number(row.signalEpoch||signal?.epoch||0);
   const staleTicks=liveEpoch&&signalEpoch?Math.max(0,liveEpoch-signalEpoch):0;
+  const signalWallAgeMs=signalEpoch?Math.max(0,Date.now()-signalEpoch*1000):0;
   const pipelineAgeMs=Math.max(0,Date.now()-Number(row.updatedAt||row.createdAt||Date.now()));
 
   // For a one-tick contract, a decision that survived until the NEXT market tick
   // is no longer the decision we intended to buy. Never chase it.
   if(staleTicks>0){
-    const taught=blocked(null,'STALE TICK · BLOCK',`Signal ${signalEpoch} is ${staleTicks} tick(s) behind live ${liveEpoch}. The predicted window already moved; do not chase it.`,{direction,staleTicks,pipelineAgeMs,executionGuardMs:perfNow()-gateStart});
+    const taught=blocked(null,'STALE TICK · BLOCK',`Signal ${signalEpoch} is ${staleTicks} tick(s) behind live ${liveEpoch}. The predicted window already moved; do not chase it.`,{direction,staleTicks,signalWallAgeMs,pipelineAgeMs,executionGuardMs:perfNow()-gateStart});
+    emitDecision(taught,signalId);return false;
+  }
+
+  // Deriv's 1Hz tick epochs are second-granularity. In the failed run the normal
+  // decision arrived ~400–500ms into that second, but one paid order was already
+  // 6.4s old. 850ms leaves normal processing room while preventing a late chase.
+  if(signalWallAgeMs>MAX_SIGNAL_WALL_AGE_MS){
+    const taught=blocked(null,'TOO LATE · BLOCK',`Signal age ${signalWallAgeMs.toFixed(0)}ms exceeded the ${MAX_SIGNAL_WALL_AGE_MS}ms one-tick freshness budget. Skip rather than buy yesterday's idea.`,{direction,staleTicks,signalWallAgeMs,pipelineAgeMs,executionGuardMs:perfNow()-gateStart});
     emitDecision(taught,signalId);return false;
   }
 
   const rg=regimeSide(row?.libra?.regime||signal?.patternMeta?.regime);
   if(rg.hardBlock){
-    const taught=blocked(null,`${rg.label} · HARD BLOCK`,`${rg.label} has no paid directional permission. Zero CALLs, zero PUTs.`,{direction,regime:rg.label,staleTicks,pipelineAgeMs,executionGuardMs:perfNow()-gateStart});
+    const taught=blocked(null,`${rg.label} · HARD BLOCK`,`${rg.label} has no paid directional permission. Zero CALLs, zero PUTs.`,{direction,regime:rg.label,staleTicks,signalWallAgeMs,pipelineAgeMs,executionGuardMs:perfNow()-gateStart});
     emitDecision(taught,signalId);return false;
   }
   if(['CALL','PUT'].includes(rg.side)&&rg.side!==direction){
-    const taught=blocked(null,'REGIME CONFLICT · BLOCK',`${rg.label} permits ${rg.side}; SANI proposed ${direction}. Directional disagreement is not a paid trade.`,{direction,regime:rg.label,regimeSide:rg.side,staleTicks,pipelineAgeMs,executionGuardMs:perfNow()-gateStart});
+    const taught=blocked(null,'REGIME CONFLICT · BLOCK',`${rg.label} permits ${rg.side}; SANI proposed ${direction}. Directional disagreement is not a paid trade.`,{direction,regime:rg.label,regimeSide:rg.side,staleTicks,signalWallAgeMs,pipelineAgeMs,executionGuardMs:perfNow()-gateStart});
     emitDecision(taught,signalId);return false;
   }
 
   const taught=window.LIBRA_TEACHER?.decisionFor?.({...row,direction});
-  const finalDecision={...(taught||{}),staleTicks,pipelineAgeMs,executionGuardMs:perfNow()-gateStart};
+  const finalDecision={...(taught||{}),staleTicks,signalWallAgeMs,pipelineAgeMs,executionGuardMs:perfNow()-gateStart};
   emitDecision(finalDecision,signalId);
   if(!finalDecision?.allowed)return false;
   return original.call(this,signal);
