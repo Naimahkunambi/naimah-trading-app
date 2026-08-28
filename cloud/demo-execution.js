@@ -2,6 +2,7 @@ const fs = require('fs');
 const WebSocket = require('ws');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const DERIV_MIN_STAKE = 1.00;
 
 class DemoExecutionBridge {
   constructor({ cometPage, lastManPage, credsPath, symbol = '1HZ25V', multiplier = 10 }) {
@@ -64,6 +65,7 @@ class DemoExecutionBridge {
         live: this.live[name] ? {
           contractId: this.live[name].contractId,
           side: this.live[name].side,
+          paperStake: this.live[name].paperStake,
           stake: this.live[name].stake,
           multiplier: this.live[name].multiplier,
           paperEntryAt: this.live[name].paperEntryAt,
@@ -86,6 +88,7 @@ class DemoExecutionBridge {
       currency: this.currency,
       symbol: this.symbol,
       multiplier: this.multiplier,
+      derivMinimumStake: DERIV_MIN_STAKE,
       COMET: summarize('COMET'),
       LAST_MAN_GRAB: summarize('LAST_MAN'),
       ...extra
@@ -333,16 +336,24 @@ class DemoExecutionBridge {
       }
     }
 
-    const stake = this.parseStake(name, event, snap);
-    if (!(stake > 0)) {
-      console.error(`[DEMO LIVE] ${name} invalid stake ${stake}. No trade placed.`);
+    const paperStake = this.parseStake(name, event, snap);
+    if (!(paperStake > 0)) {
+      console.error(`[DEMO LIVE] ${name} invalid paper stake ${paperStake}. No trade placed.`);
       return;
+    }
+
+    // Deriv currently rejects multiplier stakes below $1. Keep COMET/LAST MAN
+    // paper logic untouched, but translate the execution stake to the platform
+    // minimum. This is fixed platform normalization, never martingale/upsize.
+    const stake = Math.max(DERIV_MIN_STAKE, Number(paperStake));
+    if (stake !== paperStake) {
+      console.log(`[DEMO LIVE] ${name} stake normalized · paper risk $${paperStake.toFixed(2)} → Deriv Demo minimum $${stake.toFixed(2)}`);
     }
 
     const contract_type = side === 'LONG' ? 'MULTUP' : 'MULTDOWN';
     const paperEntryAt = Number(event.at || Date.now());
     console.log(`[DEMO LIVE] 🎯 ${name} PAPER ENTRY DETECTED · ${side} · ${event.text}`);
-    console.log(`[DEMO LIVE] ${name} requesting ${contract_type} · stake $${stake.toFixed(2)} · x${this.multiplier}`);
+    console.log(`[DEMO LIVE] ${name} requesting ${contract_type} · Demo stake $${stake.toFixed(2)} · paper risk $${paperStake.toFixed(2)} · x${this.multiplier}`);
 
     let prop;
     try {
@@ -386,6 +397,7 @@ class DemoExecutionBridge {
       name,
       contractId: bought.contract_id,
       side,
+      paperStake,
       stake,
       multiplier: this.multiplier,
       buyPrice: Number(bought.buy_price ?? ask ?? stake),
@@ -398,7 +410,7 @@ class DemoExecutionBridge {
     this.live[name] = live;
     this.saveState();
     this.writeStatus();
-    console.log(`[DEMO LIVE] ✅ ${name} DEMO BOUGHT ${side} contract ${live.contractId} · $${stake.toFixed(2)} x${this.multiplier} · bridge latency ${live.latencyMs}ms`);
+    console.log(`[DEMO LIVE] ✅ ${name} DEMO BOUGHT ${side} contract ${live.contractId} · $${stake.toFixed(2)} x${this.multiplier} · paper risk $${paperStake.toFixed(2)} · bridge latency ${live.latencyMs}ms`);
 
     try {
       await this.request({ proposal_open_contract: 1, contract_id: Number(live.contractId), subscribe: 1 });
@@ -500,8 +512,8 @@ class DemoExecutionBridge {
     await this.seed('LAST_MAN');
     await this.restoreOpenContracts();
     this.running = true;
-    this.writeStatus({ note: 'Demo multiplier execution bridge v2 active. LAST MAN is GRAB-only.' });
-    console.log('[DEMO LIVE] 🚦 BRIDGE V2 ACTIVE · COMET + LAST MAN GRAB → Deriv DEMO Multipliers only');
+    this.writeStatus({ note: 'Demo multiplier execution bridge v3 active. LAST MAN is GRAB-only. Deriv minimum stake is normalized to $1.' });
+    console.log('[DEMO LIVE] 🚦 BRIDGE V3 ACTIVE · COMET + LAST MAN GRAB → Deriv DEMO Multipliers only · min stake $1');
     this.timer = setInterval(() => this.tick(), 350);
     this.heartbeatTimer = setInterval(() => this.heartbeat(), 30000);
   }
