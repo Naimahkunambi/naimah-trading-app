@@ -2,10 +2,6 @@ const fs = require('fs');
 const WebSocket = require('ws');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const num = v => {
-  const n = Number(String(v ?? '').replace(/[^0-9+\-.]/g, ''));
-  return Number.isFinite(n) ? n : null;
-};
 
 class DemoExecutionBridge {
   constructor({ cometPage, lastManPage, credsPath, symbol = '1HZ25V', multiplier = 10 }) {
@@ -21,13 +17,27 @@ class DemoExecutionBridge {
     this.running = false;
     this.timer = null;
     this.pingTimer = null;
-    this.lastTapeAt = { COMET: 0, LAST_MAN: 0 };
+    this.heartbeatTimer = null;
+    this.seen = { COMET: new Set(), LAST_MAN: new Set() };
     this.readyAfterFlat = { COMET: false, LAST_MAN: false };
     this.live = { COMET: null, LAST_MAN: null };
     this.closed = { COMET: [], LAST_MAN: [] };
     this.statusPath = '/home/sanisol255/sani-cloud/demo-live-status.json';
     this.statePath = '/home/sanisol255/sani-cloud/demo-live-state.json';
     this.restoreState();
+  }
+
+  eventKey(e = {}) {
+    return `${Number(e.at || 0)}|${String(e.type || '')}|${String(e.text || '')}`;
+  }
+
+  remember(name, event) {
+    const set = this.seen[name];
+    set.add(this.eventKey(event));
+    if (set.size > 3500) {
+      const keep = [...set].slice(-2200);
+      this.seen[name] = new Set(keep);
+    }
   }
 
   restoreState() {
@@ -67,17 +77,20 @@ class DemoExecutionBridge {
         realized: Number(pnl.toFixed(4))
       };
     };
+
     const out = {
       checkedAt: new Date().toISOString(),
       demoOnly: true,
       accountId: this.account?.account_id || null,
       balance: this.account?.balance != null ? Number(this.account.balance) : null,
       currency: this.currency,
+      symbol: this.symbol,
       multiplier: this.multiplier,
       COMET: summarize('COMET'),
       LAST_MAN_GRAB: summarize('LAST_MAN'),
       ...extra
     };
+
     try { fs.writeFileSync(this.statusPath, JSON.stringify(out, null, 2)); } catch {}
   }
 
@@ -97,7 +110,9 @@ class DemoExecutionBridge {
     const rows = Array.isArray(j.data) ? j.data : [j.data].filter(Boolean);
     const account = rows.find(a => String(a.account_id) === String(creds.accountId));
     if (!account) throw new Error('Configured account was not returned by Deriv.');
-    if (String(account.account_type || '').toLowerCase() === 'real') throw new Error('REFUSED: configured account is REAL. This bridge is Demo-only.');
+    if (String(account.account_type || '').toLowerCase() === 'real') {
+      throw new Error('REFUSED: configured account is REAL. This bridge is permanently Demo-only.');
+    }
     this.creds = creds;
     this.account = account;
     this.currency = account.currency || 'USD';
@@ -105,13 +120,16 @@ class DemoExecutionBridge {
   }
 
   async otpUrl() {
-    const r = await fetch(`https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(this.creds.accountId)}/otp`, {
-      method: 'POST',
-      headers: {
-        'Deriv-App-ID': String(this.creds.appId),
-        Authorization: `Bearer ${this.creds.token}`
+    const r = await fetch(
+      `https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(this.creds.accountId)}/otp`,
+      {
+        method: 'POST',
+        headers: {
+          'Deriv-App-ID': String(this.creds.appId),
+          Authorization: `Bearer ${this.creds.token}`
+        }
       }
-    });
+    );
     const text = await r.text();
     let j;
     try { j = JSON.parse(text); } catch { throw new Error(`OTP API returned non-JSON: ${text.slice(0, 120)}`); }
@@ -124,21 +142,32 @@ class DemoExecutionBridge {
     await new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       const timeout = setTimeout(() => reject(new Error('Demo WebSocket connect timeout')), 15000);
-      ws.once('open', () => { clearTimeout(timeout); this.ws = ws; resolve(); });
-      ws.once('error', e => { clearTimeout(timeout); reject(e); });
+      ws.once('open', () => {
+        clearTimeout(timeout);
+        this.ws = ws;
+        resolve();
+      });
+      ws.once('error', e => {
+        clearTimeout(timeout);
+        reject(e);
+      });
     });
 
     this.ws.on('message', raw => this.onMessage(raw));
     this.ws.on('close', () => {
-      console.log('[DEMO LIVE] authenticated socket closed. Bridge will stop rather than guess.');
+      console.log('[DEMO LIVE] authenticated socket closed. Bridge stopped rather than guessing.');
       this.running = false;
       clearInterval(this.timer);
       clearInterval(this.pingTimer);
+      clearInterval(this.heartbeatTimer);
       this.writeStatus({ error: 'Authenticated WebSocket closed; restart service to reconnect.' });
     });
     this.ws.on('error', e => console.error('[DEMO LIVE WS]', e.message));
+
     this.pingTimer = setInterval(() => {
-      try { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ ping: 1 })); } catch {}
+      try {
+        if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ ping: 1 }));
+      } catch {}
     }, 25000);
 
     console.log('[DEMO LIVE] ✅ authenticated trading socket connected');
@@ -170,7 +199,12 @@ class DemoExecutionBridge {
         if (c.profit != null) live.lastProfit = Number(c.profit) || 0;
         if (c.is_sold || ['sold', 'won', 'lost'].includes(String(c.status || '').toLowerCase())) {
           const demoPnl = Number(c.profit || live.lastProfit || 0);
-          this.recordClosed(name, { ...live, demoPnl, exitReason: `DERIV ${String(c.status || 'CLOSED').toUpperCase()}`, soldFor: Number(c.sell_price || 0) });
+          this.recordClosed(name, {
+            ...live,
+            demoPnl,
+            exitReason: `DERIV ${String(c.status || 'CLOSED').toUpperCase()}`,
+            soldFor: Number(c.sell_price || 0)
+          });
           this.live[name] = null;
           this.saveState();
           this.writeStatus();
@@ -181,7 +215,9 @@ class DemoExecutionBridge {
   }
 
   request(payload, timeoutMs = 12000) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Demo trading socket is not open'));
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error('Demo trading socket is not open'));
+    }
     const req_id = ++this.req;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -194,7 +230,8 @@ class DemoExecutionBridge {
   }
 
   async subscribeBalance() {
-    try { await this.request({ balance: 1, subscribe: 1 }); } catch (e) { console.error('[DEMO LIVE] balance subscribe:', e.message); }
+    try { await this.request({ balance: 1, subscribe: 1 }); }
+    catch (e) { console.error('[DEMO LIVE] balance subscribe:', e.message); }
   }
 
   async restoreOpenContracts() {
@@ -210,23 +247,30 @@ class DemoExecutionBridge {
     }
   }
 
-  async forceLastManGrab() {
+  async lockLastManGrab() {
     const page = this.pages.LAST_MAN;
     await page.waitForSelector('[data-mode="GRAB"]', { state: 'attached', timeout: 30000 });
-    await page.locator('[data-mode="GRAB"]').evaluate(el => el.click());
-    await sleep(200);
-    const label = await page.locator('#modeControlLabel').textContent().catch(() => '');
-    if (String(label || '').trim() !== 'GRAB') throw new Error(`Could not lock LAST MAN to GRAB; UI says ${label}`);
-    console.log('[DEMO LIVE] LAST MAN mode locked to GRAB. AUTO promotion is disabled while manual GRAB is selected.');
+    const current = String(await page.locator('#modeControlLabel').textContent().catch(() => '')).trim();
+    if (current !== 'GRAB') {
+      await page.locator('[data-mode="GRAB"]').evaluate(el => el.click());
+      await sleep(150);
+    }
+    const after = String(await page.locator('#modeControlLabel').textContent().catch(() => '')).trim();
+    if (after !== 'GRAB') throw new Error(`Could not lock LAST MAN to GRAB; UI says ${after}`);
+    console.log('[DEMO LIVE] LAST MAN locked to GRAB once. No repeated mode clicks; no AUTO promotion.');
   }
 
   async readSnapshot(name) {
     const page = this.pages[name];
     return page.evaluate(name => {
-      const key = name === 'COMET' ? 'sani.comet.paper.v3' : 'sani.last-man-standing.paper.v1';
-      let session = {};
-      try { session = JSON.parse(localStorage.getItem(key) || '{}') || {}; } catch {}
-      const tape = Array.isArray(session.tape) ? session.tape : [];
+      const runtime = name === 'COMET' ? window.COMET_RUNTIME : window.LAST_MAN_STANDING;
+      let session = null;
+      try { session = runtime?.getSession?.() || null; } catch {}
+      if (!session) {
+        const key = name === 'COMET' ? 'sani.comet.paper.v3' : 'sani.last-man-standing.paper.v1';
+        try { session = JSON.parse(localStorage.getItem(key) || '{}') || {}; } catch { session = {}; }
+      }
+      const tape = Array.isArray(session?.tape) ? session.tape : [];
       const sideText = document.querySelector('#positionSide')?.textContent?.trim() || '';
       const active = ['LONG', 'SHORT'].includes(sideText);
       const risk = name === 'COMET'
@@ -237,16 +281,26 @@ class DemoExecutionBridge {
         side: active ? sideText : null,
         risk: Number.isFinite(risk) ? risk : null,
         mode: name === 'LAST_MAN' ? (document.querySelector('#positionMode')?.textContent?.trim() || '') : 'COMET',
-        tape: tape.slice(0, 30).map(x => ({ at: Number(x.at || 0), type: x.type, text: x.text || '', side: x.side || null, mode: x.mode || null }))
+        trades: Array.isArray(session?.trades) ? session.trades.length : 0,
+        tape: tape.slice(0, 220).map(x => ({
+          at: Number(x.at || 0),
+          type: String(x.type || ''),
+          text: String(x.text || ''),
+          side: x.side || null,
+          mode: x.mode || null
+        }))
       };
     }, name);
   }
 
   async seed(name) {
     const snap = await this.readSnapshot(name);
-    this.lastTapeAt[name] = Math.max(0, ...snap.tape.map(e => e.at || 0));
+    for (const e of snap.tape) this.remember(name, e);
     this.readyAfterFlat[name] = !snap.active;
-    if (snap.active) console.log(`[DEMO LIVE] ${name} already has a paper position. Ignoring it; live Demo starts from the NEXT fresh entry after flat.`);
+    console.log(`[DEMO LIVE] ${name} watcher seeded · paper trades=${snap.trades} · paper active=${snap.active ? snap.side : 'FLAT'} · tape=${snap.tape.length}`);
+    if (snap.active) {
+      console.log(`[DEMO LIVE] ${name} existing paper position ignored. Demo starts from NEXT fresh entry after flat.`);
+    }
   }
 
   parseStake(name, event, snap) {
@@ -256,9 +310,20 @@ class DemoExecutionBridge {
   }
 
   async buyFor(name, event, snap) {
-    if (this.live[name]) return;
-    const side = event.side || (String(event.text).includes(' LONG ') ? 'LONG' : String(event.text).includes(' SHORT ') ? 'SHORT' : snap.side);
-    if (!['LONG', 'SHORT'].includes(side)) return;
+    if (this.live[name]) {
+      console.log(`[DEMO LIVE] ${name} fresh ENTRY seen but Demo contract ${this.live[name].contractId} is still open. Ignored.`);
+      return;
+    }
+
+    const side = event.side || (
+      String(event.text).includes(' LONG ') ? 'LONG' :
+      String(event.text).includes(' SHORT ') ? 'SHORT' :
+      snap.side
+    );
+    if (!['LONG', 'SHORT'].includes(side)) {
+      console.log(`[DEMO LIVE] ${name} ENTRY seen but side could not be read: ${event.text}`);
+      return;
+    }
 
     if (name === 'LAST_MAN') {
       const mode = event.mode || String(event.text).split(' ')[0];
@@ -269,11 +334,15 @@ class DemoExecutionBridge {
     }
 
     const stake = this.parseStake(name, event, snap);
-    if (!(stake > 0)) return console.error(`[DEMO LIVE] ${name} invalid stake`, stake);
+    if (!(stake > 0)) {
+      console.error(`[DEMO LIVE] ${name} invalid stake ${stake}. No trade placed.`);
+      return;
+    }
+
     const contract_type = side === 'LONG' ? 'MULTUP' : 'MULTDOWN';
     const paperEntryAt = Number(event.at || Date.now());
-
-    console.log(`[DEMO LIVE] ${name} NEW ${side} · stake $${stake.toFixed(2)} · x${this.multiplier} · requesting ${contract_type}`);
+    console.log(`[DEMO LIVE] 🎯 ${name} PAPER ENTRY DETECTED · ${side} · ${event.text}`);
+    console.log(`[DEMO LIVE] ${name} requesting ${contract_type} · stake $${stake.toFixed(2)} · x${this.multiplier}`);
 
     let prop;
     try {
@@ -293,7 +362,11 @@ class DemoExecutionBridge {
       return;
     }
 
-    if (!prop?.id) return console.error(`[DEMO LIVE] ${name} proposal had no id. No trade placed.`);
+    if (!prop?.id) {
+      console.error(`[DEMO LIVE] ${name} proposal had no id. No trade placed.`);
+      return;
+    }
+
     const ask = Number(prop.ask_price ?? stake);
     let bought;
     try {
@@ -304,7 +377,11 @@ class DemoExecutionBridge {
       return;
     }
 
-    if (!bought?.contract_id) return console.error(`[DEMO LIVE] ${name} buy returned no contract id.`);
+    if (!bought?.contract_id) {
+      console.error(`[DEMO LIVE] ${name} buy returned no contract id.`);
+      return;
+    }
+
     const live = {
       name,
       contractId: bought.contract_id,
@@ -317,11 +394,17 @@ class DemoExecutionBridge {
       latencyMs: Date.now() - paperEntryAt,
       lastProfit: 0
     };
+
     this.live[name] = live;
     this.saveState();
     this.writeStatus();
-    console.log(`[DEMO LIVE] ✅ ${name} BOUGHT ${side} contract ${live.contractId} · $${stake.toFixed(2)} x${this.multiplier} · bridge latency ${live.latencyMs}ms`);
-    try { await this.request({ proposal_open_contract: 1, contract_id: Number(live.contractId), subscribe: 1 }); } catch (e) { console.error(`[DEMO LIVE] ${name} monitor subscribe:`, e.message); }
+    console.log(`[DEMO LIVE] ✅ ${name} DEMO BOUGHT ${side} contract ${live.contractId} · $${stake.toFixed(2)} x${this.multiplier} · bridge latency ${live.latencyMs}ms`);
+
+    try {
+      await this.request({ proposal_open_contract: 1, contract_id: Number(live.contractId), subscribe: 1 });
+    } catch (e) {
+      console.error(`[DEMO LIVE] ${name} monitor subscribe:`, e.message);
+    }
   }
 
   recordClosed(name, row) {
@@ -331,20 +414,31 @@ class DemoExecutionBridge {
 
   async sellFor(name, event) {
     const live = this.live[name];
-    if (!live) return;
-    console.log(`[DEMO LIVE] ${name} paper EXIT → selling Demo contract ${live.contractId} at market`);
+    if (!live) {
+      console.log(`[DEMO LIVE] ${name} PAPER EXIT detected with no matching Demo contract. Nothing sold.`);
+      return;
+    }
+
+    console.log(`[DEMO LIVE] ${name} PAPER EXIT DETECTED · selling Demo contract ${live.contractId} at market · ${event.text}`);
     try {
       const r = await this.request({ sell: Number(live.contractId), price: 0 });
       const sold = r.sell;
       const soldFor = Number(sold?.sold_for || 0);
       const demoPnl = Number((soldFor - Number(live.buyPrice || live.stake || 0)).toFixed(4));
-      const row = { ...live, demoPnl, soldFor, exitReason: event.text || 'PAPER EXIT', paperExitAt: Number(event.at || Date.now()), sellAt: Date.now() };
+      const row = {
+        ...live,
+        demoPnl,
+        soldFor,
+        exitReason: event.text || 'PAPER EXIT',
+        paperExitAt: Number(event.at || Date.now()),
+        sellAt: Date.now()
+      };
       this.recordClosed(name, row);
       this.live[name] = null;
       this.saveState();
       if (sold?.balance_after != null) this.account.balance = Number(sold.balance_after);
       this.writeStatus();
-      console.log(`[DEMO LIVE] ✅ ${name} SOLD · Demo P/L ${demoPnl >= 0 ? '+' : ''}$${demoPnl.toFixed(2)} · balance ${this.account.balance}`);
+      console.log(`[DEMO LIVE] ✅ ${name} DEMO SOLD · P/L ${demoPnl >= 0 ? '+' : ''}$${demoPnl.toFixed(2)} · balance ${this.account.balance}`);
     } catch (e) {
       console.error(`[DEMO LIVE] ${name} SELL FAILED. Contract remains tracked:`, e.message);
     }
@@ -352,18 +446,22 @@ class DemoExecutionBridge {
 
   async processName(name) {
     const snap = await this.readSnapshot(name);
+
     if (!this.readyAfterFlat[name]) {
+      for (const e of snap.tape) this.remember(name, e);
       if (!snap.active) {
         this.readyAfterFlat[name] = true;
-        this.lastTapeAt[name] = Math.max(this.lastTapeAt[name], ...snap.tape.map(e => e.at || 0));
-        console.log(`[DEMO LIVE] ${name} is flat. Armed for the next fresh paper entry.`);
+        console.log(`[DEMO LIVE] ${name} is flat. ARMED for next fresh paper entry.`);
       }
       return;
     }
 
-    const fresh = snap.tape.filter(e => e.at > this.lastTapeAt[name]).sort((a, b) => a.at - b.at);
+    const fresh = snap.tape
+      .filter(e => !this.seen[name].has(this.eventKey(e)))
+      .sort((a, b) => a.at - b.at);
+
     for (const event of fresh) {
-      this.lastTapeAt[name] = Math.max(this.lastTapeAt[name], event.at);
+      this.remember(name, event);
       if (event.type === 'ENTRY') await this.buyFor(name, event, snap);
       if (event.type === 'EXIT') await this.sellFor(name, event);
     }
@@ -371,7 +469,6 @@ class DemoExecutionBridge {
 
   async tick() {
     try {
-      await this.forceLastManGrab();
       await this.processName('COMET');
       await this.processName('LAST_MAN');
       this.writeStatus();
@@ -380,19 +477,33 @@ class DemoExecutionBridge {
     }
   }
 
+  async heartbeat() {
+    try {
+      const [c, l] = await Promise.all([this.readSnapshot('COMET'), this.readSnapshot('LAST_MAN')]);
+      console.log(
+        `[DEMO LIVE HEARTBEAT] balance=${this.account?.balance} · ` +
+        `COMET paperTrades=${c.trades} demoOpen=${this.live.COMET ? 1 : 0} · ` +
+        `LAST_MAN_GRAB paperTrades=${l.trades} demoOpen=${this.live.LAST_MAN ? 1 : 0}`
+      );
+    } catch (e) {
+      console.error('[DEMO LIVE HEARTBEAT]', e.message);
+    }
+  }
+
   async start() {
     if (this.running) return;
     await this.verifyDemoAccount();
     await this.connectWs();
     await this.subscribeBalance();
-    await this.forceLastManGrab();
+    await this.lockLastManGrab();
     await this.seed('COMET');
     await this.seed('LAST_MAN');
     await this.restoreOpenContracts();
     this.running = true;
-    this.writeStatus({ note: 'Demo multiplier execution bridge active. LAST MAN is GRAB-only.' });
-    console.log('[DEMO LIVE] 🚦 BRIDGE ACTIVE · COMET + LAST MAN GRAB → Deriv DEMO Multipliers only');
-    this.timer = setInterval(() => this.tick(), 500);
+    this.writeStatus({ note: 'Demo multiplier execution bridge v2 active. LAST MAN is GRAB-only.' });
+    console.log('[DEMO LIVE] 🚦 BRIDGE V2 ACTIVE · COMET + LAST MAN GRAB → Deriv DEMO Multipliers only');
+    this.timer = setInterval(() => this.tick(), 350);
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), 30000);
   }
 }
 
