@@ -3,13 +3,18 @@ const WebSocket = require('ws');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const DERIV_MIN_STAKE = 1.00;
+const DERIV_ALLOWED_MULTIPLIERS = [160, 400, 800, 1200, 1600];
+const DERIV_MIN_MULTIPLIER = DERIV_ALLOWED_MULTIPLIERS[0];
 
 class DemoExecutionBridge {
-  constructor({ cometPage, lastManPage, credsPath, symbol = '1HZ25V', multiplier = 10 }) {
+  constructor({ cometPage, lastManPage, credsPath, symbol = '1HZ25V', multiplier = DERIV_MIN_MULTIPLIER }) {
     this.pages = { COMET: cometPage, LAST_MAN: lastManPage };
     this.credsPath = credsPath;
     this.symbol = symbol;
-    this.multiplier = multiplier;
+    this.requestedMultiplier = Number(multiplier);
+    this.multiplier = DERIV_ALLOWED_MULTIPLIERS.includes(this.requestedMultiplier)
+      ? this.requestedMultiplier
+      : DERIV_MIN_MULTIPLIER;
     this.ws = null;
     this.account = null;
     this.currency = 'USD';
@@ -87,7 +92,9 @@ class DemoExecutionBridge {
       balance: this.account?.balance != null ? Number(this.account.balance) : null,
       currency: this.currency,
       symbol: this.symbol,
+      requestedMultiplier: this.requestedMultiplier,
       multiplier: this.multiplier,
+      derivAllowedMultipliers: DERIV_ALLOWED_MULTIPLIERS,
       derivMinimumStake: DERIV_MIN_STAKE,
       COMET: summarize('COMET'),
       LAST_MAN_GRAB: summarize('LAST_MAN'),
@@ -342,9 +349,6 @@ class DemoExecutionBridge {
       return;
     }
 
-    // Deriv currently rejects multiplier stakes below $1. Keep COMET/LAST MAN
-    // paper logic untouched, but translate the execution stake to the platform
-    // minimum. This is fixed platform normalization, never martingale/upsize.
     const stake = Math.max(DERIV_MIN_STAKE, Number(paperStake));
     if (stake !== paperStake) {
       console.log(`[DEMO LIVE] ${name} stake normalized · paper risk $${paperStake.toFixed(2)} → Deriv Demo minimum $${stake.toFixed(2)}`);
@@ -512,8 +516,11 @@ class DemoExecutionBridge {
     await this.seed('LAST_MAN');
     await this.restoreOpenContracts();
     this.running = true;
-    this.writeStatus({ note: 'Demo multiplier execution bridge v3 active. LAST MAN is GRAB-only. Deriv minimum stake is normalized to $1.' });
-    console.log('[DEMO LIVE] 🚦 BRIDGE V3 ACTIVE · COMET + LAST MAN GRAB → Deriv DEMO Multipliers only · min stake $1');
+    if (this.requestedMultiplier !== this.multiplier) {
+      console.log(`[DEMO LIVE] multiplier normalized · requested x${this.requestedMultiplier} → Deriv-supported x${this.multiplier}`);
+    }
+    this.writeStatus({ note: 'Demo multiplier execution bridge v4 active. LAST MAN is GRAB-only. Stake minimum is $1 and multiplier is normalized to a Deriv-supported value.' });
+    console.log(`[DEMO LIVE] 🚦 BRIDGE V4 ACTIVE · COMET + LAST MAN GRAB → Deriv DEMO Multipliers only · min stake $1 · multiplier x${this.multiplier}`);
     this.timer = setInterval(() => this.tick(), 350);
     this.heartbeatTimer = setInterval(() => this.heartbeat(), 30000);
   }
