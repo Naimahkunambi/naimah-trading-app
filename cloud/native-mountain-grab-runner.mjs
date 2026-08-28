@@ -1,0 +1,709 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import WebSocket from 'ws';
+import { performance } from 'node:perf_hooks';
+import { analyzeMountain } from './libra-mountain.mjs';
+
+const ROOT = path.join(os.homedir(), 'sani-cloud');
+const CREDS_PATH = path.join(ROOT, 'deriv-demo.json');
+const STATE_PATH = path.join(ROOT, 'native-mountain-grab-state.json');
+const STATUS_PATH = path.join(ROOT, 'demo-live-status.json');
+const CSV_PATH = path.join(ROOT, 'native-mountain-grab-trades.csv');
+
+const SYMBOL = process.env.SANI_SYMBOL || '1HZ25V';
+const STAKE = Math.max(1, Number(process.env.SANI_STAKE || 1));
+const ALLOWED_MULTIPLIERS = [160, 400, 800, 1200, 1600];
+const REQUESTED_MULTIPLIER = Number(process.env.SANI_MULTIPLIER || 160);
+const MULTIPLIER = ALLOWED_MULTIPLIERS.includes(REQUESTED_MULTIPLIER) ? REQUESTED_MULTIPLIER : 160;
+const PUBLIC_WS = 'wss://api.derivws.com/trading/v1/options/ws/public';
+const HISTORY_COUNT = 1200;
+const PROPOSAL_MAX_AGE_MS = 2200;
+
+// EXACT LAST MAN STANDING GRAB management constants.
+const GRAB = Object.freeze({
+  riskFraction: 0.40,
+  targetR: 0.80,
+  protectAt: 0.35,
+  lockR: 0.05,
+  cashGuardAt: 0.58,
+  cashGuardR: 0.25,
+  trailAt: 0.60
+});
+
+const now = () => new Date().toISOString();
+const clamp = (v, min, max) => Math.max(min, Math.min(max, Number(v) || 0));
+const readJson = (file, fallback = {}) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
+function writeJson(file, value, mode = 0o600) {
+  fs.writeFileSync(file, JSON.stringify(value, null, 2));
+  try { fs.chmodSync(file, mode); } catch {}
+}
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+}
+function appendTradeCsv(trade) {
+  const cols = [
+    'closed_at','engine','side','entry_mode','entry_confirmation','signal_epoch','signal_quote',
+    'model_entry','model_stop','model_target','model_r','model_pnl','demo_pnl','peak_demo_pnl','trough_demo_pnl',
+    'exit_signal_demo_pnl','reason','contract_id','stake','multiplier','proposal_source',
+    'signal_to_send_ms','send_to_ack_ms','signal_to_ack_ms','entry_spot','entry_slippage',
+    'buy_at','sell_at','duration_ms'
+  ];
+  if (!fs.existsSync(CSV_PATH)) fs.writeFileSync(CSV_PATH, cols.join(',') + '\n');
+  const slippage = Number.isFinite(Number(trade.demo?.entrySpot))
+    ? (trade.side === 'LONG' ? Number(trade.demo.entrySpot) - Number(trade.signalQuote) : Number(trade.signalQuote) - Number(trade.demo.entrySpot))
+    : '';
+  const row = [
+    new Date(trade.closedAt || Date.now()).toISOString(), 'MOUNTAIN_GRAB', trade.side,
+    trade.entryMode, trade.entryConfirmation, trade.signalEpoch, trade.signalQuote,
+    trade.entry, trade.exit, trade.r, trade.pnl, trade.demoPnl, trade.peakDemoPnl, trade.troughDemoPnl,
+    trade.exitSignalDemoPnl, trade.reason, trade.demo?.contractId || '', trade.demo?.stake || '',
+    trade.demo?.multiplier || '', trade.demo?.proposalSource || '', trade.demo?.signalToSendMs ?? '',
+    trade.demo?.sendToAckMs ?? '', trade.demo?.signalToAckMs ?? '', trade.demo?.entrySpot ?? '', slippage,
+    trade.demo?.buyAt || '', trade.demoSellAt || '', Number(trade.demoSellAt || Date.now()) - Number(trade.demo?.buyAt || Date.now())
+  ];
+  fs.appendFileSync(CSV_PATH, row.map(csvEscape).join(',') + '\n');
+}
+
+function dedupe(rows = []) {
+  const map = new Map();
+  for (const row of rows) {
+    const epoch = Number(row?.epoch), quote = Number(row?.quote);
+    if (Number.isFinite(epoch) && Number.isFinite(quote)) map.set(`${epoch}:${quote}`, { epoch, quote });
+  }
+  return [...map.values()].sort((a, b) => a.epoch - b.epoch);
+}
+function slimMountain(m) {
+  return {
+    ready: Boolean(m?.ready),
+    direction: m?.direction || 'NONE',
+    state: m?.state || '',
+    entryMode: m?.entryMode || 'NO_TRADE',
+    confirmation: Number(m?.confirmation || 0),
+    allowedDirection: m?.allowedDirection || 'NONE',
+    important: m?.important ? { ...m.important } : null,
+    start: m?.start ? { ...m.start } : null,
+    extreme: m?.extreme ? { ...m.extreme } : null,
+    entryAnchor: m?.entryAnchor ? { ...m.entryAnchor } : null,
+    step: Number(m?.step || 0),
+    efficiency34: Number(m?.efficiency34 || 0),
+    reason: m?.reason || ''
+  };
+}
+
+class MountainGrabEngine {
+  constructor(persisted = {}) {
+    this.ticks = [];
+    this.position = persisted?.position || null;
+    this.lastCloseEpoch = Number(persisted?.lastCloseEpoch || 0);
+    this.usedEntryKeys = Array.isArray(persisted?.usedEntryKeys) ? persisted.usedEntryKeys.slice(-500) : [];
+    this.trades = Number(persisted?.trades || 0);
+    this.wins = Number(persisted?.wins || 0);
+    this.losses = Number(persisted?.losses || 0);
+    this.demoPnl = Number(persisted?.demoPnl || 0);
+    this.modelPnl = Number(persisted?.modelPnl || 0);
+    this.latestMountain = analyzeMountain([]);
+    this.lastSignal = persisted?.lastSignal || null;
+  }
+
+  prime(rows = []) {
+    this.ticks = dedupe(rows).slice(-5000);
+    this.latestMountain = analyzeMountain(this.ticks);
+  }
+
+  pushTick(epoch, quote) {
+    epoch = Number(epoch); quote = Number(quote);
+    if (!Number.isFinite(epoch) || !Number.isFinite(quote)) return false;
+    const last = this.ticks.at(-1);
+    if (last && last.epoch === epoch && last.quote === quote) return false;
+    this.ticks.push({ epoch, quote });
+    if (this.ticks.length > 5000) this.ticks.splice(0, this.ticks.length - 5000);
+    this.latestMountain = analyzeMountain(this.ticks);
+    return true;
+  }
+
+  tickStep() {
+    const d = [];
+    for (let i = Math.max(1, this.ticks.length - 80); i < this.ticks.length; i++) d.push(Math.abs(this.ticks[i].quote - this.ticks[i - 1].quote));
+    d.sort((a, b) => a - b);
+    return d.length ? d[Math.floor(d.length / 2)] || 1 : 1;
+  }
+
+  entryKey(m, side) {
+    // One attempt per structural mountain leg. Mode changes do not create a second trade.
+    const important = Number(m?.important?.epoch || 0);
+    const extreme = Number(m?.extreme?.epoch || 0);
+    const start = Number(m?.start?.epoch || 0);
+    const structural = important || start;
+    return structural ? `${side}|${structural}|${extreme}` : '';
+  }
+
+  entrySignal(m = this.latestMountain) {
+    if (!m?.ready || !['UP', 'DOWN'].includes(m.direction)) return null;
+    if (m.direction === 'CHOP' || m.allowedDirection === 'NONE') return null;
+
+    // The mountain lesson said 2–3 confirmations back with direction. The old analyzer
+    // waited for 4/6 before PULLBACK_END. V3 pays on the first 3/6 mountain turn instead.
+    if (m.entryMode === 'WAIT_PULLBACK_END' && Number(m.confirmation || 0) >= 3) return 'PRE_PULLBACK_END';
+    if (m.entryMode === 'PULLBACK_END') return 'PULLBACK_END';
+    if (m.entryMode === 'EARLY_MOMENTUM') return 'EARLY_MOMENTUM';
+    return null;
+  }
+
+  candidate(signalPerf) {
+    if (this.position) return null;
+    const m = this.latestMountain;
+    const entryMode = this.entrySignal(m);
+    if (!entryMode) return null;
+
+    const current = this.ticks.at(-1);
+    const quote = Number(current?.quote), epoch = Number(current?.epoch || 0);
+    if (!Number.isFinite(quote) || !epoch || epoch <= this.lastCloseEpoch) return null;
+
+    const side = m.direction === 'UP' ? 'LONG' : 'SHORT';
+    const key = this.entryKey(m, side);
+    if (!key || this.usedEntryKeys.includes(key)) return null;
+
+    const step = this.tickStep();
+    const buffer = Math.max(step * 1.25, 1e-9);
+    const minDistance = Math.max(step * 6, 1e-9);
+    const important = Number(m.important?.quote);
+    let stop;
+    if (side === 'LONG') {
+      const structural = Number.isFinite(important) && important < quote ? important - buffer : quote - minDistance;
+      stop = Math.min(structural, quote - minDistance);
+    } else {
+      const structural = Number.isFinite(important) && important > quote ? important + buffer : quote + minDistance;
+      stop = Math.max(structural, quote + minDistance);
+    }
+
+    const riskDistance = Math.abs(quote - stop);
+    if (!(riskDistance > 0)) return null;
+    const target = side === 'LONG' ? quote + riskDistance * GRAB.targetR : quote - riskDistance * GRAB.targetR;
+    const modelRiskDollars = GRAB.riskFraction;
+    const units = modelRiskDollars / riskDistance;
+
+    const c = {
+      side, entryMode, entryConfirmation: Number(m.confirmation || 0),
+      signalEpoch: epoch, signalQuote: quote, signalPerf,
+      entry: quote, stop, trailStop: stop, target,
+      targetR: GRAB.targetR, units, riskDollars: modelRiskDollars, plannedRiskDistance: riskDistance,
+      openedAt: Date.now(), openedEpoch: epoch, entryKey: key,
+      bestR: 0, lockedR: -1, entryContext: slimMountain(m), demo: null
+    };
+    this.lastSignal = { at: Date.now(), side, entryMode, confirmation: c.entryConfirmation, quote, epoch, key };
+    return c;
+  }
+
+  unrealized(p = this.position, quote = this.ticks.at(-1)?.quote) {
+    if (!p || !Number.isFinite(Number(quote))) return { pnl: 0, r: 0 };
+    const delta = p.side === 'LONG' ? Number(quote) - p.entry : p.entry - Number(quote);
+    const pnl = delta * p.units;
+    return { pnl, r: p.riskDollars ? pnl / p.riskDollars : 0 };
+  }
+
+  stopForLockedR(p, r) {
+    return p.side === 'LONG' ? p.entry + p.plannedRiskDistance * r : p.entry - p.plannedRiskDistance * r;
+  }
+
+  advanceStop(p, candidateStop) {
+    if (!Number.isFinite(Number(candidateStop))) return;
+    if (p.side === 'LONG') p.trailStop = Math.max(Number(p.trailStop), Number(candidateStop));
+    else p.trailStop = Math.min(Number(p.trailStop), Number(candidateStop));
+    const lockedDistance = p.side === 'LONG' ? p.trailStop - p.entry : p.entry - p.trailStop;
+    p.lockedR = Math.max(Number(p.lockedR || -1), lockedDistance / Math.max(p.plannedRiskDistance, 1e-9));
+  }
+
+  manage() {
+    if (!this.position) return null;
+    const q = Number(this.ticks.at(-1)?.quote);
+    if (!Number.isFinite(q)) return null;
+    const p = this.position;
+    const u = this.unrealized(p, q);
+    p.bestR = Math.max(Number(p.bestR || 0), u.r);
+
+    // EXIT POLICY IS GRAB ONLY. No SPEED FADE, no EXHAUSTION cash-out,
+    // no mountain-reversal exit. Mountain chooses entry; GRAB owns the trade after entry.
+    if (p.side === 'LONG' && q <= p.trailStop) return { action: 'EXIT', reason: 'GRAB STOP / TRAIL', quote: p.trailStop };
+    if (p.side === 'SHORT' && q >= p.trailStop) return { action: 'EXIT', reason: 'GRAB STOP / TRAIL', quote: p.trailStop };
+    if (p.side === 'LONG' && q >= p.target) return { action: 'EXIT', reason: 'GRAB TAKE PROFIT 0.80R', quote: p.target };
+    if (p.side === 'SHORT' && q <= p.target) return { action: 'EXIT', reason: 'GRAB TAKE PROFIT 0.80R', quote: p.target };
+
+    if (u.r >= GRAB.protectAt) this.advanceStop(p, this.stopForLockedR(p, GRAB.lockR));
+    if (u.r >= GRAB.cashGuardAt) this.advanceStop(p, this.stopForLockedR(p, GRAB.cashGuardR));
+
+    if (u.r >= GRAB.trailAt && Number.isFinite(Number(this.latestMountain?.important?.quote))) {
+      const s = Number(this.latestMountain.important.quote);
+      if (p.side === 'LONG' && s > p.trailStop && s < q) this.advanceStop(p, s);
+      if (p.side === 'SHORT' && s < p.trailStop && s > q) this.advanceStop(p, s);
+    }
+    return null;
+  }
+
+  onTick(epoch, quote, tickReceivedPerf) {
+    if (!this.pushTick(epoch, quote)) return null;
+    const exit = this.manage();
+    if (exit) return exit;
+    if (!this.position) {
+      const signalPerf = performance.now();
+      const c = this.candidate(signalPerf);
+      if (c) {
+        c.tickToSignalMs = Math.max(0, signalPerf - tickReceivedPerf);
+        return { action: 'ENTRY', candidate: c };
+      }
+    }
+    return null;
+  }
+
+  commitEntry(candidate, demo) {
+    this.position = { ...candidate, demo: { ...demo } };
+    this.usedEntryKeys = [...new Set([...this.usedEntryKeys, candidate.entryKey])].slice(-500);
+  }
+
+  commitExit(reason, quote, demoInfo = {}) {
+    if (!this.position) return null;
+    const p = this.position;
+    const q = Number(quote);
+    const u = this.unrealized(p, q);
+    const demoPnl = Number(demoInfo.demoPnl || 0);
+    const trade = {
+      ...p,
+      exit: q,
+      closedAt: Date.now(),
+      pnl: Number(u.pnl.toFixed(4)),
+      r: Number(u.r.toFixed(4)),
+      demoPnl,
+      peakDemoPnl: Number(demoInfo.peakProfit ?? p.demo?.peakProfit ?? 0),
+      troughDemoPnl: Number(demoInfo.troughProfit ?? p.demo?.troughProfit ?? 0),
+      exitSignalDemoPnl: Number(demoInfo.exitSignalDemoPnl ?? 0),
+      demoSoldFor: demoInfo.soldFor != null ? Number(demoInfo.soldFor) : null,
+      demoSellAt: demoInfo.sellAt || Date.now(),
+      reason,
+      exitContext: slimMountain(this.latestMountain)
+    };
+    this.trades += 1;
+    if (demoPnl > 0) this.wins += 1; else this.losses += 1;
+    this.demoPnl = Number((this.demoPnl + demoPnl).toFixed(4));
+    this.modelPnl = Number((this.modelPnl + trade.pnl).toFixed(4));
+    this.lastCloseEpoch = Number(this.ticks.at(-1)?.epoch || this.lastCloseEpoch);
+    this.position = null;
+    return trade;
+  }
+
+  snapshot() {
+    return {
+      position: this.position,
+      lastCloseEpoch: this.lastCloseEpoch,
+      usedEntryKeys: this.usedEntryKeys,
+      trades: this.trades,
+      wins: this.wins,
+      losses: this.losses,
+      winRate: this.trades ? Number((this.wins / this.trades * 100).toFixed(1)) : 0,
+      demoPnl: this.demoPnl,
+      modelPnl: this.modelPnl,
+      mountain: slimMountain(this.latestMountain),
+      lastSignal: this.lastSignal,
+      grab: GRAB
+    };
+  }
+}
+
+class DerivDemoBroker {
+  constructor({ onForcedClose }) {
+    this.onForcedClose = onForcedClose;
+    this.ws = null;
+    this.account = null;
+    this.currency = 'USD';
+    this.creds = null;
+    this.pending = new Map();
+    this.req = 3000;
+    this.live = null;
+    this.proposals = { LONG: null, SHORT: null };
+    this.pingTimer = null;
+    this.lastTiming = null;
+  }
+
+  async verifyDemoAccount() {
+    const creds = readJson(CREDS_PATH, null);
+    if (!creds?.appId || !creds?.token || !creds?.accountId) throw new Error(`Missing Demo credentials in ${CREDS_PATH}`);
+    const r = await fetch('https://api.derivws.com/trading/v1/options/accounts', {
+      headers: { 'Deriv-App-ID': String(creds.appId), Authorization: `Bearer ${creds.token}`, Accept: 'application/json' }
+    });
+    const text = await r.text();
+    let j; try { j = JSON.parse(text); } catch { throw new Error(`Account API returned non-JSON: ${text.slice(0, 120)}`); }
+    if (!r.ok) throw new Error(j?.errors?.[0]?.message || `Account check failed ${r.status}`);
+    const rows = Array.isArray(j.data) ? j.data : [j.data].filter(Boolean);
+    const account = rows.find(a => String(a.account_id) === String(creds.accountId));
+    if (!account) throw new Error('Configured Demo account was not returned by Deriv.');
+    if (String(account.account_type || '').toLowerCase() === 'real') throw new Error('REFUSED: configured account is REAL. MOUNTAIN GRAB is permanently Demo-only.');
+    this.creds = creds;
+    this.account = account;
+    this.currency = account.currency || 'USD';
+    console.log(`[MOUNTAIN GRAB] verified DEMO ${account.account_id} · ${this.currency} ${account.balance}`);
+  }
+
+  async otpUrl() {
+    const r = await fetch(`https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(this.creds.accountId)}/otp`, {
+      method: 'POST', headers: { 'Deriv-App-ID': String(this.creds.appId), Authorization: `Bearer ${this.creds.token}` }
+    });
+    const text = await r.text();
+    let j; try { j = JSON.parse(text); } catch { throw new Error(`OTP API returned non-JSON: ${text.slice(0, 120)}`); }
+    if (!r.ok || !j?.data?.url) throw new Error(j?.errors?.[0]?.message || `OTP failed ${r.status}`);
+    return j.data.url;
+  }
+
+  request(payload, timeoutMs = 12000, timed = false) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Demo trading socket is not open'));
+    const req_id = ++this.req;
+    return new Promise((resolve, reject) => {
+      const sentPerf = performance.now();
+      const timeout = setTimeout(() => { this.pending.delete(req_id); reject(new Error(`Deriv request timeout: ${Object.keys(payload)[0]}`)); }, timeoutMs);
+      this.pending.set(req_id, { resolve, reject, timeout, sentPerf, timed });
+      this.ws.send(JSON.stringify({ ...payload, req_id }));
+    });
+  }
+
+  async connect() {
+    const url = await this.otpUrl();
+    await new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      const timeout = setTimeout(() => reject(new Error('Authenticated Demo WebSocket timeout')), 15000);
+      ws.once('open', () => { clearTimeout(timeout); this.ws = ws; resolve(); });
+      ws.once('error', e => { clearTimeout(timeout); reject(e); });
+    });
+    this.ws.on('message', raw => this.onMessage(raw));
+    this.ws.on('error', e => console.error('[MOUNTAIN GRAB WS]', e.message));
+    this.ws.on('close', () => { console.error('[MOUNTAIN GRAB] trading socket closed. systemd will restart.'); setTimeout(() => process.exit(2), 250); });
+    this.pingTimer = setInterval(() => { try { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ ping: 1 })); } catch {} }, 25000);
+    await this.request({ balance: 1, subscribe: 1 }).catch(() => null);
+    await Promise.allSettled([this.seedProposal('LONG'), this.seedProposal('SHORT')]);
+    console.log('[MOUNTAIN GRAB] ✅ authenticated socket + hot LONG/SHORT proposals ready');
+  }
+
+  proposalPayload(side, subscribe = 0) {
+    return {
+      proposal: 1, amount: STAKE, basis: 'stake', contract_type: side === 'LONG' ? 'MULTUP' : 'MULTDOWN',
+      currency: this.currency, duration_unit: 's', multiplier: MULTIPLIER, underlying_symbol: SYMBOL,
+      ...(subscribe ? { subscribe: 1 } : {})
+    };
+  }
+
+  cacheProposal(side, msg) {
+    const p = msg?.proposal;
+    if (!p?.id) return;
+    this.proposals[side] = {
+      id: p.id, ask: Number(p.ask_price ?? STAKE), spot: Number(p.spot ?? p.spot_price ?? NaN), receivedAt: Date.now()
+    };
+  }
+
+  async seedProposal(side) {
+    const msg = await this.request(this.proposalPayload(side, 1));
+    this.cacheProposal(side, msg);
+  }
+
+  onMessage(raw) {
+    let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
+    if (msg.req_id && this.pending.has(msg.req_id)) {
+      const p = this.pending.get(msg.req_id);
+      this.pending.delete(msg.req_id); clearTimeout(p.timeout);
+      if (msg.error) p.reject(new Error(`${msg.error.code || 'DerivError'}: ${msg.error.message || 'request failed'}`));
+      else if (p.timed) p.resolve({ msg, sentPerf: p.sentPerf, ackPerf: performance.now() });
+      else p.resolve(msg);
+    }
+    if (msg.msg_type === 'balance' && msg.balance && this.account) this.account.balance = Number(msg.balance.balance);
+    if (msg.msg_type === 'proposal' && msg.proposal) {
+      const ct = String(msg.echo_req?.contract_type || '').toUpperCase();
+      if (ct === 'MULTUP') this.cacheProposal('LONG', msg);
+      if (ct === 'MULTDOWN') this.cacheProposal('SHORT', msg);
+    }
+    if (msg.msg_type !== 'proposal_open_contract' || !msg.proposal_open_contract || !this.live) return;
+    const c = msg.proposal_open_contract;
+    if (String(c.contract_id || '') !== String(this.live.contractId)) return;
+    this.live.lastProfit = Number(c.profit || 0);
+    this.live.peakProfit = Math.max(Number(this.live.peakProfit ?? 0), this.live.lastProfit);
+    this.live.troughProfit = Math.min(Number(this.live.troughProfit ?? 0), this.live.lastProfit);
+    const entrySpot = Number(c.entry_tick ?? c.entry_spot ?? NaN);
+    if (Number.isFinite(entrySpot)) this.live.entrySpot = entrySpot;
+    const closed = Boolean(c.is_sold) || ['sold','won','lost'].includes(String(c.status || '').toLowerCase());
+    if (!closed || this.live.closing) return;
+    const finished = this.live; this.live = null;
+    Promise.resolve(this.onForcedClose?.({
+      demoPnl: Number(c.profit || finished.lastProfit || 0), soldFor: Number(c.sell_price || 0), sellAt: Date.now(),
+      peakProfit: Number(finished.peakProfit || 0), troughProfit: Number(finished.troughProfit || 0),
+      exitSignalDemoPnl: Number(finished.lastProfit || 0), reason: `DERIV ${String(c.status || 'CLOSED').toUpperCase()}`
+    })).catch(e => console.error('[MOUNTAIN GRAB] forced-close handler:', e.message));
+  }
+
+  async portfolio() {
+    const msg = await this.request({ portfolio: 1 });
+    const rows = Array.isArray(msg?.portfolio?.contracts) ? msg.portfolio.contracts : [];
+    return rows;
+  }
+
+  async restore(position) {
+    const id = position?.demo?.contractId;
+    if (!id) return false;
+    this.live = { ...position.demo, contractId: id, lastProfit: Number(position.demo.lastProfit || 0), peakProfit: Number(position.demo.peakProfit || 0), troughProfit: Number(position.demo.troughProfit || 0), closing: false };
+    await this.request({ proposal_open_contract: 1, contract_id: Number(id), subscribe: 1 });
+    console.log(`[MOUNTAIN GRAB] restored Demo contract ${id}`);
+    return true;
+  }
+
+  currentProfit() { return Number(this.live?.lastProfit || 0); }
+
+  async buy(candidate) {
+    if (this.live) throw new Error('ONE CONTRACT RULE: a Demo contract is already open.');
+    const side = candidate.side;
+    let cached = this.proposals[side];
+    let source = 'HOT';
+
+    if (!cached?.id || Date.now() - cached.receivedAt > PROPOSAL_MAX_AGE_MS) {
+      source = 'FRESH';
+      const p = await this.request(this.proposalPayload(side, 0));
+      this.cacheProposal(side, p);
+      cached = this.proposals[side];
+    }
+    if (!cached?.id) throw new Error('No valid multiplier proposal id.');
+
+    let timedBuy;
+    try {
+      timedBuy = await this.request({ buy: cached.id, price: Number.isFinite(cached.ask) ? cached.ask : STAKE }, 12000, true);
+    } catch (e) {
+      source = 'RETRY';
+      const p = await this.request(this.proposalPayload(side, 0));
+      this.cacheProposal(side, p);
+      cached = this.proposals[side];
+      timedBuy = await this.request({ buy: cached.id, price: Number.isFinite(cached.ask) ? cached.ask : STAKE }, 12000, true);
+    }
+
+    const bought = timedBuy.msg?.buy;
+    if (!bought?.contract_id) throw new Error('Buy returned no contract id.');
+    const signalPerf = Number(candidate.signalPerf || timedBuy.sentPerf);
+    const signalToSendMs = Math.max(0, timedBuy.sentPerf - signalPerf);
+    const sendToAckMs = Math.max(0, timedBuy.ackPerf - timedBuy.sentPerf);
+    const signalToAckMs = Math.max(0, timedBuy.ackPerf - signalPerf);
+
+    this.live = {
+      contractId: bought.contract_id, side, stake: STAKE, multiplier: MULTIPLIER,
+      buyPrice: Number(bought.buy_price ?? cached.ask ?? STAKE), proposalSource: source,
+      signalAt: Date.now() - signalToAckMs, buyAt: Date.now(), signalQuote: candidate.signalQuote,
+      proposalSpot: Number(cached.spot), signalToSendMs, sendToAckMs, signalToAckMs,
+      tickToSignalMs: Number(candidate.tickToSignalMs || 0), entrySpot: null,
+      lastProfit: 0, peakProfit: 0, troughProfit: 0, closing: false
+    };
+    this.lastTiming = { signalToSendMs, sendToAckMs, signalToAckMs, source, side, at: Date.now() };
+    await this.request({ proposal_open_contract: 1, contract_id: Number(this.live.contractId), subscribe: 1 })
+      .catch(e => console.error('[MOUNTAIN GRAB] monitor subscribe:', e.message));
+    // Re-seed the consumed side immediately for the NEXT signal, not this one.
+    this.seedProposal(side).catch(e => console.error('[MOUNTAIN GRAB] proposal reseed:', e.message));
+    console.log(`[MOUNTAIN GRAB] 🎯 BOUGHT ${side} · ${candidate.entryMode} · confirm ${candidate.entryConfirmation}/6 · signal→send ${signalToSendMs.toFixed(1)}ms · send→ack ${sendToAckMs.toFixed(1)}ms · ${source}`);
+    return { ...this.live };
+  }
+
+  async sell(reason) {
+    if (!this.live) throw new Error('No live Demo contract to sell.');
+    const live = this.live;
+    live.closing = true;
+    const exitSignalDemoPnl = Number(live.lastProfit || 0);
+    try {
+      const r = await this.request({ sell: Number(live.contractId), price: 0 });
+      const sold = r.sell;
+      const soldFor = Number(sold?.sold_for || 0);
+      const demoPnl = Number((soldFor - Number(live.buyPrice || live.stake || 0)).toFixed(4));
+      if (sold?.balance_after != null && this.account) this.account.balance = Number(sold.balance_after);
+      this.live = null;
+      console.log(`[MOUNTAIN GRAB] ✅ SOLD · ${reason} · signal P/L ${exitSignalDemoPnl >= 0 ? '+' : ''}$${exitSignalDemoPnl.toFixed(2)} · realised ${demoPnl >= 0 ? '+' : ''}$${demoPnl.toFixed(2)}`);
+      return {
+        demoPnl, soldFor, sellAt: Date.now(), peakProfit: Number(live.peakProfit || 0), troughProfit: Number(live.troughProfit || 0), exitSignalDemoPnl
+      };
+    } catch (e) {
+      live.closing = false;
+      throw e;
+    }
+  }
+
+  close() { clearInterval(this.pingTimer); try { this.ws?.close(); } catch {} }
+}
+
+class PublicMarketFeed {
+  constructor({ onHistory, onTick }) {
+    this.onHistory = onHistory; this.onTick = onTick; this.ws = null; this.subscriptionId = null;
+    this.reconnectAttempt = 0; this.manual = false; this.primed = false; this.pendingTicks = [];
+  }
+  connect() {
+    this.manual = false;
+    const ws = new WebSocket(PUBLIC_WS); this.ws = ws;
+    ws.on('open', () => {
+      this.reconnectAttempt = 0;
+      ws.send(JSON.stringify({ ticks_history: SYMBOL, count: HISTORY_COUNT, end: 'latest', style: 'ticks', req_id: 1 }));
+      ws.send(JSON.stringify({ ticks: SYMBOL, subscribe: 1, req_id: 2 }));
+      console.log(`[MOUNTAIN FEED] connected ${SYMBOL}; loading ${HISTORY_COUNT} ticks`);
+    });
+    ws.on('message', raw => this.handle(raw));
+    ws.on('error', e => console.error('[MOUNTAIN FEED]', e.message));
+    ws.on('close', () => {
+      this.ws = null; if (this.manual) return;
+      const delay = Math.min(15000, 800 * (2 ** Math.min(this.reconnectAttempt++, 5)));
+      console.error(`[MOUNTAIN FEED] disconnected; retry in ${delay}ms`); setTimeout(() => this.connect(), delay);
+    });
+  }
+  async handle(raw) {
+    let d; try { d = JSON.parse(String(raw)); } catch { return; }
+    if (d.error) { console.error('[MOUNTAIN FEED] Deriv error:', d.error.message || d.error.code); return; }
+    if (d.msg_type === 'history' && d.history) {
+      const rows = (d.history.prices || []).map((quote, i) => ({ epoch: Number((d.history.times || [])[i]), quote: Number(quote) }));
+      await this.onHistory(rows); this.primed = true;
+      console.log(`[MOUNTAIN FEED] ✅ primed ${rows.length} ticks`);
+      const queued = this.pendingTicks.splice(0); for (const t of queued) await this.onTick(t.epoch, t.quote, t.receivedPerf);
+      return;
+    }
+    if (d.msg_type === 'tick' && d.tick) {
+      this.subscriptionId = d.subscription?.id || this.subscriptionId;
+      const row = { epoch: Number(d.tick.epoch), quote: Number(d.tick.quote), receivedPerf: performance.now() };
+      if (!this.primed) this.pendingTicks.push(row); else await this.onTick(row.epoch, row.quote, row.receivedPerf);
+    }
+  }
+  close() { this.manual = true; try { this.ws?.close(); } catch {} }
+}
+
+const persisted = readJson(STATE_PATH, {});
+const engine = new MountainGrabEngine(persisted?.SANI_MOUNTAIN_GRAB || persisted || {});
+let broker;
+let feed;
+let latestQuote = null;
+let tickChain = Promise.resolve();
+let writing = false;
+let lastEvent = 'STARTING';
+
+function persistState() {
+  if (writing) return;
+  writing = true;
+  try {
+    writeJson(STATE_PATH, { version: 3, updatedAt: now(), SANI_MOUNTAIN_GRAB: engine.snapshot() });
+  } finally { writing = false; }
+}
+
+function writeStatus(extra = {}) {
+  const s = engine.snapshot();
+  const p = s.position;
+  const live = broker?.live;
+  const actualPnl = Number(live?.lastProfit || 0);
+  const position = p ? {
+    contractId: p.demo?.contractId || live?.contractId || null,
+    side: p.side, entryMode: p.entryMode, entryConfirmation: p.entryConfirmation,
+    signalEpoch: p.signalEpoch, signalQuote: p.signalQuote,
+    entry: p.entry, stop: p.stop, trailStop: p.trailStop, target: p.target,
+    targetR: p.targetR, bestR: p.bestR, lockedR: p.lockedR,
+    actualPnl, peakActualPnl: Number(live?.peakProfit || 0), troughActualPnl: Number(live?.troughProfit || 0),
+    actualEntrySpot: live?.entrySpot ?? p.demo?.entrySpot ?? null,
+    proposalSource: live?.proposalSource || p.demo?.proposalSource || '',
+    signalToSendMs: live?.signalToSendMs ?? p.demo?.signalToSendMs ?? null,
+    sendToAckMs: live?.sendToAckMs ?? p.demo?.sendToAckMs ?? null,
+    signalToAckMs: live?.signalToAckMs ?? p.demo?.signalToAckMs ?? null,
+    tickToSignalMs: live?.tickToSignalMs ?? p.demo?.tickToSignalMs ?? null
+  } : null;
+  writeJson(STATUS_PATH, {
+    checkedAt: now(), architecture: 'NATIVE_VM_V3_MOUNTAIN_GRAB', demoOnly: true,
+    accountId: broker?.account?.account_id || null, balance: Number(broker?.account?.balance || 0), currency: broker?.currency || 'USD',
+    symbol: SYMBOL, stake: STAKE, multiplier: MULTIPLIER,
+    oneContractRule: true, browserDependency: false, vercelExecutionDependency: false,
+    lastEvent, lastTiming: broker?.lastTiming || null,
+    SANI_MOUNTAIN_GRAB: {
+      live: position, trades: s.trades, wins: s.wins, losses: s.losses, winRate: s.winRate,
+      realized: s.demoPnl, modelRealized: s.modelPnl, mountain: s.mountain, lastSignal: s.lastSignal, grab: GRAB
+    },
+    ...extra
+  }, 0o644);
+}
+
+async function forcedClose(info) {
+  if (!engine.position) return;
+  const quote = Number(latestQuote ?? engine.ticks.at(-1)?.quote ?? engine.position.entry);
+  const trade = engine.commitExit(info.reason || 'DERIV CLOSED', quote, info);
+  if (trade) appendTradeCsv(trade);
+  persistState(); lastEvent = `FORCED CLOSE ${trade?.reason || ''}`; writeStatus();
+}
+
+async function processTick(epoch, quote, tickReceivedPerf = performance.now()) {
+  latestQuote = Number(quote);
+  const intent = engine.onTick(epoch, quote, tickReceivedPerf);
+  if (!intent) { writeStatus(); return; }
+
+  if (intent.action === 'ENTRY') {
+    try {
+      // No status write, no console log, no extra confirmation before the order leaves.
+      const live = await broker.buy(intent.candidate);
+      engine.commitEntry(intent.candidate, live);
+      lastEvent = `ENTRY ${intent.candidate.side} ${intent.candidate.entryMode}`;
+      persistState(); writeStatus();
+    } catch (e) {
+      lastEvent = `ENTRY REJECTED ${e.message}`;
+      console.error('[MOUNTAIN GRAB] ENTRY rejected:', e.message); writeStatus();
+    }
+    return;
+  }
+
+  if (intent.action === 'EXIT') {
+    try {
+      const info = await broker.sell(intent.reason);
+      const trade = engine.commitExit(intent.reason, intent.quote, info);
+      if (trade) appendTradeCsv(trade);
+      lastEvent = `EXIT ${intent.reason}`;
+      persistState(); writeStatus();
+    } catch (e) {
+      lastEvent = `EXIT FAILED ${e.message}`;
+      console.error('[MOUNTAIN GRAB] EXIT failed, position remains live:', e.message); writeStatus();
+    }
+  }
+}
+
+async function main() {
+  if (!fs.existsSync(CREDS_PATH)) throw new Error(`Missing ${CREDS_PATH}.`);
+  broker = new DerivDemoBroker({ onForcedClose: forcedClose });
+  await broker.verifyDemoAccount();
+  await broker.connect();
+
+  const portfolio = await broker.portfolio();
+  const persistedId = engine.position?.demo?.contractId ? String(engine.position.demo.contractId) : null;
+  const foreign = portfolio.filter(c => String(c.contract_id || '') !== persistedId);
+  if (foreign.length) throw new Error(`REFUSED: Demo account already has ${foreign.length} open contract(s) not owned by MOUNTAIN GRAB. Close them before starting V3.`);
+  if (persistedId) {
+    const exists = portfolio.some(c => String(c.contract_id || '') === persistedId);
+    if (exists) await broker.restore(engine.position);
+    else { console.log('[MOUNTAIN GRAB] stale persisted position cleared because Deriv portfolio is flat.'); engine.position = null; persistState(); }
+  }
+
+  feed = new PublicMarketFeed({
+    onHistory: async rows => { engine.prime(rows); persistState(); writeStatus({ lastEvent: 'HISTORY PRIMED' }); },
+    onTick: async (epoch, quote, receivedPerf) => {
+      tickChain = tickChain.then(() => processTick(epoch, quote, receivedPerf)).catch(e => console.error('[MOUNTAIN GRAB] tick:', e.message));
+      return tickChain;
+    }
+  });
+  feed.connect();
+
+  console.log('================================================');
+  console.log(' SANI NATIVE V3 · MOUNTAIN GRAB IS RUNNING');
+  console.log(' ENTRY = ACTUAL MOUNTAIN SIGNAL, SAME TICK EVENT');
+  console.log('   PRE_PULLBACK_END = first 3/6 confirmation');
+  console.log('   PULLBACK_END / EARLY_MOMENTUM also valid');
+  console.log(' EXIT = GRAB ONLY');
+  console.log('   TP 0.80R · protect .35R→+.05R · .58R→+.25R · structural trail from .60R');
+  console.log(' NO SPEED APPETITE · NO REVERSAL EXIT · NO EXHAUSTION CASHOUT');
+  console.log(' DERIV = DEMO ONLY · ONE CONTRACT · Browser/Vercel = NONE');
+  console.log('================================================');
+  lastEvent = 'V3 STARTED'; writeStatus();
+}
+
+async function shutdown(signal) {
+  console.log(`[MOUNTAIN GRAB] ${signal}; saving state and closing sockets.`);
+  persistState(); writeStatus({ stoppedAt: now(), stopSignal: signal });
+  feed?.close(); broker?.close(); setTimeout(() => process.exit(0), 100);
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('uncaughtException', e => { console.error('[MOUNTAIN GRAB FATAL]', e); process.exit(1); });
+process.on('unhandledRejection', e => { console.error('[MOUNTAIN GRAB REJECTION]', e); process.exit(1); });
+
+main().catch(e => { console.error('[MOUNTAIN GRAB FATAL]', e.message); process.exit(1); });
