@@ -13,7 +13,7 @@ const money=v=>`${Number(v||0)>=0?'+':'-'}$${Math.abs(Number(v||0)).toFixed(2)}`
 const cm=v=>`${Number(v||0)>=0?A.green:A.red}${money(v)}${A.reset}`;
 const pad=(s,n)=>{s=String(s??'');return s.length>=n?s.slice(0,n):s+' '.repeat(n-s.length)};
 function parseCsvLine(line){const out=[];let s='',q=false;for(let i=0;i<line.length;i++){const c=line[i];if(c==='"'){if(q&&line[i+1]==='"'){s+='"';i++}else q=!q}else if(c===','&&!q){out.push(s);s=''}else s+=c}out.push(s);return out}
-function recentTrades(n=10){try{const lines=fs.readFileSync(CSV_PATH,'utf8').trim().split(/\r?\n/);if(lines.length<2)return[];const h=parseCsvLine(lines[0]);return lines.slice(-n).reverse().map(line=>{const v=parseCsvLine(line),r={};h.forEach((k,i)=>r[k]=v[i]);return r})}catch{return[]}}
+function recentTrades(n=10){try{const lines=fs.readFileSync(CSV_PATH,'utf8').trim().split(/\r?\n/);if(lines.length<2)return[];const h=parseCsvLine(lines[0]);return lines.slice(1).slice(-n).reverse().map(line=>{const v=parseCsvLine(line),r={};h.forEach((k,i)=>r[k]=v[i]);return r})}catch{return[]}}
 function shortMode(m){return String(m||'').replaceAll('_',' ')}
 function render(){
   const s=readJson(STATUS_PATH,null);console.clear();
