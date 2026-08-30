@@ -70,8 +70,9 @@ async function callOpenRouter(apiKey, body, headers) {
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
-  const apiKey = process.env.OPENROUTER_API_KEY || process.env.NANA_OPENROUTER_API_KEY;
-  if (!apiKey) return res.status(503).json({ error: 'OPENROUTER_API_KEY is not configured on the deployment.' });
+  const sessionKey = String(req.headers?.['x-nana-openrouter-key'] || '').trim();
+  const apiKey = sessionKey || process.env.OPENROUTER_API_KEY || process.env.NANA_OPENROUTER_API_KEY;
+  if (!apiKey) return res.status(503).json({ error: 'Nana needs an OpenRouter API key on the Power Up page.' });
 
   const { model = process.env.NANA_OPENROUTER_MODEL || 'openrouter/auto', market, config, position, recentJudgments = [] } = req.body || {};
   if (!market || !Array.isArray(market.ticks) || market.ticks.length < 20) return res.status(400).json({ error: 'Nana needs at least 20 recent ticks.' });
