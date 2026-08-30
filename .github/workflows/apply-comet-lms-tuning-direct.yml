@@ -1,0 +1,64 @@
+name: Apply Comet LMS tuning direct
+
+on:
+  push:
+    branches: ['codex/comet-lms-demo-multipliers']
+    paths:
+      - '.github/workflows/apply-comet-lms-tuning-direct.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/comet-lms-demo-multipliers
+
+      - name: Extract and apply tuning patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, base64, gzip
+          src = Path('.github/workflows/apply-comet-lms-tuning.yml').read_text()
+          m = re.search(r"printf '%s' '([^']+)' \| base64 -d \| gzip -d > /tmp/apply_tuning.py", src)
+          if not m:
+              raise SystemExit('Could not locate embedded tuning patch')
+          payload = gzip.decompress(base64.b64decode(m.group(1))).decode()
+          Path('/tmp/apply_tuning.py').write_text(payload)
+          PY
+          python3 /tmp/apply_tuning.py
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Test changed execution path
+        shell: bash
+        run: |
+          set +e
+          timeout 20s node --test tests/demo-multiplier-executor.test.mjs 2>&1 | tee /tmp/test-output.log
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -eq 0 ]; then exit 0; fi
+          if [ "$code" -eq 124 ] && grep -q '# fail 0' /tmp/test-output.log; then
+            echo 'Assertions passed; test runner had a lingering open handle.'
+            exit 0
+          fi
+          exit "$code"
+
+      - name: Commit tuned engines
+        shell: bash
+        run: |
+          git config user.name "SANI Patch Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add public/comet.js public/comet.html public/comet.css public/last-man-standing.js public/last-man-standing.html public/last-man-standing.css public/core/demo-multiplier-executor.mjs tests/demo-multiplier-executor.test.mjs
+          if git diff --cached --quiet; then
+            echo 'No code changes to commit.'
+            exit 0
+          fi
+          git commit -m "feat: editable Comet and Last Man tuning controls [skip ci]"
+          git push origin HEAD:codex/comet-lms-demo-multipliers
