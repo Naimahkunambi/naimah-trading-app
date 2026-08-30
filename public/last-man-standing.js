@@ -8,11 +8,15 @@ const KEY = 'sani.last-man-standing.paper.v1';
 const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
 const MAX_TICKS = 5000;
 const HISTORY_COUNT = 1200;
-const MODES = {
-  GRAB: { label: 'GRAB', minPower: 45, riskFraction: .40, targetR: .80, protectAt: .35, lockR: .05, trailAt: .60 },
-  CRUISE: { label: 'CRUISE', minPower: 60, riskFraction: .70, targetR: 1.60, protectAt: .65, lockR: .08, trailAt: 1.05 },
-  LAST_MAN: { label: 'LAST MAN', minPower: 75, riskFraction: 1.00, targetR: 3.00, protectAt: 1.00, lockR: .10, trailAt: 1.75 }
-};
+const TUNE_KEY = 'sani.last-man-standing.tuning.v1';
+const DEFAULT_MODES = Object.freeze({
+  GRAB: Object.freeze({ label: 'GRAB', minPower: 45, riskFraction: .40, targetR: .80, protectAt: .35, lockR: .05, trailAt: .60 }),
+  CRUISE: Object.freeze({ label: 'CRUISE', minPower: 60, riskFraction: .70, targetR: 1.60, protectAt: .65, lockR: .08, trailAt: 1.05 }),
+  LAST_MAN: Object.freeze({ label: 'LAST MAN', minPower: 75, riskFraction: 1.00, targetR: 3.00, protectAt: 1.00, lockR: .10, trailAt: 1.75 })
+});
+const DEFAULT_TUNING = Object.freeze({ stopLoss: 1, stopSteps: 6, entryStrategy: 'BALANCED', exitStrategy: 'BALANCED' });
+let tuning = loadTuning();
+let MODES = tuning.modes;
 
 let ws = null;
 let subscriptionId = null;
@@ -45,6 +49,167 @@ function loadSession() {
   catch { return freshSession(); }
 }
 function save() { try { localStorage.setItem(KEY, JSON.stringify(session)); } catch {} }
+function freshTuning() {
+  return {
+    ...DEFAULT_TUNING,
+    modes: Object.fromEntries(Object.entries(DEFAULT_MODES).map(([key, value]) => [key, { ...value }]))
+  };
+}
+function loadTuning() {
+  try {
+    const base = freshTuning();
+    const saved = JSON.parse(localStorage.getItem(TUNE_KEY) || 'null') || {};
+    return {
+      ...base, ...saved,
+      modes: Object.fromEntries(Object.keys(base.modes).map(key => [key, { ...base.modes[key], ...(saved.modes?.[key] || {}) }]))
+    };
+  } catch { return freshTuning(); }
+}
+function saveTuning() { try { localStorage.setItem(TUNE_KEY, JSON.stringify(tuning)); } catch {} }
+function lmsTuneNumber(id, fallback, min, max) {
+  const value = Number($(id)?.value);
+  return clamp(Number.isFinite(value) ? value : fallback, min, max);
+}
+function modeFieldIds(key) {
+  const prefix = key === 'LAST_MAN' ? 'lastMan' : key.toLowerCase();
+  return {
+    minPower: `${prefix}MinPower`, stakePct: `${prefix}StakePct`, targetR: `${prefix}TargetR`,
+    protectAt: `${prefix}ProtectAt`, trailAt: `${prefix}TrailAt`
+  };
+}
+function syncLmsTuningUi() {
+  if ($('lmsStopLoss')) $('lmsStopLoss').value = tuning.stopLoss;
+  if ($('lmsStopSteps')) $('lmsStopSteps').value = tuning.stopSteps;
+  if ($('lmsEntryStrategy')) $('lmsEntryStrategy').value = tuning.entryStrategy;
+  if ($('lmsExitStrategy')) $('lmsExitStrategy').value = tuning.exitStrategy;
+  for (const key of Object.keys(MODES)) {
+    const ids = modeFieldIds(key), cfg = MODES[key];
+    if ($(ids.minPower)) $(ids.minPower).value = cfg.minPower;
+    if ($(ids.stakePct)) $(ids.stakePct).value = Math.round(cfg.riskFraction * 100);
+    if ($(ids.targetR)) $(ids.targetR).value = cfg.targetR;
+    if ($(ids.protectAt)) $(ids.protectAt).value = cfg.protectAt;
+    if ($(ids.trailAt)) $(ids.trailAt).value = cfg.trailAt;
+  }
+}
+function readLmsTuningUi() {
+  tuning.stopLoss = lmsTuneNumber('lmsStopLoss', tuning.stopLoss, 0.1, 10000);
+  tuning.stopSteps = Math.round(lmsTuneNumber('lmsStopSteps', tuning.stopSteps, 2, 30));
+  tuning.entryStrategy = $('lmsEntryStrategy')?.value || tuning.entryStrategy;
+  tuning.exitStrategy = $('lmsExitStrategy')?.value || tuning.exitStrategy;
+  for (const key of Object.keys(MODES)) {
+    const ids = modeFieldIds(key), cfg = MODES[key];
+    cfg.minPower = Math.round(lmsTuneNumber(ids.minPower, cfg.minPower, 1, 100));
+    cfg.riskFraction = lmsTuneNumber(ids.stakePct, cfg.riskFraction * 100, 5, 100) / 100;
+    cfg.targetR = lmsTuneNumber(ids.targetR, cfg.targetR, 0.25, 8);
+    cfg.protectAt = lmsTuneNumber(ids.protectAt, cfg.protectAt, 0.05, 8);
+    cfg.trailAt = Math.max(cfg.protectAt, lmsTuneNumber(ids.trailAt, cfg.trailAt, 0.05, 8));
+  }
+  tuning.modes = MODES;
+  saveTuning(); syncLmsTuningUi(); renderAll();
+}
+function lmsEntryAllowed(m) {
+  if (tuning.entryStrategy === 'PULLBACK_ONLY') return m?.entryMode === 'PULLBACK_END';
+  if (tuning.entryStrategy === 'MOMENTUM_ONLY') return m?.entryMode === 'EARLY_MOMENTUM';
+  return ['PULLBACK_END', 'EARLY_MOMENTUM'].includes(m?.entryMode);
+}
+function lmsReversalVotesNeeded() {
+  if (tuning.exitStrategy === 'FAST') return 1;
+  if (tuning.exitStrategy === 'PATIENT') return 3;
+  if (tuning.exitStrategy === 'TARGET_STOP_ONLY') return 999;
+  return 2;
+}
+function setLmsTuneStatus(text) { const el = $('lmsTuneStatus'); if (el) el.textContent = text; }
+function applyLmsTuneCommand(raw) {
+  const text = String(raw || '').trim().toLowerCase();
+  if (!text) return setLmsTuneStatus('Type a change, for example: trailing stop sooner.');
+  const changes = [];
+  const number = rx => { const match = text.match(rx); return match ? Number(match[1]) : null; };
+  let v;
+  let tpSet = false;
+  if ((v = number(/\bstake\b[^0-9]*(\d+(?:\.\d+)?)/)) != null) {
+    $('riskCap').value = clamp(v, 0.1, 10000);
+    changes.push(`max stake $${Number($('riskCap').value).toFixed(2)}`);
+  }
+  if ((v = number(/(?:stop loss|\bsl\b)[^0-9]*(\d+(?:\.\d+)?)/)) != null) {
+    tuning.stopLoss = clamp(v, 0.1, 10000); changes.push(`SL cap $${tuning.stopLoss.toFixed(2)}`);
+  }
+  if ((v = number(/(?:take profit|\btp\b|target r?)[^0-9]*(\d+(?:\.\d+)?)/)) != null) {
+    for (const cfg of Object.values(MODES)) cfg.targetR = clamp(v, 0.25, 8);
+    tpSet = true; changes.push(`all TP = ${v.toFixed(2)}R`);
+  }
+  if (!tpSet && /(?:decrease|lower|reduce|smaller).*(?:tp|take profit|target)|(?:tp|take profit|target).*(?:decrease|lower|reduce|smaller)/.test(text)) {
+    for (const cfg of Object.values(MODES)) cfg.targetR = clamp(cfg.targetR - 0.15, 0.25, 8);
+    changes.push('all mode TP ↓ 0.15R');
+  }
+  if (!tpSet && /(?:increase|raise|higher|bigger).*(?:tp|take profit|target)|(?:tp|take profit|target).*(?:increase|raise|higher|bigger)/.test(text)) {
+    for (const cfg of Object.values(MODES)) cfg.targetR = clamp(cfg.targetR + 0.15, 0.25, 8);
+    changes.push('all mode TP ↑ 0.15R');
+  }
+  if (/trail(?:ing)?(?: stop)?.*(?:sooner|earlier|faster)|(?:sooner|earlier|faster).*trail/.test(text)) {
+    for (const cfg of Object.values(MODES)) {
+      cfg.protectAt = clamp(cfg.protectAt * 0.85, 0.05, 8);
+      cfg.trailAt = clamp(Math.max(cfg.protectAt, cfg.trailAt * 0.85), 0.05, 8);
+    }
+    changes.push('protection + trail moved 15% sooner');
+  }
+  if (/trail(?:ing)?(?: stop)?.*(?:later|slower)|(?:later|slower).*trail/.test(text)) {
+    for (const cfg of Object.values(MODES)) {
+      cfg.protectAt = clamp(cfg.protectAt * 1.15, 0.05, 8);
+      cfg.trailAt = clamp(Math.max(cfg.protectAt, cfg.trailAt * 1.15), 0.05, 8);
+    }
+    changes.push('protection + trail moved 15% later');
+  }
+  if (/(?:tighter|closer).*(?:sl|stop)|(?:sl|stop).*(?:tighter|closer)/.test(text)) {
+    tuning.stopSteps = Math.max(2, tuning.stopSteps - 1); changes.push(`stop width ${tuning.stopSteps} steps`);
+  }
+  if (/(?:wider|looser).*(?:sl|stop)|(?:sl|stop).*(?:wider|looser)/.test(text)) {
+    tuning.stopSteps = Math.min(30, tuning.stopSteps + 1); changes.push(`stop width ${tuning.stopSteps} steps`);
+  }
+  if (/entry.*(?:strict|pullback)|(?:strict|pullback).*entry/.test(text)) {
+    tuning.entryStrategy = 'PULLBACK_ONLY'; changes.push('entry = pullback only');
+  }
+  if (/entry.*(?:momentum|early)|(?:momentum|early).*entry/.test(text)) {
+    tuning.entryStrategy = 'MOMENTUM_ONLY'; changes.push('entry = early momentum only');
+  }
+  if (/entry.*(?:balanced|normal)|(?:balanced|normal).*entry/.test(text)) {
+    tuning.entryStrategy = 'BALANCED'; changes.push('entry = balanced');
+  }
+  if (/(?:exit|cash).*(?:sooner|earlier|fast)|(?:sooner|earlier|fast).*(?:exit|cash)/.test(text)) {
+    tuning.exitStrategy = 'FAST'; changes.push('exit = fast');
+  }
+  if (/(?:hold|exit).*(?:longer|patient)|(?:longer|patient).*(?:hold|exit)/.test(text)) {
+    tuning.exitStrategy = 'PATIENT'; changes.push('exit = patient');
+  }
+  if (/target.*stop.*only|stop.*target.*only/.test(text)) {
+    tuning.exitStrategy = 'TARGET_STOP_ONLY'; changes.push('exit = target/stop only');
+  }
+  if (/(?:reset|default).*(?:setting|tune|default)|^defaults?$/.test(text)) {
+    tuning = freshTuning(); MODES = tuning.modes; changes.splice(0, changes.length, 'settings reset to Last Man defaults');
+  }
+  tuning.modes = MODES; saveTuning(); syncLmsTuningUi();
+  const summary = changes.length ? changes.join(' · ') : 'No setting changed. Try: “decrease TP”, “trailing stop sooner”, “stake 2”, “SL 0.70”, “entry stricter”, or “hold longer”.';
+  setLmsTuneStatus(summary);
+  if (changes.length) addTape('TUNE', summary);
+  renderAll();
+}
+function resetLmsBot() {
+  auto = false;
+  if (position) closePaperPosition('RESET CLOSE');
+  else if (demoExecutor?.snapshot().contract) void demoExecutor.sell('RESET LAST MAN');
+  session = freshSession();
+  position = null;
+  lastCloseEpoch = 0;
+  requestedMode = 'AUTO';
+  tuning = freshTuning();
+  MODES = tuning.modes;
+  if ($('riskCap')) $('riskCap').value = 1;
+  if ($('goalDollars')) $('goalDollars').value = 650;
+  document.querySelectorAll('[data-mode]').forEach(button => button.classList.toggle('active', button.dataset.mode === 'AUTO'));
+  if ($('modeControlLabel')) $('modeControlLabel').textContent = 'AUTO';
+  saveTuning(); save(); syncLmsTuningUi();
+  setLmsTuneStatus('LAST MAN reset: local results + tuning back to defaults. Deriv account history is untouched.');
+  renderAll();
+}
 function addTape(type, text, extra = {}) {
   session.tape.unshift({ at: Date.now(), type, text, ...extra });
   session.tape = session.tape.slice(0, 700);
@@ -155,7 +320,7 @@ function candidate(m) {
   if (!auto || position || !m?.ready || !['UP', 'DOWN'].includes(m.direction)) return null;
   const direction = m.direction === 'UP' ? 'CALL' : 'PUT';
   const permission = mountainAllows(m, direction);
-  if (!permission.allowed) return null;
+  if (!permission.allowed || !lmsEntryAllowed(m)) return null;
 
   const current = ticks.at(-1), quote = Number(current?.quote), epoch = Number(current?.epoch || 0);
   if (!Number.isFinite(quote) || !epoch || epoch <= lastCloseEpoch) return null;
@@ -170,10 +335,11 @@ function candidate(m) {
   if (hasUsedEntry(key)) return null;
 
   const riskCap = Math.max(.1, Number($('riskCap')?.value || 1));
-  const riskDollars = Number((riskCap * cfg.riskFraction).toFixed(4));
+  const stakeDollars = Number((riskCap * cfg.riskFraction).toFixed(4));
+  const riskDollars = Number(Math.min(stakeDollars, tuning.stopLoss).toFixed(4));
   const step = tickStep();
   const buffer = Math.max(step * 1.25, 1e-9);
-  const minDistance = Math.max(step * 6, 1e-9);
+  const minDistance = Math.max(step * tuning.stopSteps, 1e-9);
   const important = Number(m.important?.quote);
   let stop;
   if (side === 'LONG') {
@@ -189,17 +355,19 @@ function candidate(m) {
   const units = riskDollars / riskDistance;
   return {
     side, mode, currentMode: mode, entryPower: power, currentPower: power, entry: quote, stop, trailStop: stop,
-    target, targetR: cfg.targetR, originalTargetR: cfg.targetR, units, riskDollars, riskCap, openedAt: Date.now(), openedEpoch: epoch,
+    target, targetR: cfg.targetR, originalTargetR: cfg.targetR, units, riskDollars, stakeDollars, riskCap, openedAt: Date.now(), openedEpoch: epoch,
     entryKey: key, bestR: 0, lockedR: -1, reversalVotes: 0, targetExtended: false, entryContext: slimMountain(m), plannedRiskDistance: riskDistance
   };
 }
 function openPosition(c) {
   position = c;
   markEntryUsed(c.entryKey);
-  addTape('ENTRY', `${c.mode} ${c.side} @ ${c.entry.toFixed(2)} · power ${c.entryPower}/100 · risk ${money(c.riskDollars)} · target ${c.targetR.toFixed(2)}R`, { side: c.side, mode: c.mode });
+  addTape('ENTRY', `${c.mode} ${c.side} @ ${c.entry.toFixed(2)} · power ${c.entryPower}/100 · stake ${money(c.stakeDollars)} · SL ${money(c.riskDollars)} · target ${c.targetR.toFixed(2)}R`, { side: c.side, mode: c.mode });
   void demoExecutor?.buy({
     side: c.side,
-    stake: c.riskDollars,
+    stake: c.stakeDollars,
+    stopLoss: c.riskDollars,
+    takeProfit: c.riskDollars * c.targetR,
     targetR: c.targetR,
     multiplier: Number($('lmsMultiplier')?.value || 160),
     symbol: symbol(),
@@ -268,7 +436,7 @@ function managePosition(m) {
 
   const opposite = (p.side === 'LONG' && m.direction === 'DOWN') || (p.side === 'SHORT' && m.direction === 'UP');
   p.reversalVotes = opposite ? Number(p.reversalVotes || 0) + 1 : 0;
-  if (p.reversalVotes >= 2) return closePaperPosition('CONFIRMED MOUNTAIN REVERSAL', q);
+  if (p.reversalVotes >= lmsReversalVotesNeeded()) return closePaperPosition('CONFIRMED MOUNTAIN REVERSAL', q);
 
   // AUTO may promote a live winner when the trend itself becomes stronger.
   // Risk never increases after entry. Only target room and protection cadence adapt.
@@ -282,7 +450,7 @@ function managePosition(m) {
   }
 
   // Strong Last Man runners may earn one more target extension, never by greed alone.
-  if (p.currentMode === 'LAST_MAN' && !p.targetExtended && p.currentPower >= 88 && u.r >= 1.50 && m.direction === p.entryContext.direction) {
+  if (tuning.exitStrategy !== 'FAST' && tuning.exitStrategy !== 'TARGET_STOP_ONLY' && p.currentMode === 'LAST_MAN' && !p.targetExtended && p.currentPower >= 88 && u.r >= 1.50 && m.direction === p.entryContext.direction) {
     p.targetExtended = true; extendTarget(p, 4.00, 'RUNNER BONUS');
   }
 
@@ -309,10 +477,13 @@ function managePosition(m) {
     if (p.side === 'SHORT' && s < p.trailStop && s > q) advanceStop(p, s, 'IMPORTANT LH TRAIL');
   }
 
-  // Greed firewall: when a profitable position loses its trend power, cash or tighten.
-  if (p.currentPower < 42 && u.r >= .45) return closePaperPosition('POWER FADE · CASH OUT', q);
-  if (p.currentPower < 55 && u.r >= .80) advanceStop(p, stopForLockedR(p, Math.max(.35, u.r * .45)), 'POWER FADE LOCK');
-  if (recommended === 'STAND_DOWN' && m.entryMode === 'EXHAUSTION' && u.r >= 1.20) advanceStop(p, stopForLockedR(p, Math.max(.60, u.r * .55)), 'EXHAUSTION LOCK');
+  // Greed firewall is editable through the exit strategy.
+  if (tuning.exitStrategy !== 'TARGET_STOP_ONLY') {
+    const fadeCashR = tuning.exitStrategy === 'FAST' ? .30 : tuning.exitStrategy === 'PATIENT' ? .65 : .45;
+    if (p.currentPower < 42 && u.r >= fadeCashR) return closePaperPosition('POWER FADE · CASH OUT', q);
+    if (p.currentPower < 55 && u.r >= .80) advanceStop(p, stopForLockedR(p, Math.max(.35, u.r * .45)), 'POWER FADE LOCK');
+    if (recommended === 'STAND_DOWN' && m.entryMode === 'EXHAUSTION' && u.r >= 1.20) advanceStop(p, stopForLockedR(p, Math.max(.60, u.r * .55)), 'EXHAUSTION LOCK');
+  }
 }
 
 function ingestTick(epoch, quote, render = true) {
@@ -491,8 +662,28 @@ function exportCsv(){const headers=['closed_at','entry_mode','final_mode','side'
 function installInk(){inkCanvas=$('lmsInk');const c=$('lmsChart');if(!inkCanvas||!c)return;const resize=()=>{const dpr=window.devicePixelRatio||1;inkCanvas.width=Math.round(c.clientWidth*dpr);inkCanvas.height=Math.round(c.clientHeight*dpr)};resize();let drawing=false,last=null;const point=e=>{const r=inkCanvas.getBoundingClientRect();return{x:(e.clientX-r.left)*(inkCanvas.width/r.width),y:(e.clientY-r.top)*(inkCanvas.height/r.height)}};inkCanvas.addEventListener('pointerdown',e=>{if(!inkMode)return;drawing=true;last=point(e);inkCanvas.setPointerCapture(e.pointerId)});inkCanvas.addEventListener('pointermove',e=>{if(!drawing||!inkMode)return;const p=point(e),ctx=inkCanvas.getContext('2d');ctx.strokeStyle=inkColor;ctx.lineWidth=Math.max(3,inkCanvas.width/700);ctx.lineCap='round';ctx.beginPath();ctx.moveTo(last.x,last.y);ctx.lineTo(p.x,p.y);ctx.stroke();last=p});const stop=()=>{drawing=false;last=null};inkCanvas.addEventListener('pointerup',stop);inkCanvas.addEventListener('pointercancel',stop);window.addEventListener('resize',()=>{resize();if(page===1)drawChart(true)})}
 function bindMapTools(){const tools=$('lmsMapTools');if(!tools)return;tools.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.color){inkColor=b.dataset.color;return}const act=b.dataset.act;if(act==='older'){chartFrozen=true;chartOffset=Math.min(Math.max(0,ticks.length-20),chartOffset+Math.max(20,Math.floor(chartViewCount*.55)));drawChart(true)}if(act==='newer'){chartOffset=Math.max(0,chartOffset-Math.max(20,Math.floor(chartViewCount*.55)));if(!chartOffset)chartFrozen=false;drawChart(true)}if(act==='live'){chartOffset=0;chartFrozen=false;drawChart(true)}if(act==='zin'){chartViewCount=Math.max(60,Math.floor(chartViewCount*.75));drawChart(true)}if(act==='zout'){chartViewCount=Math.min(900,Math.floor(chartViewCount*1.35));drawChart(true)}if(act==='freeze'){chartFrozen=!chartFrozen;b.classList.toggle('on',chartFrozen);b.textContent=chartFrozen?'FROZEN':'FREEZE';if(!chartFrozen){chartOffset=0;drawChart(true)}}if(act==='draw'){inkMode=!inkMode;b.classList.toggle('on',inkMode);inkCanvas.classList.toggle('drawOn',inkMode)}if(act==='clear')inkCanvas.getContext('2d').clearRect(0,0,inkCanvas.width,inkCanvas.height);if(act==='png')saveMapPng();if(act==='case')saveTrainingCase()})}
 function setRequestedMode(mode){requestedMode=mode;document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));$('modeControlLabel').textContent=modeDisplay(mode);addTape('MODE',`Control mode set to ${modeDisplay(mode)}. Safety thresholds remain active.`);renderAll()}
-function bind(){document.querySelectorAll('[data-lms-target]').forEach(b=>b.addEventListener('click',()=>switchPage(Number(b.dataset.lmsTarget))));document.querySelectorAll('[data-next]').forEach(b=>b.addEventListener('click',()=>switchPage(page+1)));document.querySelectorAll('[data-prev]').forEach(b=>b.addEventListener('click',()=>switchPage(page-1)));document.querySelectorAll('[data-mode]').forEach(b=>b.addEventListener('click',()=>setRequestedMode(b.dataset.mode)));$('lmsConnect').addEventListener('click',connect);$('lmsDisconnect').addEventListener('click',disconnect);$('lmsLoadAccounts').addEventListener('click',loadAccounts);$('lmsArmDemo').addEventListener('click',armDemoExecution);$('lmsDisarmDemo').addEventListener('click',disarmDemoExecution);$('lmsCloseDemo').addEventListener('click',closeDemoExecution);$('startAuto').addEventListener('click',()=>{auto=true;addTape('SYSTEM',demoExecutor?.snapshot().armed?'AUTO armed · actual Deriv Demo multiplier contracts enabled.':'AUTO PAPER armed · no Deriv transaction will occur until DEMO EXECUTION is armed.');renderAll()});$('pauseAuto').addEventListener('click',()=>{auto=false;addTape('SYSTEM','AUTO PAPER paused.');renderAll()});$('closePosition').addEventListener('click',()=>closePaperPosition('MANUAL CLOSE'));$('resetLms').addEventListener('click',()=>{if(position)closePaperPosition('RESET CLOSE');session=freshSession();position=null;auto=false;lastCloseEpoch=0;save();renderAll()});$('lmsExportCsv').addEventListener('click',exportCsv);['riskCap','goalDollars'].forEach(id=>$(id).addEventListener('input',renderAll));bindMapTools();installInk()}
-function boot(){const id=localStorage.getItem('sani.lms.appId')||localStorage.getItem('sani.comet.appId');if(id)$('lmsAppId').value=id;const tok=sessionStorage.getItem('sani.lms.token')||sessionStorage.getItem('sani.comet.token');if(tok)$('lmsToken').value=tok;demoExecutor=new DemoMultiplierExecutor({engine:'LAST_MAN',onStatus:renderDemoExecution,onEvent:event=>addTape(event.type,event.text,{side:event.side})});bind();switchPage(0);renderAll();setFeedStatus('OFFLINE')}
+function bind(){
+  document.querySelectorAll('[data-lms-target]').forEach(b=>b.addEventListener('click',()=>switchPage(Number(b.dataset.lmsTarget))));
+  document.querySelectorAll('[data-next]').forEach(b=>b.addEventListener('click',()=>switchPage(page+1)));
+  document.querySelectorAll('[data-prev]').forEach(b=>b.addEventListener('click',()=>switchPage(page-1)));
+  document.querySelectorAll('[data-mode]').forEach(b=>b.addEventListener('click',()=>setRequestedMode(b.dataset.mode)));
+  $('lmsConnect').addEventListener('click',connect); $('lmsDisconnect').addEventListener('click',disconnect); $('lmsLoadAccounts').addEventListener('click',loadAccounts);
+  $('lmsArmDemo').addEventListener('click',armDemoExecution); $('lmsDisarmDemo').addEventListener('click',disarmDemoExecution); $('lmsCloseDemo').addEventListener('click',closeDemoExecution);
+  $('startAuto').addEventListener('click',()=>{auto=true;addTape('SYSTEM',demoExecutor?.snapshot().armed?'AUTO armed · actual Deriv Demo multiplier contracts enabled.':'AUTO PAPER armed · no Deriv transaction will occur until DEMO EXECUTION is armed.');renderAll()});
+  $('pauseAuto').addEventListener('click',()=>{auto=false;addTape('SYSTEM','AUTO PAPER paused.');renderAll()});
+  $('closePosition').addEventListener('click',()=>closePaperPosition('MANUAL CLOSE'));
+  $('resetLms').addEventListener('click',resetLmsBot);
+  $('lmsExportCsv').addEventListener('click',exportCsv);
+  $('lmsApplyTune')?.addEventListener('click',()=>applyLmsTuneCommand($('lmsTuneCommand')?.value));
+  $('lmsTuneCommand')?.addEventListener('keydown',event=>{if(event.key==='Enter')applyLmsTuneCommand(event.currentTarget.value)});
+  document.querySelectorAll('[data-lms-command]').forEach(button=>button.addEventListener('click',()=>applyLmsTuneCommand(button.dataset.lmsCommand)));
+  const tuneIds=['lmsStopLoss','lmsStopSteps','lmsEntryStrategy','lmsExitStrategy'];
+  for(const key of Object.keys(MODES)) tuneIds.push(...Object.values(modeFieldIds(key)));
+  tuneIds.forEach(id=>$(id)?.addEventListener('input',readLmsTuningUi));
+  ['riskCap','goalDollars'].forEach(id=>$(id).addEventListener('input',renderAll));
+  bindMapTools(); installInk();
+}
+function boot(){const id=localStorage.getItem('sani.lms.appId')||localStorage.getItem('sani.comet.appId');if(id)$('lmsAppId').value=id;const tok=sessionStorage.getItem('sani.lms.token')||sessionStorage.getItem('sani.comet.token');if(tok)$('lmsToken').value=tok;demoExecutor=new DemoMultiplierExecutor({engine:'LAST_MAN',onStatus:renderDemoExecution,onEvent:event=>addTape(event.type,event.text,{side:event.side})});syncLmsTuningUi();bind();switchPage(0);renderAll();setFeedStatus('OFFLINE')}
 
-window.LAST_MAN_STANDING={getSession:()=>structuredClone(session),getTicks:()=>structuredClone(ticks),getMountain:()=>structuredClone(latestMountain),getTrendPower:()=>latestPower,getDemoExecution:()=>demoExecutor?.snapshot(),exportCsv};
+window.LAST_MAN_STANDING={getSession:()=>structuredClone(session),getTuning:()=>structuredClone(tuning),getTicks:()=>structuredClone(ticks),getMountain:()=>structuredClone(latestMountain),getTrendPower:()=>latestPower,getDemoExecution:()=>demoExecutor?.snapshot(),exportCsv};
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot,{once:true});else boot();

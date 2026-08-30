@@ -87,3 +87,20 @@ test('rejects unsupported multipliers before placing a proposal', async () => {
   assert.equal(FakeSocket.instances[0].sent.some(message => message.proposal === 1), false);
   executor.disarm();
 });
+
+
+test('supports independent stop loss and take profit controls', async () => {
+  FakeSocket.instances.length = 0;
+  const executor = new DemoMultiplierExecutor({
+    engine: 'COMET', fetchImpl: demoFetch, WebSocketImpl: FakeSocket, storage: new MemoryStorage()
+  });
+  await executor.arm({ appId: 'app', token: 'token', accountId: 'DOT9001' });
+  await executor.buy({ side: 'LONG', stake: 2, stopLoss: 0.7, takeProfit: 1.05, targetR: 1.5, multiplier: 160, symbol: '1HZ25V' });
+  const proposal = FakeSocket.instances[0].sent.find(message => message.proposal === 1);
+  assert.deepEqual(proposal.limit_order, { stop_loss: 0.7, take_profit: 1.05 });
+  assert.equal(executor.snapshot().contract.stake, 2);
+  assert.equal(executor.snapshot().contract.stopLoss, 0.7);
+  assert.equal(executor.snapshot().contract.takeProfit, 1.05);
+  await executor.sell('TEST EXIT');
+  executor.disarm();
+});

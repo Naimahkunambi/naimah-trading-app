@@ -231,7 +231,7 @@ export class DemoMultiplierExecutor {
     return value;
   }
 
-  async buy({ side, stake, targetR = 2, multiplier = 160, symbol = '1HZ25V', context = '' } = {}) {
+  async buy({ side, stake, stopLoss = null, takeProfit = null, targetR = 2, multiplier = 160, symbol = '1HZ25V', context = '' } = {}) {
     if (!this.state.armed) return false;
     if (this.state.contract || this.buyPending) {
       this.event('DEMO BLOCKED', `${this.engine} one-contract rule blocked a second Demo entry.`);
@@ -241,7 +241,9 @@ export class DemoMultiplierExecutor {
     const actualStake = this.normalizeStake(stake);
     const actualMultiplier = this.normalizeMultiplier(multiplier);
     const actualTargetR = Math.max(0.1, asNumber(targetR, 2));
-    const takeProfit = Number((actualStake * actualTargetR).toFixed(2));
+    const fallbackTakeProfit = actualStake * actualTargetR;
+    const actualStopLoss = stopLoss == null ? actualStake : Math.max(0.1, asNumber(stopLoss, actualStake));
+    const actualTakeProfit = takeProfit == null ? Number((actualStake * actualTargetR).toFixed(2)) : Math.max(0.1, asNumber(takeProfit, actualStake * actualTargetR));
     const contractType = side === 'LONG' ? 'MULTUP' : 'MULTDOWN';
     this.buyPending = true;
     this.exitRequested = '';
@@ -256,8 +258,8 @@ export class DemoMultiplierExecutor {
         currency: this.state.currency,
         duration_unit: 's',
         limit_order: {
-          stop_loss: actualStake,
-          take_profit: takeProfit
+          stop_loss: actualStopLoss,
+          take_profit: actualTakeProfit
         },
         multiplier: actualMultiplier,
         underlying_symbol: symbol
@@ -271,8 +273,8 @@ export class DemoMultiplierExecutor {
         side,
         stake: actualStake,
         requestedStake: asNumber(stake, actualStake),
-        stopLoss: actualStake,
-        takeProfit,
+        stopLoss: actualStopLoss,
+        takeProfit: actualTakeProfit,
         targetR: actualTargetR,
         multiplier: actualMultiplier,
         symbol,
@@ -284,7 +286,7 @@ export class DemoMultiplierExecutor {
       };
       this.state.status = 'DEMO CONTRACT OPEN';
       this.saveState();
-      this.event('DEMO BUY', `${side} contract ${this.state.contract.contractId} · $${actualStake.toFixed(2)} ×${actualMultiplier} · SL $${actualStake.toFixed(2)} · TP $${takeProfit.toFixed(2)}${context ? ` · ${context}` : ''}`, { side });
+      this.event('DEMO BUY', `${side} contract ${this.state.contract.contractId} · stake $${actualStake.toFixed(2)} ×${actualMultiplier} · SL $${actualStopLoss.toFixed(2)} · TP $${actualTakeProfit.toFixed(2)}${context ? ` · ${context}` : ''}`, { side });
       await this.request({ proposal_open_contract: 1, contract_id: Number(this.state.contract.contractId), subscribe: 1 }).catch(error => {
         this.event('DEMO WARNING', `Contract opened, monitor subscription failed: ${error.message}`, { side });
       });

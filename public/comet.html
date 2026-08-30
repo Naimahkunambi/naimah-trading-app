@@ -98,10 +98,29 @@
       <article class="cometPage" data-comet-page="2" aria-hidden="true">
         <div class="cometMiniHero"><span>COMET_03.EXE</span><h1>Risk first. Glamour second.</h1><p>The stop belongs to the structure. Position size belongs to the stop.</p></div>
         <div class="cometGrid three">
-          <section class="cometCard"><div class="cometCardBar"><span>RISK</span><b>PER POSITION</b></div><div class="cometCardBody"><label>RISK $<input id="riskDollars" type="number" min="0.1" step="0.1" value="1"></label><p>COMET normalizes the paper position so a stop-out costs approximately this amount.</p></div></section>
-          <section class="cometCard glossy"><div class="cometCardBar"><span>REWARD</span><b>R MULTIPLE</b></div><div class="cometCardBody"><label>TARGET R<input id="targetR" type="number" min="1" max="8" step="0.25" value="2"></label><p>Default: risk 1 to seek 2. The system may exit earlier if the mountain thesis breaks.</p></div></section>
+          <section class="cometCard"><div class="cometCardBar"><span>STAKE + STOP</span><b>PER POSITION</b></div><div class="cometCardBody"><label>STAKE $<input id="cometStake" type="number" min="0.1" step="0.1" value="1"></label><label>STOP LOSS $<input id="riskDollars" type="number" min="0.1" step="0.1" value="1"></label><p>Stake is the contract amount. Stop loss is the maximum planned loss and cannot exceed the stake.</p></div></section>
+          <section class="cometCard glossy"><div class="cometCardBar"><span>TAKE PROFIT</span><b>R MULTIPLE</b></div><div class="cometCardBody"><label>TP (R)<input id="targetR" type="number" min="0.25" max="8" step="0.25" value="2"></label><p>2R means seek two times the planned stop loss. You can lower or raise it directly or by plain-language tuning.</p></div></section>
           <section class="cometCard"><div class="cometCardBar"><span>GOAL</span><b>THE SCOREBOARD</b></div><div class="cometCardBody"><label>BIG GOAL $<input id="goalDollars" type="number" min="1" step="1" value="650"></label><div class="goalBar"><i id="goalFill"></i></div><p id="goalCaption">$0 / $650</p></div></section>
         </div>
+        <section class="cometCard tunePanel">
+          <div class="cometCardBar"><span>FINE TUNE</span><b>NO CODE REQUIRED</b></div>
+          <div class="cometCardBody">
+            <div class="tuneGrid">
+              <label>FIRST TRAIL @ R<input id="cometTrailStart" type="number" min="0.1" max="8" step="0.05" value="1"></label>
+              <label>STRUCTURE TRAIL @ R<input id="cometStructureTrail" type="number" min="0.1" max="8" step="0.05" value="1.5"></label>
+              <label>LOCK PROFIT R<input id="cometTrailLock" type="number" min="0" max="4" step="0.05" value="0.1"></label>
+              <label>STOP WIDTH · TICK STEPS<input id="cometStopSteps" type="number" min="2" max="30" step="1" value="6"></label>
+              <label>ENTRY STRATEGY<select id="cometEntryStrategy"><option value="BALANCED">BALANCED</option><option value="PULLBACK_ONLY">PULLBACK ONLY</option><option value="MOMENTUM_ONLY">EARLY MOMENTUM ONLY</option></select></label>
+              <label>EXIT STRATEGY<select id="cometExitStrategy"><option value="FAST">FAST</option><option value="BALANCED">BALANCED</option><option value="PATIENT">PATIENT</option><option value="TARGET_STOP_ONLY">TARGET + STOP ONLY</option></select></label>
+            </div>
+            <div class="plainTune">
+              <label>TYPE THE CHANGE IN PLAIN LANGUAGE<input id="cometTuneCommand" placeholder="e.g. decrease TP · trailing stop sooner · stake 2 · SL 0.70"></label>
+              <button id="cometApplyTune" class="primary">APPLY CHANGE</button>
+            </div>
+            <div class="quickTune"><button data-comet-command="decrease tp">DECREASE TP</button><button data-comet-command="trailing stop sooner">TRAIL SOONER</button><button data-comet-command="tighter sl">TIGHTER SL</button><button data-comet-command="entry stricter">ENTRY STRICTER</button><button data-comet-command="exit sooner">EXIT SOONER</button><button data-comet-command="hold longer">HOLD LONGER</button><button data-comet-command="reset settings">RESET SETTINGS</button></div>
+            <p class="tuneStatus" id="cometTuneStatus">Current COMET settings are editable. Changes apply to the next entry; protection settings also guide an open paper position.</p>
+          </div>
+        </section>
         <section class="cometDoctrine">
           <b>COMET LAW</b>
           <p><strong>UP mountain:</strong> LONG only. <strong>DOWN mountain:</strong> SHORT only. <strong>CHOP:</strong> nothing. Enter on a fresh pullback/continuation window, place the stop beyond the important HL/LH, target in R, trail only when structure earns it.</p>
@@ -122,7 +141,7 @@
           </div>
           <p id="positionReason">No directional thesis is armed.</p>
         </section>
-        <div class="cometButtons commandButtons"><button id="startAuto" class="primary">START AUTO</button><button id="pauseAuto">PAUSE</button><button id="closePosition">CLOSE POSITION</button><button id="resetComet">RESET PAPER SHADOW</button></div>
+        <div class="cometButtons commandButtons"><button id="startAuto" class="primary">START AUTO</button><button id="pauseAuto">PAUSE</button><button id="closePosition">CLOSE POSITION</button><button id="resetComet">RESET COMET + SETTINGS</button></div>
         <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>SEE THE RECEIPTS ✦</button></div>
       </article>
 

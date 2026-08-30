@@ -8,6 +8,18 @@ const KEY = 'sani.comet.paper.v3';
 const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
 const MAX_TICKS = 5000;
 const HISTORY_COUNT = 1200;
+const TUNE_KEY = 'sani.comet.tuning.v1';
+const DEFAULT_TUNING = Object.freeze({
+  stake: 1,
+  stopLoss: 1,
+  targetR: 2,
+  trailStartR: 1,
+  structureTrailR: 1.5,
+  trailLockR: 0.10,
+  stopSteps: 6,
+  entryStrategy: 'BALANCED',
+  exitStrategy: 'BALANCED'
+});
 
 let ws = null;
 let subscriptionId = null;
@@ -19,6 +31,7 @@ let page = 0;
 let auto = false;
 let position = null;
 let session = loadSession();
+let tuning = loadTuning();
 let latestMountain = analyzeMountain([]);
 let lastCloseEpoch = 0;
 let chartFrozen = false;
@@ -39,6 +52,151 @@ function loadSession() {
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(session)); } catch {}
+}
+function freshTuning() { return { ...DEFAULT_TUNING }; }
+function loadTuning() {
+  try { return { ...freshTuning(), ...(JSON.parse(localStorage.getItem(TUNE_KEY) || 'null') || {}) }; }
+  catch { return freshTuning(); }
+}
+function saveTuning() { try { localStorage.setItem(TUNE_KEY, JSON.stringify(tuning)); } catch {} }
+function tuneNumber(id, fallback, min, max) {
+  const value = Number($(id)?.value);
+  return clamp(Number.isFinite(value) ? value : fallback, min, max);
+}
+function syncTuningUi() {
+  const values = {
+    cometStake: tuning.stake, riskDollars: tuning.stopLoss, targetR: tuning.targetR,
+    cometTrailStart: tuning.trailStartR, cometStructureTrail: tuning.structureTrailR,
+    cometTrailLock: tuning.trailLockR, cometStopSteps: tuning.stopSteps
+  };
+  for (const [id, value] of Object.entries(values)) if ($(id)) $(id).value = value;
+  if ($('cometEntryStrategy')) $('cometEntryStrategy').value = tuning.entryStrategy;
+  if ($('cometExitStrategy')) $('cometExitStrategy').value = tuning.exitStrategy;
+}
+function readTuningUi() {
+  const stake = tuneNumber('cometStake', tuning.stake, 0.1, 10000);
+  tuning = {
+    ...tuning,
+    stake,
+    stopLoss: Math.min(stake, tuneNumber('riskDollars', tuning.stopLoss, 0.1, 10000)),
+    targetR: tuneNumber('targetR', tuning.targetR, 0.25, 8),
+    trailStartR: tuneNumber('cometTrailStart', tuning.trailStartR, 0.1, 8),
+    structureTrailR: tuneNumber('cometStructureTrail', tuning.structureTrailR, 0.1, 8),
+    trailLockR: tuneNumber('cometTrailLock', tuning.trailLockR, 0, 4),
+    stopSteps: Math.round(tuneNumber('cometStopSteps', tuning.stopSteps, 2, 30)),
+    entryStrategy: $('cometEntryStrategy')?.value || tuning.entryStrategy,
+    exitStrategy: $('cometExitStrategy')?.value || tuning.exitStrategy
+  };
+  tuning.structureTrailR = Math.max(tuning.trailStartR, tuning.structureTrailR);
+  tuning.trailLockR = Math.min(tuning.trailLockR, tuning.trailStartR);
+  saveTuning();
+  syncTuningUi();
+  renderAll();
+}
+function cometEntryAllowed(m) {
+  if (tuning.entryStrategy === 'PULLBACK_ONLY') return m?.entryMode === 'PULLBACK_END';
+  if (tuning.entryStrategy === 'MOMENTUM_ONLY') return m?.entryMode === 'EARLY_MOMENTUM';
+  return ['PULLBACK_END', 'EARLY_MOMENTUM'].includes(m?.entryMode);
+}
+function cometReversalVotesNeeded() {
+  if (tuning.exitStrategy === 'FAST') return 1;
+  if (tuning.exitStrategy === 'PATIENT') return 3;
+  if (tuning.exitStrategy === 'TARGET_STOP_ONLY') return 999;
+  return 2;
+}
+function setCometTuneStatus(text) {
+  const el = $('cometTuneStatus');
+  if (el) el.textContent = text;
+}
+function applyCometTuneCommand(raw) {
+  const text = String(raw || '').trim().toLowerCase();
+  if (!text) return setCometTuneStatus('Type a change, for example: decrease TP.');
+  const changes = [];
+  const number = rx => {
+    const match = text.match(rx);
+    return match ? Number(match[1]) : null;
+  };
+  let v;
+  let setTp = false;
+  if ((v = number(/\bstake\b[^0-9]*(\d+(?:\.\d+)?)/)) != null) {
+    tuning.stake = clamp(v, 0.1, 10000);
+    tuning.stopLoss = Math.min(tuning.stopLoss, tuning.stake);
+    changes.push(`stake $${tuning.stake.toFixed(2)}`);
+  }
+  if ((v = number(/(?:stop loss|\bsl\b)[^0-9]*(\d+(?:\.\d+)?)/)) != null) {
+    tuning.stopLoss = Math.min(tuning.stake, clamp(v, 0.1, 10000));
+    changes.push(`SL $${tuning.stopLoss.toFixed(2)}`);
+  }
+  if ((v = number(/(?:take profit|\btp\b|target r?)[^0-9]*(\d+(?:\.\d+)?)/)) != null) {
+    tuning.targetR = clamp(v, 0.25, 8); setTp = true;
+    changes.push(`TP ${tuning.targetR.toFixed(2)}R`);
+  }
+  if (!setTp && /(?:decrease|lower|reduce|smaller).*(?:tp|take profit|target)|(?:tp|take profit|target).*(?:decrease|lower|reduce|smaller)/.test(text)) {
+    tuning.targetR = clamp(tuning.targetR - 0.25, 0.25, 8);
+    changes.push(`TP ↓ ${tuning.targetR.toFixed(2)}R`);
+  }
+  if (!setTp && /(?:increase|raise|higher|bigger).*(?:tp|take profit|target)|(?:tp|take profit|target).*(?:increase|raise|higher|bigger)/.test(text)) {
+    tuning.targetR = clamp(tuning.targetR + 0.25, 0.25, 8);
+    changes.push(`TP ↑ ${tuning.targetR.toFixed(2)}R`);
+  }
+  if (/trail(?:ing)?(?: stop)?.*(?:sooner|earlier|faster)|(?:sooner|earlier|faster).*trail/.test(text)) {
+    tuning.trailStartR = clamp(tuning.trailStartR - 0.15, 0.1, 8);
+    tuning.structureTrailR = clamp(Math.max(tuning.trailStartR, tuning.structureTrailR - 0.15), 0.1, 8);
+    changes.push(`trail sooner @ ${tuning.trailStartR.toFixed(2)}R`);
+  }
+  if (/trail(?:ing)?(?: stop)?.*(?:later|slower)|(?:later|slower).*trail/.test(text)) {
+    tuning.trailStartR = clamp(tuning.trailStartR + 0.15, 0.1, 8);
+    tuning.structureTrailR = clamp(tuning.structureTrailR + 0.15, tuning.trailStartR, 8);
+    changes.push(`trail later @ ${tuning.trailStartR.toFixed(2)}R`);
+  }
+  if (/(?:tighter|closer).*(?:sl|stop)|(?:sl|stop).*(?:tighter|closer)/.test(text)) {
+    tuning.stopSteps = Math.max(2, tuning.stopSteps - 1);
+    changes.push(`stop width ${tuning.stopSteps} steps`);
+  }
+  if (/(?:wider|looser).*(?:sl|stop)|(?:sl|stop).*(?:wider|looser)/.test(text)) {
+    tuning.stopSteps = Math.min(30, tuning.stopSteps + 1);
+    changes.push(`stop width ${tuning.stopSteps} steps`);
+  }
+  if (/entry.*(?:strict|pullback)|(?:strict|pullback).*entry/.test(text)) {
+    tuning.entryStrategy = 'PULLBACK_ONLY'; changes.push('entry = pullback only');
+  }
+  if (/entry.*(?:momentum|early)|(?:momentum|early).*entry/.test(text)) {
+    tuning.entryStrategy = 'MOMENTUM_ONLY'; changes.push('entry = early momentum only');
+  }
+  if (/entry.*(?:balanced|normal)|(?:balanced|normal).*entry/.test(text)) {
+    tuning.entryStrategy = 'BALANCED'; changes.push('entry = balanced');
+  }
+  if (/(?:exit|cash).*(?:sooner|earlier|fast)|(?:sooner|earlier|fast).*(?:exit|cash)/.test(text)) {
+    tuning.exitStrategy = 'FAST'; changes.push('exit = fast');
+  }
+  if (/(?:hold|exit).*(?:longer|patient)|(?:longer|patient).*(?:hold|exit)/.test(text)) {
+    tuning.exitStrategy = 'PATIENT'; changes.push('exit = patient');
+  }
+  if (/target.*stop.*only|stop.*target.*only/.test(text)) {
+    tuning.exitStrategy = 'TARGET_STOP_ONLY'; changes.push('exit = target/stop only');
+  }
+  if (/(?:reset|default).*(?:setting|tune|default)|^defaults?$/.test(text)) {
+    tuning = freshTuning(); changes.splice(0, changes.length, 'settings reset to COMET defaults');
+  }
+  saveTuning(); syncTuningUi();
+  const summary = changes.length ? changes.join(' · ') : 'No setting changed. Try: “decrease TP”, “trailing stop sooner”, “stake 2”, “SL 0.70”, “entry stricter”, or “hold longer”.';
+  setCometTuneStatus(summary);
+  if (changes.length) addTape('TUNE', summary);
+  renderAll();
+}
+function resetCometBot() {
+  auto = false;
+  if (position) closePaperPosition('RESET CLOSE');
+  else if (demoExecutor?.snapshot().contract) void demoExecutor.sell('RESET COMET');
+  session = freshSession();
+  position = null;
+  lastCloseEpoch = 0;
+  tuning = freshTuning();
+  saveTuning();
+  save();
+  syncTuningUi();
+  setCometTuneStatus('COMET reset: local results + tuning back to defaults. Deriv account history is untouched.');
+  renderAll();
 }
 function addTape(type, text, extra = {}) {
   session.tape.unshift({ at: Date.now(), type, text, ...extra });
@@ -103,7 +261,7 @@ function candidate(m) {
   if (!['UP', 'DOWN'].includes(m.direction)) return null;
   const direction = m.direction === 'UP' ? 'CALL' : 'PUT';
   const permission = mountainAllows(m, direction);
-  if (!permission.allowed) return null;
+  if (!permission.allowed || !cometEntryAllowed(m)) return null;
 
   const current = ticks.at(-1);
   const quote = Number(current?.quote), epoch = Number(current?.epoch || 0);
@@ -113,11 +271,11 @@ function candidate(m) {
   const key = entryKey(m, side);
   if (hasUsedEntry(key)) return null;
 
-  const riskDollars = Math.max(.1, Number($('riskDollars')?.value || 1));
-  const targetR = clamp($('targetR')?.value || 2, 1, 8);
+  const riskDollars = Math.max(.1, Number(tuning.stopLoss || 1));
+  const targetR = clamp(tuning.targetR || 2, 0.25, 8);
   const step = tickStep();
   const buffer = Math.max(step * 1.25, 1e-9);
-  const minDistance = Math.max(step * 6, 1e-9);
+  const minDistance = Math.max(step * tuning.stopSteps, 1e-9);
   const important = Number(m.important?.quote);
 
   let stop;
@@ -146,7 +304,9 @@ function openPosition(c) {
   addTape('ENTRY', `${c.side} @ ${c.entry.toFixed(2)} · ${c.entryContext.entryMode} · stop ${c.stop.toFixed(2)} · target ${c.target.toFixed(2)}`, { side: c.side });
   void demoExecutor?.buy({
     side: c.side,
-    stake: c.riskDollars,
+    stake: tuning.stake,
+    stopLoss: c.riskDollars,
+    takeProfit: c.riskDollars * c.targetR,
     targetR: c.targetR,
     multiplier: Number($('cometMultiplier')?.value || 160),
     symbol: symbol(),
@@ -203,16 +363,15 @@ function managePosition(m) {
   // consecutive locked opposite mountains before a thesis-reversal exit.
   const opposite = (position.side === 'LONG' && m.direction === 'DOWN') || (position.side === 'SHORT' && m.direction === 'UP');
   position.reversalVotes = opposite ? Number(position.reversalVotes || 0) + 1 : 0;
-  if (position.reversalVotes >= 2) return closePaperPosition('CONFIRMED MOUNTAIN REVERSAL', q);
+  if (position.reversalVotes >= cometReversalVotesNeeded()) return closePaperPosition('CONFIRMED MOUNTAIN REVERSAL', q);
 
-  // Once the position earns 1R, protect a little profit. Later, trail only
-  // behind an important structure that is actually on the profitable side.
-  if (u.r >= 1) {
+  // Editable profit protection: first lock, then structural trail.
+  if (u.r >= tuning.trailStartR) {
     const risk = Math.abs(position.entry - position.stop);
-    const protect = position.side === 'LONG' ? position.entry + risk * .10 : position.entry - risk * .10;
+    const protect = position.side === 'LONG' ? position.entry + risk * tuning.trailLockR : position.entry - risk * tuning.trailLockR;
     position.trailStop = position.side === 'LONG' ? Math.max(position.trailStop, protect) : Math.min(position.trailStop, protect);
   }
-  if (u.r >= 1.5 && Number.isFinite(Number(m.important?.quote))) {
+  if (u.r >= tuning.structureTrailR && Number.isFinite(Number(m.important?.quote))) {
     const s = Number(m.important.quote);
     if (position.side === 'LONG' && s > position.trailStop && s < q) position.trailStop = s;
     if (position.side === 'SHORT' && s < position.trailStop && s > q) position.trailStop = s;
@@ -528,8 +687,12 @@ function bind() {
   $('startAuto').addEventListener('click', () => { auto = true; addTape('SYSTEM', demoExecutor?.snapshot().armed ? 'AUTO armed · actual Deriv Demo multiplier contracts enabled.' : 'AUTO PAPER armed · no Deriv transaction will occur until DEMO EXECUTION is armed.'); renderAll(); });
   $('pauseAuto').addEventListener('click', () => { auto = false; addTape('SYSTEM', 'AUTO PAPER paused.'); renderAll(); });
   $('closePosition').addEventListener('click', () => closePaperPosition('MANUAL CLOSE'));
-  $('resetComet').addEventListener('click', () => { if (position) closePaperPosition('RESET CLOSE'); session = freshSession(); position = null; auto = false; lastCloseEpoch = 0; save(); renderAll(); });
-  ['riskDollars','targetR','goalDollars'].forEach(id => $(id).addEventListener('input', renderAll));
+  $('resetComet').addEventListener('click', resetCometBot);
+  $('cometApplyTune')?.addEventListener('click', () => applyCometTuneCommand($('cometTuneCommand')?.value));
+  $('cometTuneCommand')?.addEventListener('keydown', event => { if (event.key === 'Enter') applyCometTuneCommand(event.currentTarget.value); });
+  document.querySelectorAll('[data-comet-command]').forEach(button => button.addEventListener('click', () => applyCometTuneCommand(button.dataset.cometCommand)));
+  ['cometStake','riskDollars','targetR','cometTrailStart','cometStructureTrail','cometTrailLock','cometStopSteps','cometEntryStrategy','cometExitStrategy'].forEach(id => $(id)?.addEventListener('input', readTuningUi));
+  $('goalDollars').addEventListener('input', renderAll);
 }
 function boot() {
   const savedId = localStorage.getItem('sani.comet.appId'); if (savedId) $('cometAppId').value = savedId;
@@ -539,10 +702,11 @@ function boot() {
     onStatus: renderDemoExecution,
     onEvent: event => addTape(event.type, event.text, { side: event.side })
   });
+  syncTuningUi();
   bind(); installMapTools(); installResultsExport(); switchPage(0); renderAll(); setFeedStatus('OFFLINE');
   const sel = $('cometAccount'); if (sel?.value) setAccountStatus('DEMO READY', true);
 }
 
-window.COMET_RUNTIME = { getSession: () => structuredClone(session), getTicks: () => structuredClone(ticks), getMountain: () => structuredClone(latestMountain), getDemoExecution: () => demoExecutor?.snapshot(), exportCsv, drawChart, saveMapPng };
+window.COMET_RUNTIME = { getSession: () => structuredClone(session), getTuning: () => structuredClone(tuning), getTicks: () => structuredClone(ticks), getMountain: () => structuredClone(latestMountain), getDemoExecution: () => demoExecutor?.snapshot(), exportCsv, drawChart, saveMapPng };
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
 else boot();
