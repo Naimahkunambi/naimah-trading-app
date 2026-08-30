@@ -71,6 +71,7 @@ export class NaiMemory{
     const targets=owner==='ALL'?OWNERS:[owner];
     for(const who of targets){if(!this.traders[who])continue;this.traders[who].forceFull=true;this.traders[who].forceReason=reason;}
   }
+  hasMajorSince(stateId){const id=Number(stateId||0);return this.events.some(e=>e.major&&e.id>id)}
   contextFor(owner,{position=null,recentJudgment=null,trigger='EVENT',now=Date.now()}={}){
     const t=this.traders[owner];if(!t||!this.lastEyes)return null;
     const unseen=this.events.filter(e=>e.id>t.lastSeenId);
