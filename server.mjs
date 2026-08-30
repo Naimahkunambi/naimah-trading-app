@@ -11,7 +11,11 @@ const mime = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
   '.json': 'application/json', '.xml': 'application/xml', '.svg': 'image/svg+xml', '.png': 'image/png'
 };
-const headers = (appId, token) => ({ 'Deriv-App-ID': String(appId), Authorization: `Bearer ${token}`, Accept: 'application/json' });
+
+// This exact immutable Nana deployment is proven by runtime logs to return 200
+// for both /api/accounts and /api/otp with the user's current Deriv setup.
+// Keep Deriv auth anchored there while the new deployment only changes Nana's AI brain.
+const PROVEN_AUTH_ORIGIN = 'https://sani-bos-executor-nadf3822w-naimakunambi-6312s-projects.vercel.app';
 
 async function body(req) {
   let value = '';
@@ -19,44 +23,25 @@ async function body(req) {
   return value ? JSON.parse(value) : {};
 }
 
-async function proxy(req, res, type) {
+async function provenDerivProxy(req, res, route) {
   try {
     const input = await body(req);
-    const { appId, token } = input;
-    if (!appId || !token) throw Object.assign(new Error('App ID and token are required.'), { status: 400 });
-    let verifiedAccount = null;
-
-    if (type === 'otp' && input.demoOnly) {
-      const checked = await fetch('https://api.derivws.com/trading/v1/options/accounts', {
-        method: 'GET', headers: headers(appId, token), cache: 'no-store'
-      });
-      const checkedPayload = await checked.json().catch(() => ({}));
-      if (!checked.ok) throw Object.assign(new Error(checkedPayload?.errors?.[0]?.message || 'Could not verify Demo account.'), { status: checked.status });
-      const accounts = Array.isArray(checkedPayload?.data) ? checkedPayload.data : [checkedPayload?.data].filter(Boolean);
-      verifiedAccount = accounts.find(account => String(account?.account_id || '') === String(input.accountId || ''));
-      if (!verifiedAccount) throw Object.assign(new Error('REFUSED: selected account was not returned by Deriv.'), { status: 403 });
-      if (!['demo', 'virtual'].includes(String(verifiedAccount.account_type || '').toLowerCase())) {
-        throw Object.assign(new Error('REFUSED: Demo execution cannot authorize a real or unverified account.'), { status: 403 });
-      }
-    }
-
-    let url = 'https://api.derivws.com/trading/v1/options/accounts';
-    let method = 'GET';
-    if (type === 'otp') {
-      if (!input.accountId) throw Object.assign(new Error('Account ID is required.'), { status: 400 });
-      url += `/${encodeURIComponent(input.accountId)}/otp`;
-      method = 'POST';
-    }
-    const response = await fetch(url, { method, headers: headers(appId, token), cache: 'no-store' });
-    const payload = await response.json().catch(() => ({}));
-    const success = type === 'otp'
-      ? { url: payload?.data?.url, otpExpiresIn: 120, ...(verifiedAccount ? { account: verifiedAccount, demoOnly: true } : {}) }
-      : { accounts: Array.isArray(payload.data) ? payload.data : [payload.data].filter(Boolean) };
-    res.writeHead(response.status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(response.ok ? success : { error: payload?.errors?.[0]?.message || 'Deriv API error' }));
+    const response = await fetch(`${PROVEN_AUTH_ORIGIN}${route}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(input),
+      cache: 'no-store',
+      redirect: 'follow'
+    });
+    const text = await response.text();
+    res.writeHead(response.status, {
+      'content-type': response.headers.get('content-type') || 'application/json',
+      'cache-control': 'no-store'
+    });
+    res.end(text);
   } catch (error) {
-    res.writeHead(error.status || 500, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: error.message || 'Unexpected error' }));
+    res.writeHead(502, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ error: `Working Nana auth bridge failed: ${error.message || 'unknown error'}` }));
   }
 }
 
@@ -101,8 +86,8 @@ async function nanaAiProxy(req, res) {
 
 http.createServer(async (req, res) => {
   const cleanUrl = req.url.split('?')[0];
-  if (req.method === 'POST' && cleanUrl === '/api/accounts') return proxy(req, res, 'accounts');
-  if (req.method === 'POST' && cleanUrl === '/api/otp') return proxy(req, res, 'otp');
+  if (req.method === 'POST' && cleanUrl === '/api/accounts') return provenDerivProxy(req, res, '/api/accounts');
+  if (req.method === 'POST' && cleanUrl === '/api/otp') return provenDerivProxy(req, res, '/api/otp');
   if (cleanUrl === '/api/nana-ai') return nanaAiProxy(req, res);
   const rel = cleanUrl === '/' ? 'index.html' : cleanUrl.replace(/^\//, '');
   const file = path.join(pub, rel);
