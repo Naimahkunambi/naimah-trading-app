@@ -53,7 +53,7 @@ async function loadDemoAccounts(event) {
     if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
 
     const accounts = Array.isArray(payload?.accounts) ? payload.accounts : [];
-    const demos = accounts.filter(account => String(account?.account_type || '').toLowerCase() !== 'real');
+    const demos = accounts.filter(account => ['demo', 'virtual'].includes(String(account?.account_type || '').toLowerCase()));
 
     if (!demos.length) {
       sel.innerHTML = '<option value="">No Demo accounts returned</option>';

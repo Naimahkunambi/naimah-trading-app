@@ -27,7 +27,7 @@
       <div class="cometHeaderHud"><span id="cometState">PAPER LAB</span><b id="cometPnl">+$0.00</b></div>
     </header>
 
-    <div class="cometTicker"><span>COMET v1</span><b>TRADE THE MOVE · NOT THE TICK</b><em>PAPER CFD RESEARCH · MT5 BRIDGE NEXT</em></div>
+    <div class="cometTicker"><span>COMET v2</span><b>TRADE THE MOVE · NOT THE TICK</b><em>DERIV DEMO MULTIPLIERS · NO MT5</em></div>
 
     <nav class="cometRail" aria-label="COMET pages">
       <button class="active" data-comet-target="0"><b>01</b><span>GLAM IN</span></button>
@@ -66,7 +66,14 @@
                 <label>ACCOUNT<select id="cometAccount"><option value="">Load accounts first</option></select></label>
               </div>
               <div class="cometButtons"><button id="cometLoadAccounts">LOAD DEMO ACCOUNTS</button></div>
-              <p class="cometNote">v1 uses the account only as the future execution context. Positions on this page are PAPER positions until the MT5/CFD execution bridge is wired and validated.</p>
+              <div class="demoExecutionPanel">
+                <div class="demoExecutionHead"><span>ACTUAL DERIV DEMO EXECUTION</span><b id="cometDemoStatus">OFF</b></div>
+                <label>MULTIPLIER<select id="cometMultiplier"><option value="160">×160</option><option value="400">×400</option><option value="800">×800</option><option value="1200">×1200</option><option value="1600">×1600</option></select></label>
+                <div class="cometButtons"><button id="cometArmDemo" class="primary">ARM DEMO EXECUTION</button><button id="cometCloseDemo">CLOSE DEMO CONTRACT</button><button id="cometDisarmDemo">DISARM</button></div>
+                <div class="demoExecutionStats"><span>BALANCE <b id="cometDemoBalance">—</b></span><span>CONTRACT <b id="cometDemoContract">FLAT</b></span><span>LIVE P/L <b id="cometDemoLivePnl">+$0.00</b></span><span>REALIZED <b id="cometDemoRealized">+$0.00</b></span></div>
+              </div>
+              <p class="cometNote"><strong>Clear rule:</strong> OFF means paper shadow only. When “DEMO EXECUTION ACTIVE” is shown, every new COMET entry buys an actual multiplier contract in the selected Deriv Demo account and every COMET exit sells it. Each contract also has a Deriv-hosted stop loss and take profit. Real accounts are refused by the server.</p>
+              <p class="cometNote"><a href="/dbots/COMET-DEMO-SIMPLIFIED.xml" download>DOWNLOAD COMET DBOT XML (SIMPLIFIED COMPARISON)</a></p>
             </div>
           </section>
         </div>
@@ -115,12 +122,12 @@
           </div>
           <p id="positionReason">No directional thesis is armed.</p>
         </section>
-        <div class="cometButtons commandButtons"><button id="startAuto" class="primary">START AUTO PAPER</button><button id="pauseAuto">PAUSE</button><button id="closePosition">CLOSE POSITION</button><button id="resetComet">RESET PAPER SESSION</button></div>
+        <div class="cometButtons commandButtons"><button id="startAuto" class="primary">START AUTO</button><button id="pauseAuto">PAUSE</button><button id="closePosition">CLOSE POSITION</button><button id="resetComet">RESET PAPER SHADOW</button></div>
         <div class="pageActions"><button data-prev>◀ BACK</button><button data-next>SEE THE RECEIPTS ✦</button></div>
       </article>
 
       <article class="cometPage" data-comet-page="4" aria-hidden="true">
-        <div class="cometMiniHero"><span>COMET_05.EXE</span><h1>Did the move pay?</h1><p>No vanity metric gets to outrank realized paper P/L.</p></div>
+        <div class="cometMiniHero"><span>COMET_05.EXE</span><h1>Did the move pay?</h1><p>This scoreboard is the paper shadow. Actual Deriv Demo P/L is shown in the Demo Execution panel and in Deriv transaction history.</p></div>
         <div class="resultGrid">
           <div><small>REALIZED</small><strong id="statPnl">+$0.00</strong></div>
           <div><small>TRADES</small><strong id="statTrades">0</strong></div>
@@ -140,7 +147,7 @@
       </article>
     </section>
 
-    <footer class="cometFooter"><span>COMET · DIRECTION + DISTANCE + RISK</span><b>GOAL <i id="footerGoal">$650</i></b><em>PAPER CFD LAB</em></footer>
+    <footer class="cometFooter"><span>COMET · DIRECTION + DISTANCE + RISK</span><b>GOAL <i id="footerGoal">$650</i></b><em>DEMO MULTIPLIER READY</em></footer>
   </main>
   <script type="module" src="/comet-account.js"></script>
   <script type="module" src="/comet.js"></script>

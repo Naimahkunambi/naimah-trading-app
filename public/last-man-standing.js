@@ -1,4 +1,5 @@
 import { analyzeMountain, mountainAllows } from './core/libra-mountain.mjs';
+import { DemoMultiplierExecutor } from './core/demo-multiplier-executor.mjs';
 
 const $ = id => document.getElementById(id);
 const money = v => `${Number(v || 0) >= 0 ? '+' : '-'}$${Math.abs(Number(v || 0)).toFixed(2)}`;
@@ -34,6 +35,7 @@ let chartOffset = 0;
 let inkMode = false;
 let inkColor = '#87e7d4';
 let inkCanvas = null;
+let demoExecutor = null;
 
 function freshSession() {
   return { pnl: 0, trades: [], tape: [], peak: 0, trough: 0, maxDrawdown: 0, usedEntryKeys: [] };
@@ -195,6 +197,14 @@ function openPosition(c) {
   position = c;
   markEntryUsed(c.entryKey);
   addTape('ENTRY', `${c.mode} ${c.side} @ ${c.entry.toFixed(2)} · power ${c.entryPower}/100 · risk ${money(c.riskDollars)} · target ${c.targetR.toFixed(2)}R`, { side: c.side, mode: c.mode });
+  void demoExecutor?.buy({
+    side: c.side,
+    stake: c.riskDollars,
+    targetR: c.targetR,
+    multiplier: Number($('lmsMultiplier')?.value || 160),
+    symbol: symbol(),
+    context: `${c.mode} · power ${c.entryPower}/100`
+  });
   renderAll();
 }
 function unrealized(p = position, quote = ticks.at(-1)?.quote) {
@@ -239,6 +249,7 @@ function closePaperPosition(reason, quote = ticks.at(-1)?.quote) {
   session.maxDrawdown = Math.max(session.maxDrawdown, session.peak - session.pnl);
   lastCloseEpoch = Number(ticks.at(-1)?.epoch || lastCloseEpoch);
   addTape('EXIT', `${trade.currentMode} ${trade.side} ${reason} · ${money(trade.pnl)} · ${trade.r.toFixed(2)}R`, { side: trade.side, mode: trade.currentMode });
+  void demoExecutor?.sell(reason);
   position = null; save(); renderAll();
 }
 
@@ -365,7 +376,7 @@ async function loadAccounts() {
   try {
     const r = await fetch('/api/accounts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, token }), cache: 'no-store' });
     const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    const accounts = Array.isArray(d.accounts) ? d.accounts : [], demos = accounts.filter(a => String(a.account_type || '').toLowerCase() !== 'real');
+    const accounts = Array.isArray(d.accounts) ? d.accounts : [], demos = accounts.filter(a => ['demo', 'virtual'].includes(String(a.account_type || '').toLowerCase()));
     const sel = $('lmsAccount'); sel.innerHTML = '';
     if (!demos.length) sel.innerHTML = '<option value="">No Demo accounts</option>';
     for (const a of demos) { const o = document.createElement('option'); o.value = a.account_id; o.textContent = `DEMO · ${a.account_id} · ${a.currency || ''} ${a.balance ?? ''}`; sel.appendChild(o); }
@@ -404,9 +415,44 @@ function renderAll() {
   $('positionReason').textContent = position ? `Entered ${position.mode} at ${position.entryPower}/100 power. Current trend power ${position.currentPower}/100. Stop can only move toward profit.` : modeReason(latestRecommendedMode, latestPower, latestMountain);
   $('protectFill').style.width = `${clamp((locked + 1) / 4 * 100, 0, 100)}%`; $('protectCaption').textContent = position ? `locked ${locked.toFixed(2)}R · best ${position.bestR.toFixed(2)}R` : 'waiting to earn protection';
 
-  $('lmsPnl').textContent = money(session.pnl + u.pnl); $('lmsState').textContent = auto ? 'PAPER ACTIVE' : 'PAPER LAB';
+  $('lmsPnl').textContent = money(session.pnl + u.pnl); $('lmsState').textContent = demoExecutor?.snapshot().armed ? 'DERIV DEMO EXECUTION' : auto ? 'PAPER ACTIVE' : 'PAPER LAB';
   const goal = Math.max(1, Number($('goalDollars')?.value || 650)); $('goalFill').style.width = `${clamp(session.pnl / goal * 100, 0, 100)}%`; $('goalCaption').textContent = `${money(session.pnl)} / $${goal.toFixed(0)}`; $('footerGoal').textContent = `$${goal.toFixed(0)}`;
-  renderResults(); renderTape(); if (page === 1 && !chartFrozen) drawChart();
+  renderResults(); renderTape(); renderDemoExecution(); if (page === 1 && !chartFrozen) drawChart();
+}
+
+function renderDemoExecution(snapshot = demoExecutor?.snapshot()) {
+  if (!snapshot || !$('lmsDemoStatus')) return;
+  $('lmsDemoStatus').textContent = snapshot.status;
+  $('lmsDemoStatus').dataset.ok = snapshot.armed ? '1' : '0';
+  $('lmsDemoBalance').textContent = snapshot.balance == null ? '—' : `${snapshot.currency} ${Number(snapshot.balance).toFixed(2)}`;
+  $('lmsDemoContract').textContent = snapshot.contract ? `${snapshot.contract.side} · ${snapshot.contract.contractId}` : 'FLAT';
+  $('lmsDemoLivePnl').textContent = money(snapshot.contract?.liveProfit || 0);
+  $('lmsDemoRealized').textContent = money(snapshot.realized || 0);
+  $('lmsArmDemo').disabled = snapshot.armed || snapshot.buyPending || snapshot.sellPending;
+  $('lmsDisarmDemo').disabled = !snapshot.armed || Boolean(snapshot.contract) || snapshot.buyPending || snapshot.sellPending;
+  $('lmsCloseDemo').disabled = !snapshot.contract || snapshot.sellPending;
+}
+
+async function armDemoExecution() {
+  if (position) { addTape('DEMO REFUSED', 'Wait until the paper shadow is flat before arming Demo execution.'); return; }
+  try {
+    await demoExecutor.arm({
+      appId: $('lmsAppId')?.value?.trim(),
+      token: $('lmsToken')?.value?.trim(),
+      accountId: $('lmsAccount')?.value
+    });
+  } catch (error) {
+    addTape('DEMO REFUSED', error?.message || 'Could not arm Deriv Demo execution.');
+  }
+}
+
+function disarmDemoExecution() {
+  try { demoExecutor.disarm(); }
+  catch (error) { addTape('DEMO REFUSED', error?.message || 'Could not disarm Demo execution.'); }
+}
+
+function closeDemoExecution() {
+  void demoExecutor.sell('MANUAL DEMO CLOSE');
 }
 function renderResults() {
   const trades = session.trades || [], wins = trades.filter(t => t.pnl > 0).length, totalR = trades.reduce((s, t) => s + Number(t.r || 0), 0), gp = trades.filter(t => t.pnl > 0).reduce((s, t) => s + t.pnl, 0), gl = Math.abs(trades.filter(t => t.pnl < 0).reduce((s, t) => s + t.pnl, 0));
@@ -445,8 +491,8 @@ function exportCsv(){const headers=['closed_at','entry_mode','final_mode','side'
 function installInk(){inkCanvas=$('lmsInk');const c=$('lmsChart');if(!inkCanvas||!c)return;const resize=()=>{const dpr=window.devicePixelRatio||1;inkCanvas.width=Math.round(c.clientWidth*dpr);inkCanvas.height=Math.round(c.clientHeight*dpr)};resize();let drawing=false,last=null;const point=e=>{const r=inkCanvas.getBoundingClientRect();return{x:(e.clientX-r.left)*(inkCanvas.width/r.width),y:(e.clientY-r.top)*(inkCanvas.height/r.height)}};inkCanvas.addEventListener('pointerdown',e=>{if(!inkMode)return;drawing=true;last=point(e);inkCanvas.setPointerCapture(e.pointerId)});inkCanvas.addEventListener('pointermove',e=>{if(!drawing||!inkMode)return;const p=point(e),ctx=inkCanvas.getContext('2d');ctx.strokeStyle=inkColor;ctx.lineWidth=Math.max(3,inkCanvas.width/700);ctx.lineCap='round';ctx.beginPath();ctx.moveTo(last.x,last.y);ctx.lineTo(p.x,p.y);ctx.stroke();last=p});const stop=()=>{drawing=false;last=null};inkCanvas.addEventListener('pointerup',stop);inkCanvas.addEventListener('pointercancel',stop);window.addEventListener('resize',()=>{resize();if(page===1)drawChart(true)})}
 function bindMapTools(){const tools=$('lmsMapTools');if(!tools)return;tools.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.color){inkColor=b.dataset.color;return}const act=b.dataset.act;if(act==='older'){chartFrozen=true;chartOffset=Math.min(Math.max(0,ticks.length-20),chartOffset+Math.max(20,Math.floor(chartViewCount*.55)));drawChart(true)}if(act==='newer'){chartOffset=Math.max(0,chartOffset-Math.max(20,Math.floor(chartViewCount*.55)));if(!chartOffset)chartFrozen=false;drawChart(true)}if(act==='live'){chartOffset=0;chartFrozen=false;drawChart(true)}if(act==='zin'){chartViewCount=Math.max(60,Math.floor(chartViewCount*.75));drawChart(true)}if(act==='zout'){chartViewCount=Math.min(900,Math.floor(chartViewCount*1.35));drawChart(true)}if(act==='freeze'){chartFrozen=!chartFrozen;b.classList.toggle('on',chartFrozen);b.textContent=chartFrozen?'FROZEN':'FREEZE';if(!chartFrozen){chartOffset=0;drawChart(true)}}if(act==='draw'){inkMode=!inkMode;b.classList.toggle('on',inkMode);inkCanvas.classList.toggle('drawOn',inkMode)}if(act==='clear')inkCanvas.getContext('2d').clearRect(0,0,inkCanvas.width,inkCanvas.height);if(act==='png')saveMapPng();if(act==='case')saveTrainingCase()})}
 function setRequestedMode(mode){requestedMode=mode;document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));$('modeControlLabel').textContent=modeDisplay(mode);addTape('MODE',`Control mode set to ${modeDisplay(mode)}. Safety thresholds remain active.`);renderAll()}
-function bind(){document.querySelectorAll('[data-lms-target]').forEach(b=>b.addEventListener('click',()=>switchPage(Number(b.dataset.lmsTarget))));document.querySelectorAll('[data-next]').forEach(b=>b.addEventListener('click',()=>switchPage(page+1)));document.querySelectorAll('[data-prev]').forEach(b=>b.addEventListener('click',()=>switchPage(page-1)));document.querySelectorAll('[data-mode]').forEach(b=>b.addEventListener('click',()=>setRequestedMode(b.dataset.mode)));$('lmsConnect').addEventListener('click',connect);$('lmsDisconnect').addEventListener('click',disconnect);$('lmsLoadAccounts').addEventListener('click',loadAccounts);$('startAuto').addEventListener('click',()=>{auto=true;addTape('SYSTEM','AUTO PAPER armed. Trend strength controls risk appetite.');renderAll()});$('pauseAuto').addEventListener('click',()=>{auto=false;addTape('SYSTEM','AUTO PAPER paused.');renderAll()});$('closePosition').addEventListener('click',()=>closePaperPosition('MANUAL CLOSE'));$('resetLms').addEventListener('click',()=>{if(position)closePaperPosition('RESET CLOSE');session=freshSession();position=null;auto=false;lastCloseEpoch=0;save();renderAll()});$('lmsExportCsv').addEventListener('click',exportCsv);['riskCap','goalDollars'].forEach(id=>$(id).addEventListener('input',renderAll));bindMapTools();installInk()}
-function boot(){const id=localStorage.getItem('sani.lms.appId')||localStorage.getItem('sani.comet.appId');if(id)$('lmsAppId').value=id;const tok=sessionStorage.getItem('sani.lms.token')||sessionStorage.getItem('sani.comet.token');if(tok)$('lmsToken').value=tok;bind();switchPage(0);renderAll();setFeedStatus('OFFLINE')}
+function bind(){document.querySelectorAll('[data-lms-target]').forEach(b=>b.addEventListener('click',()=>switchPage(Number(b.dataset.lmsTarget))));document.querySelectorAll('[data-next]').forEach(b=>b.addEventListener('click',()=>switchPage(page+1)));document.querySelectorAll('[data-prev]').forEach(b=>b.addEventListener('click',()=>switchPage(page-1)));document.querySelectorAll('[data-mode]').forEach(b=>b.addEventListener('click',()=>setRequestedMode(b.dataset.mode)));$('lmsConnect').addEventListener('click',connect);$('lmsDisconnect').addEventListener('click',disconnect);$('lmsLoadAccounts').addEventListener('click',loadAccounts);$('lmsArmDemo').addEventListener('click',armDemoExecution);$('lmsDisarmDemo').addEventListener('click',disarmDemoExecution);$('lmsCloseDemo').addEventListener('click',closeDemoExecution);$('startAuto').addEventListener('click',()=>{auto=true;addTape('SYSTEM',demoExecutor?.snapshot().armed?'AUTO armed · actual Deriv Demo multiplier contracts enabled.':'AUTO PAPER armed · no Deriv transaction will occur until DEMO EXECUTION is armed.');renderAll()});$('pauseAuto').addEventListener('click',()=>{auto=false;addTape('SYSTEM','AUTO PAPER paused.');renderAll()});$('closePosition').addEventListener('click',()=>closePaperPosition('MANUAL CLOSE'));$('resetLms').addEventListener('click',()=>{if(position)closePaperPosition('RESET CLOSE');session=freshSession();position=null;auto=false;lastCloseEpoch=0;save();renderAll()});$('lmsExportCsv').addEventListener('click',exportCsv);['riskCap','goalDollars'].forEach(id=>$(id).addEventListener('input',renderAll));bindMapTools();installInk()}
+function boot(){const id=localStorage.getItem('sani.lms.appId')||localStorage.getItem('sani.comet.appId');if(id)$('lmsAppId').value=id;const tok=sessionStorage.getItem('sani.lms.token')||sessionStorage.getItem('sani.comet.token');if(tok)$('lmsToken').value=tok;demoExecutor=new DemoMultiplierExecutor({engine:'LAST_MAN',onStatus:renderDemoExecution,onEvent:event=>addTape(event.type,event.text,{side:event.side})});bind();switchPage(0);renderAll();setFeedStatus('OFFLINE')}
 
-window.LAST_MAN_STANDING={getSession:()=>structuredClone(session),getTicks:()=>structuredClone(ticks),getMountain:()=>structuredClone(latestMountain),getTrendPower:()=>latestPower,exportCsv};
+window.LAST_MAN_STANDING={getSession:()=>structuredClone(session),getTicks:()=>structuredClone(ticks),getMountain:()=>structuredClone(latestMountain),getTrendPower:()=>latestPower,getDemoExecution:()=>demoExecutor?.snapshot(),exportCsv};
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot,{once:true});else boot();

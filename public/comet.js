@@ -1,4 +1,5 @@
 import { analyzeMountain, mountainAllows } from './core/libra-mountain.mjs';
+import { DemoMultiplierExecutor } from './core/demo-multiplier-executor.mjs';
 
 const $ = id => document.getElementById(id);
 const money = v => `${Number(v || 0) >= 0 ? '+' : '-'}$${Math.abs(Number(v || 0)).toFixed(2)}`;
@@ -27,6 +28,7 @@ let inkMode = false;
 let inkColor = '#8df5df';
 let inkCanvas = null;
 let drawCanvas = null;
+let demoExecutor = null;
 
 function freshSession() {
   return { pnl: 0, trades: [], tape: [], peak: 0, trough: 0, maxDrawdown: 0, equity: 0, usedEntryKeys: [] };
@@ -142,6 +144,14 @@ function openPosition(c) {
   position = c;
   markEntryUsed(c.entryKey);
   addTape('ENTRY', `${c.side} @ ${c.entry.toFixed(2)} · ${c.entryContext.entryMode} · stop ${c.stop.toFixed(2)} · target ${c.target.toFixed(2)}`, { side: c.side });
+  void demoExecutor?.buy({
+    side: c.side,
+    stake: c.riskDollars,
+    targetR: c.targetR,
+    multiplier: Number($('cometMultiplier')?.value || 160),
+    symbol: symbol(),
+    context: c.entryContext.entryMode
+  });
   renderAll();
 }
 function unrealized(p = position, quote = ticks.at(-1)?.quote) {
@@ -169,6 +179,7 @@ function closePaperPosition(reason, quote = ticks.at(-1)?.quote) {
   session.maxDrawdown = Math.max(session.maxDrawdown, session.peak - session.equity);
   lastCloseEpoch = Number(ticks.at(-1)?.epoch || lastCloseEpoch);
   addTape('EXIT', `${trade.side} ${reason} · ${money(trade.pnl)} · ${trade.r.toFixed(2)}R`, { side: trade.side });
+  void demoExecutor?.sell(reason);
   position = null;
   save();
   renderAll();
@@ -279,7 +290,7 @@ async function loadAccounts() {
   try {
     const r = await fetch('/api/accounts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, token }), cache: 'no-store' });
     const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || `Account load failed (${r.status})`);
-    const accounts = Array.isArray(d.accounts) ? d.accounts : [], demos = accounts.filter(a => String(a.account_type || '').toLowerCase() !== 'real');
+    const accounts = Array.isArray(d.accounts) ? d.accounts : [], demos = accounts.filter(a => ['demo', 'virtual'].includes(String(a.account_type || '').toLowerCase()));
     const sel = $('cometAccount'); sel.innerHTML = '';
     if (!demos.length) sel.innerHTML = '<option value="">No Demo accounts</option>';
     for (const a of demos) { const o = document.createElement('option'); o.value = a.account_id; o.textContent = `DEMO · ${a.account_id} · ${a.currency || ''} ${a.balance ?? ''}`; sel.appendChild(o); }
@@ -321,13 +332,49 @@ function renderAll() {
   $('positionR').textContent = `${u.r.toFixed(2)}R`;
 
   $('cometPnl').textContent = money(session.pnl + u.pnl);
-  $('cometState').textContent = auto ? 'PAPER ACTIVE' : 'PAPER LAB';
+  $('cometState').textContent = demoExecutor?.snapshot().armed ? 'DERIV DEMO EXECUTION' : auto ? 'PAPER ACTIVE' : 'PAPER LAB';
   const goal = Math.max(1, Number($('goalDollars')?.value || 650));
   $('goalFill').style.width = `${clamp(session.pnl / goal * 100, 0, 100)}%`;
   $('goalCaption').textContent = `${money(session.pnl)} / $${goal.toFixed(0)}`;
   $('footerGoal').textContent = `$${goal.toFixed(0)}`;
   renderResults(); renderTape();
+  renderDemoExecution();
   if (page === 1 && !chartFrozen) drawChart();
+}
+
+function renderDemoExecution(snapshot = demoExecutor?.snapshot()) {
+  if (!snapshot || !$('cometDemoStatus')) return;
+  $('cometDemoStatus').textContent = snapshot.status;
+  $('cometDemoStatus').dataset.ok = snapshot.armed ? '1' : '0';
+  $('cometDemoBalance').textContent = snapshot.balance == null ? '—' : `${snapshot.currency} ${Number(snapshot.balance).toFixed(2)}`;
+  $('cometDemoContract').textContent = snapshot.contract ? `${snapshot.contract.side} · ${snapshot.contract.contractId}` : 'FLAT';
+  $('cometDemoLivePnl').textContent = money(snapshot.contract?.liveProfit || 0);
+  $('cometDemoRealized').textContent = money(snapshot.realized || 0);
+  $('cometArmDemo').disabled = snapshot.armed || snapshot.buyPending || snapshot.sellPending;
+  $('cometDisarmDemo').disabled = !snapshot.armed || Boolean(snapshot.contract) || snapshot.buyPending || snapshot.sellPending;
+  $('cometCloseDemo').disabled = !snapshot.contract || snapshot.sellPending;
+}
+
+async function armDemoExecution() {
+  if (position) { addTape('DEMO REFUSED', 'Wait until the paper shadow is flat before arming Demo execution.'); return; }
+  try {
+    await demoExecutor.arm({
+      appId: $('cometAppId')?.value?.trim(),
+      token: $('cometToken')?.value?.trim(),
+      accountId: $('cometAccount')?.value
+    });
+  } catch (error) {
+    addTape('DEMO REFUSED', error?.message || 'Could not arm Deriv Demo execution.');
+  }
+}
+
+function disarmDemoExecution() {
+  try { demoExecutor.disarm(); }
+  catch (error) { addTape('DEMO REFUSED', error?.message || 'Could not disarm Demo execution.'); }
+}
+
+function closeDemoExecution() {
+  void demoExecutor.sell('MANUAL DEMO CLOSE');
 }
 function renderResults() {
   const trades = session.trades || [], wins = trades.filter(t => t.pnl > 0).length;
@@ -475,7 +522,10 @@ function bind() {
   $('cometConnect').addEventListener('click', connect);
   $('cometDisconnect').addEventListener('click', disconnect);
   $('cometLoadAccounts').addEventListener('click', loadAccounts);
-  $('startAuto').addEventListener('click', () => { auto = true; addTape('SYSTEM', 'AUTO PAPER armed. Confirmed directional entries only.'); renderAll(); });
+  $('cometArmDemo').addEventListener('click', armDemoExecution);
+  $('cometDisarmDemo').addEventListener('click', disarmDemoExecution);
+  $('cometCloseDemo').addEventListener('click', closeDemoExecution);
+  $('startAuto').addEventListener('click', () => { auto = true; addTape('SYSTEM', demoExecutor?.snapshot().armed ? 'AUTO armed · actual Deriv Demo multiplier contracts enabled.' : 'AUTO PAPER armed · no Deriv transaction will occur until DEMO EXECUTION is armed.'); renderAll(); });
   $('pauseAuto').addEventListener('click', () => { auto = false; addTape('SYSTEM', 'AUTO PAPER paused.'); renderAll(); });
   $('closePosition').addEventListener('click', () => closePaperPosition('MANUAL CLOSE'));
   $('resetComet').addEventListener('click', () => { if (position) closePaperPosition('RESET CLOSE'); session = freshSession(); position = null; auto = false; lastCloseEpoch = 0; save(); renderAll(); });
@@ -484,10 +534,15 @@ function bind() {
 function boot() {
   const savedId = localStorage.getItem('sani.comet.appId'); if (savedId) $('cometAppId').value = savedId;
   const tok = sessionStorage.getItem('sani.comet.token'); if (tok) $('cometToken').value = tok;
+  demoExecutor = new DemoMultiplierExecutor({
+    engine: 'COMET',
+    onStatus: renderDemoExecution,
+    onEvent: event => addTape(event.type, event.text, { side: event.side })
+  });
   bind(); installMapTools(); installResultsExport(); switchPage(0); renderAll(); setFeedStatus('OFFLINE');
   const sel = $('cometAccount'); if (sel?.value) setAccountStatus('DEMO READY', true);
 }
 
-window.COMET_RUNTIME = { getSession: () => structuredClone(session), getTicks: () => structuredClone(ticks), getMountain: () => structuredClone(latestMountain), exportCsv, drawChart, saveMapPng };
+window.COMET_RUNTIME = { getSession: () => structuredClone(session), getTicks: () => structuredClone(ticks), getMountain: () => structuredClone(latestMountain), getDemoExecution: () => demoExecutor?.snapshot(), exportCsv, drawChart, saveMapPng };
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
 else boot();

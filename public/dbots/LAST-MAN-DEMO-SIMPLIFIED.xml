@@ -1,0 +1,47 @@
+<xml xmlns="http://www.w3.org/1999/xhtml" is_dbot="true" collection="false">
+  <variables>
+    <variable id="lms_fast">LMS fast EMA</variable><variable id="lms_mid">LMS mid EMA</variable><variable id="lms_slow">LMS slow EMA</variable>
+  </variables>
+  <block type="trade_definition" id="lms_trade" deletable="false" x="20" y="20">
+    <statement name="TRADE_OPTIONS"><block type="trade_definition_market" id="lms_market" deletable="false" movable="false">
+      <field name="MARKET_LIST">synthetic_index</field><field name="SUBMARKET_LIST">random_index</field><field name="SYMBOL_LIST">1HZ25V</field>
+      <next><block type="trade_definition_tradetype" id="lms_type" deletable="false" movable="false"><field name="TRADETYPECAT_LIST">multiplier</field><field name="TRADETYPE_LIST">multiplier</field>
+        <next><block type="trade_definition_contracttype" id="lms_contract" deletable="false" movable="false"><field name="TYPE_LIST">both</field>
+          <next><block type="trade_definition_candleinterval" id="lms_interval" deletable="false" movable="false"><field name="CANDLEINTERVAL_LIST">60</field>
+            <next><block type="trade_definition_restartbuysell" id="lms_restart" deletable="false" movable="false"><field name="TIME_MACHINE_ENABLED">FALSE</field>
+              <next><block type="trade_definition_restartonerror" id="lms_error" deletable="false" movable="false"><field name="RESTARTONERROR">TRUE</field></block></next>
+            </block></next>
+          </block></next>
+        </block></next>
+      </block></next>
+    </block></statement>
+    <statement name="INITIALIZATION"><block type="text_print" id="lms_notice"><value name="TEXT"><shadow type="text" id="lms_notice_text"><field name="TEXT">LAST MAN SIMPLIFIED COMPARISON: EMA 5/13/34 alignment only. This is NOT adaptive GRAB/CRUISE/LAST MAN logic. DEMO first.</field></shadow></value></block></statement>
+    <statement name="SUBMARKET"><block type="trade_definition_multiplier" id="lms_multiplier"><field name="MULTIPLIERTYPE_LIST">160</field><field name="CURRENCY_LIST">USD</field>
+      <value name="AMOUNT"><shadow type="math_number_positive" id="lms_stake"><field name="NUM">1</field></shadow></value>
+      <statement name="MULTIPLIER_PARAMS"><block type="multiplier_take_profit" id="lms_tp"><value name="AMOUNT"><shadow type="math_number_positive" id="lms_tp_value"><field name="NUM">3</field></shadow></value>
+        <next><block type="multiplier_stop_loss" id="lms_sl"><value name="AMOUNT"><shadow type="math_number_positive" id="lms_sl_value"><field name="NUM">1</field></shadow></value></block></next>
+      </block></statement>
+    </block></statement>
+  </block>
+  <block type="before_purchase" id="lms_before" deletable="false" x="20" y="620"><statement name="BEFOREPURCHASE_STACK">
+    <block type="ema_statement" id="lms_fast_calc"><field name="VARIABLE" id="lms_fast">LMS fast EMA</field><statement name="STATEMENT"><block type="input_list" id="lms_fast_list"><value name="INPUT_LIST"><block type="ticks" id="lms_fast_ticks"></block></value><next><block type="period" id="lms_fast_period"><value name="PERIOD"><shadow type="math_number_positive" id="lms_fast_value"><field name="NUM">5</field></shadow></value></block></next></block></statement>
+      <next><block type="ema_statement" id="lms_mid_calc"><field name="VARIABLE" id="lms_mid">LMS mid EMA</field><statement name="STATEMENT"><block type="input_list" id="lms_mid_list"><value name="INPUT_LIST"><block type="ticks" id="lms_mid_ticks"></block></value><next><block type="period" id="lms_mid_period"><value name="PERIOD"><shadow type="math_number_positive" id="lms_mid_value"><field name="NUM">13</field></shadow></value></block></next></block></statement>
+        <next><block type="ema_statement" id="lms_slow_calc"><field name="VARIABLE" id="lms_slow">LMS slow EMA</field><statement name="STATEMENT"><block type="input_list" id="lms_slow_list"><value name="INPUT_LIST"><block type="ticks" id="lms_slow_ticks"></block></value><next><block type="period" id="lms_slow_period"><value name="PERIOD"><shadow type="math_number_positive" id="lms_slow_value"><field name="NUM">34</field></shadow></value></block></next></block></statement>
+          <next><block type="controls_if" id="lms_direction"><mutation elseif="1"></mutation>
+            <value name="IF0"><block type="logic_operation" id="lms_up_and"><field name="OP">AND</field>
+              <value name="A"><block type="logic_compare" id="lms_fast_gt_mid"><field name="OP">GT</field><value name="A"><block type="variables_get" id="lms_fast_up"><field name="VAR" id="lms_fast">LMS fast EMA</field></block></value><value name="B"><block type="variables_get" id="lms_mid_up"><field name="VAR" id="lms_mid">LMS mid EMA</field></block></value></block></value>
+              <value name="B"><block type="logic_compare" id="lms_mid_gt_slow"><field name="OP">GT</field><value name="A"><block type="variables_get" id="lms_mid_up_two"><field name="VAR" id="lms_mid">LMS mid EMA</field></block></value><value name="B"><block type="variables_get" id="lms_slow_up"><field name="VAR" id="lms_slow">LMS slow EMA</field></block></value></block></value>
+            </block></value>
+            <statement name="DO0"><block type="purchase" id="lms_buy_up"><field name="PURCHASE_LIST">MULTUP</field></block></statement>
+            <value name="IF1"><block type="logic_operation" id="lms_down_and"><field name="OP">AND</field>
+              <value name="A"><block type="logic_compare" id="lms_fast_lt_mid"><field name="OP">LT</field><value name="A"><block type="variables_get" id="lms_fast_down"><field name="VAR" id="lms_fast">LMS fast EMA</field></block></value><value name="B"><block type="variables_get" id="lms_mid_down"><field name="VAR" id="lms_mid">LMS mid EMA</field></block></value></block></value>
+              <value name="B"><block type="logic_compare" id="lms_mid_lt_slow"><field name="OP">LT</field><value name="A"><block type="variables_get" id="lms_mid_down_two"><field name="VAR" id="lms_mid">LMS mid EMA</field></block></value><value name="B"><block type="variables_get" id="lms_slow_down"><field name="VAR" id="lms_slow">LMS slow EMA</field></block></value></block></value>
+            </block></value>
+            <statement name="DO1"><block type="purchase" id="lms_buy_down"><field name="PURCHASE_LIST">MULTDOWN</field></block></statement>
+          </block></next>
+        </block></next>
+      </block></next>
+    </block>
+  </statement></block>
+  <block type="after_purchase" id="lms_after" x="900" y="20"><statement name="AFTERPURCHASE_STACK"><block type="trade_again" id="lms_again"></block></statement></block>
+</xml>

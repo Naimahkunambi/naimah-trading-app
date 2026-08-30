@@ -1,0 +1,65 @@
+<xml xmlns="http://www.w3.org/1999/xhtml" is_dbot="true" collection="false">
+  <variables>
+    <variable id="comet_fast">COMET fast EMA</variable>
+    <variable id="comet_slow">COMET slow EMA</variable>
+  </variables>
+  <block type="trade_definition" id="comet_trade" deletable="false" x="20" y="20">
+    <statement name="TRADE_OPTIONS">
+      <block type="trade_definition_market" id="comet_market" deletable="false" movable="false">
+        <field name="MARKET_LIST">synthetic_index</field>
+        <field name="SUBMARKET_LIST">random_index</field>
+        <field name="SYMBOL_LIST">1HZ25V</field>
+        <next><block type="trade_definition_tradetype" id="comet_type" deletable="false" movable="false">
+          <field name="TRADETYPECAT_LIST">multiplier</field><field name="TRADETYPE_LIST">multiplier</field>
+          <next><block type="trade_definition_contracttype" id="comet_contract" deletable="false" movable="false">
+            <field name="TYPE_LIST">both</field>
+            <next><block type="trade_definition_candleinterval" id="comet_interval" deletable="false" movable="false">
+              <field name="CANDLEINTERVAL_LIST">60</field>
+              <next><block type="trade_definition_restartbuysell" id="comet_restart" deletable="false" movable="false">
+                <field name="TIME_MACHINE_ENABLED">FALSE</field>
+                <next><block type="trade_definition_restartonerror" id="comet_error" deletable="false" movable="false"><field name="RESTARTONERROR">TRUE</field></block></next>
+              </block></next>
+            </block></next>
+          </block></next>
+        </block></next>
+      </block>
+    </statement>
+    <statement name="INITIALIZATION">
+      <block type="text_print" id="comet_notice"><value name="TEXT"><shadow type="text" id="comet_notice_text"><field name="TEXT">COMET SIMPLIFIED COMPARISON: EMA 13/34 only. This is NOT the full mountain engine. DEMO first.</field></shadow></value></block>
+    </statement>
+    <statement name="SUBMARKET">
+      <block type="trade_definition_multiplier" id="comet_multiplier">
+        <field name="MULTIPLIERTYPE_LIST">160</field><field name="CURRENCY_LIST">USD</field>
+        <value name="AMOUNT"><shadow type="math_number_positive" id="comet_stake"><field name="NUM">1</field></shadow></value>
+        <statement name="MULTIPLIER_PARAMS">
+          <block type="multiplier_take_profit" id="comet_tp"><value name="AMOUNT"><shadow type="math_number_positive" id="comet_tp_value"><field name="NUM">2</field></shadow></value>
+            <next><block type="multiplier_stop_loss" id="comet_sl"><value name="AMOUNT"><shadow type="math_number_positive" id="comet_sl_value"><field name="NUM">1</field></shadow></value></block></next>
+          </block>
+        </statement>
+      </block>
+    </statement>
+  </block>
+  <block type="before_purchase" id="comet_before" deletable="false" x="20" y="620">
+    <statement name="BEFOREPURCHASE_STACK">
+      <block type="ema_statement" id="comet_fast_calc"><field name="VARIABLE" id="comet_fast">COMET fast EMA</field>
+        <statement name="STATEMENT"><block type="input_list" id="comet_fast_list"><value name="INPUT_LIST"><block type="ticks" id="comet_fast_ticks"></block></value>
+          <next><block type="period" id="comet_fast_period"><value name="PERIOD"><shadow type="math_number_positive" id="comet_fast_period_value"><field name="NUM">13</field></shadow></value></block></next>
+        </block></statement>
+        <next><block type="ema_statement" id="comet_slow_calc"><field name="VARIABLE" id="comet_slow">COMET slow EMA</field>
+          <statement name="STATEMENT"><block type="input_list" id="comet_slow_list"><value name="INPUT_LIST"><block type="ticks" id="comet_slow_ticks"></block></value>
+            <next><block type="period" id="comet_slow_period"><value name="PERIOD"><shadow type="math_number_positive" id="comet_slow_period_value"><field name="NUM">34</field></shadow></value></block></next>
+          </block></statement>
+          <next><block type="controls_if" id="comet_direction"><mutation else="1"></mutation>
+            <value name="IF0"><block type="logic_compare" id="comet_compare"><field name="OP">GT</field>
+              <value name="A"><block type="variables_get" id="comet_fast_get"><field name="VAR" id="comet_fast">COMET fast EMA</field></block></value>
+              <value name="B"><block type="variables_get" id="comet_slow_get"><field name="VAR" id="comet_slow">COMET slow EMA</field></block></value>
+            </block></value>
+            <statement name="DO0"><block type="purchase" id="comet_buy_up"><field name="PURCHASE_LIST">MULTUP</field></block></statement>
+            <statement name="ELSE"><block type="purchase" id="comet_buy_down"><field name="PURCHASE_LIST">MULTDOWN</field></block></statement>
+          </block></next>
+        </block></next>
+      </block>
+    </statement>
+  </block>
+  <block type="after_purchase" id="comet_after" x="880" y="20"><statement name="AFTERPURCHASE_STACK"><block type="trade_again" id="comet_again"></block></statement></block>
+</xml>
