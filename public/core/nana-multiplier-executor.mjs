@@ -13,11 +13,12 @@ export class NanaMultiplierExecutor {
     this.pingTimer = null;
     this.buyPending = false;
     this.sellPending = false;
+    this.legacy = false;
     this.state = this.fresh();
   }
 
   fresh() {
-    return { connected:false, status:'OFF', accountId:'', accountType:'', currency:'USD', balance:null, contract:null, realized:0, trades:[] };
+    return { connected:false, status:'OFF', accountId:'', accountType:'', currency:'USD', balance:null, contract:null, realized:0, trades:[], transport:'' };
   }
   snapshot() { return { ...this.state, contract:this.state.contract ? {...this.state.contract} : null, trades:[...this.state.trades], buyPending:this.buyPending, sellPending:this.sellPending }; }
   emit() { this.onStatus(this.snapshot()); }
@@ -26,21 +27,59 @@ export class NanaMultiplierExecutor {
   async connect({ appId, token, account }) {
     if (!appId || !token || !account?.account_id) throw new Error('App ID, token and selected Deriv account are required.');
     this.state.status = 'AUTHORIZING'; this.emit();
-    const response = await fetch('/api/otp', {
-      method:'POST', headers:{'content-type':'application/json'},
-      body:JSON.stringify({ appId, token, accountId:account.account_id, demoOnly:false }), cache:'no-store'
-    });
-    const payload = await response.json().catch(()=>({}));
-    if (!response.ok || !payload?.url) throw new Error(payload?.error || `Deriv authorization failed (${response.status}).`);
-    this.state.accountId = String(account.account_id);
-    this.state.accountType = String(account.account_type || '').toLowerCase();
-    this.state.currency = account.currency || 'USD';
-    if (account.balance != null) this.state.balance = n(account.balance, null);
-    await this.openSocket(payload.url);
+
+    if (account.legacy) return this.connectLegacy({ appId, token, account });
+
+    try {
+      const response = await fetch('/api/otp', {
+        method:'POST', headers:{'content-type':'application/json'},
+        body:JSON.stringify({ appId, token, accountId:account.account_id, demoOnly:false }), cache:'no-store'
+      });
+      const payload = await response.json().catch(()=>({}));
+      if (!response.ok || !payload?.url) throw new Error(payload?.error || `Deriv authorization failed (${response.status}).`);
+      this.legacy = false;
+      this.state.accountId = String(account.account_id);
+      this.state.accountType = String(account.account_type || '').toLowerCase();
+      this.state.currency = account.currency || 'USD';
+      this.state.transport = 'OPTIONS API';
+      if (account.balance != null) this.state.balance = n(account.balance, null);
+      await this.openSocket(payload.url);
+      this.state.connected = true;
+      this.state.status = this.state.accountType === 'real' ? 'REAL CONNECTED' : 'DEMO CONNECTED';
+      await this.request({ balance:1, subscribe:1 }).catch(()=>null);
+      this.event('ACCOUNT CONNECTED', `${this.state.accountType.toUpperCase()} ${this.state.accountId} connected to Nana via Options API.`);
+      return this.snapshot();
+    } catch (optionsError) {
+      return this.connectLegacy({ appId, token, account, optionsError });
+    }
+  }
+
+  async connectLegacy({ appId, token, account, optionsError = null }) {
+    this.state.status = 'TRYING LEGACY DERIV'; this.emit();
+    this.legacy = true;
+    await this.openSocket(`wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(appId)}`);
+    let auth;
+    try {
+      auth = await this.request({ authorize: token }, 15000);
+    } catch (legacyError) {
+      this.disconnectSocket();
+      const a = optionsError?.message ? `Options API: ${optionsError.message}. ` : '';
+      throw new Error(`${a}Legacy Deriv: ${legacyError.message}`);
+    }
+    const z = auth?.authorize || {};
+    if (!z.loginid) {
+      this.disconnectSocket();
+      throw new Error('Legacy Deriv authorization returned no account.');
+    }
+    this.state.accountId = String(z.loginid);
+    this.state.accountType = z.is_virtual ? 'demo' : 'real';
+    this.state.currency = z.currency || account?.currency || 'USD';
+    this.state.balance = n(z.balance, account?.balance ?? null);
+    this.state.transport = 'LEGACY WEBSOCKET';
     this.state.connected = true;
     this.state.status = this.state.accountType === 'real' ? 'REAL CONNECTED' : 'DEMO CONNECTED';
     await this.request({ balance:1, subscribe:1 }).catch(()=>null);
-    this.event('ACCOUNT CONNECTED', `${this.state.accountType.toUpperCase()} ${this.state.accountId} connected to Nana.`);
+    this.event('ACCOUNT CONNECTED', `${this.state.accountType.toUpperCase()} ${this.state.accountId} connected to Nana via legacy Deriv WebSocket.`);
     return this.snapshot();
   }
 
@@ -55,7 +94,7 @@ export class NanaMultiplierExecutor {
       ws.onmessage=e=>this.onMessage(e.data);
     });
   }
-  disconnectSocket(){clearInterval(this.pingTimer);this.pingTimer=null;if(this.ws){try{this.ws.close();}catch{}}this.ws=null;}
+  disconnectSocket(){clearInterval(this.pingTimer);this.pingTimer=null;if(this.ws){try{this.ws.close();}catch{}}this.ws=null;for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new Error('Deriv socket closed.'));}this.pending.clear();}
   disconnect(){ if(this.state.contract) throw new Error('Close Nana\'s open contract before disconnecting.'); this.disconnectSocket(); this.state.connected=false; this.state.status='OFF'; this.emit(); }
   request(payload, timeoutMs=15000){ if(!this.ws||this.ws.readyState!==1)return Promise.reject(new Error('Deriv trading socket is not open.')); const req_id=++this.reqId; return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.pending.delete(req_id);reject(new Error(`Deriv request timed out: ${Object.keys(payload)[0]}`));},timeoutMs);this.pending.set(req_id,{resolve,reject,timer});this.ws.send(JSON.stringify({...payload,req_id}));}); }
   onMessage(raw){let m;try{m=JSON.parse(String(raw));}catch{return;} if(m.req_id&&this.pending.has(m.req_id)){const p=this.pending.get(m.req_id);this.pending.delete(m.req_id);clearTimeout(p.timer);m.error?p.reject(new Error(`${m.error.code||'DerivError'}: ${m.error.message||'request failed'}`)):p.resolve(m);} if(m.msg_type==='balance'&&m.balance){this.state.balance=n(m.balance.balance,this.state.balance);this.emit();} if(m.msg_type!=='proposal_open_contract'||!m.proposal_open_contract||!this.state.contract)return;const c=m.proposal_open_contract;if(String(c.contract_id)!==String(this.state.contract.contractId))return;this.state.contract.liveProfit=n(c.profit,this.state.contract.liveProfit);this.state.contract.status=String(c.status||'open').toUpperCase();this.emit();if(closed(c)&&!this.sellPending)this.recordClosed({reason:`DERIV ${String(c.status||'CLOSED').toUpperCase()}`,pnl:n(c.profit,this.state.contract.liveProfit),soldFor:n(c.sell_price,0)});}
@@ -73,7 +112,9 @@ export class NanaMultiplierExecutor {
     const contractType=side==='LONG'?'MULTUP':'MULTDOWN';
     this.buyPending=true;this.state.status='OPENING CONTRACT';this.emit();
     try{
-      const proposed=await this.request({proposal:1,amount:actualStake,basis:'stake',contract_type:contractType,currency:this.state.currency,duration_unit:'s',limit_order:{stop_loss:actualSL,take_profit:actualTP},multiplier:actualMultiplier,underlying_symbol:symbol});
+      const proposalPayload={proposal:1,amount:actualStake,basis:'stake',contract_type:contractType,currency:this.state.currency,limit_order:{stop_loss:actualSL,take_profit:actualTP},multiplier:actualMultiplier};
+      if(this.legacy)proposalPayload.symbol=symbol;else{proposalPayload.duration_unit='s';proposalPayload.underlying_symbol=symbol;}
+      const proposed=await this.request(proposalPayload);
       if(!proposed?.proposal?.id)throw new Error('Deriv returned no proposal ID.');
       const ask=n(proposed.proposal.ask_price,actualStake);
       const bought=await this.request({buy:proposed.proposal.id,price:ask});
