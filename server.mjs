@@ -60,6 +60,43 @@ async function proxy(req, res, type) {
   }
 }
 
+async function derivOauthExchange(req, res) {
+  try {
+    const input = await body(req);
+    const clientId = String(input.clientId || '').trim();
+    const code = String(input.code || '').trim();
+    const codeVerifier = String(input.codeVerifier || '').trim();
+    const redirectUri = String(input.redirectUri || '').trim();
+    if (!clientId || !code || !codeVerifier || !redirectUri) {
+      res.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      return res.end(JSON.stringify({ error: 'OAuth client ID, code, verifier and redirect URI are required.' }));
+    }
+    const form = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: clientId,
+      code,
+      code_verifier: codeVerifier,
+      redirect_uri: redirectUri
+    });
+    const response = await fetch('https://auth.deriv.com/oauth2/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: form.toString(),
+      cache: 'no-store'
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.access_token) {
+      res.writeHead(response.status || 400, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      return res.end(JSON.stringify({ error: payload?.error_description || payload?.error || 'Deriv OAuth token exchange failed.' }));
+    }
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+    res.end(JSON.stringify({ accessToken: payload.access_token, expiresIn: Number(payload.expires_in || 3600), tokenType: payload.token_type || 'Bearer' }));
+  } catch (error) {
+    res.writeHead(500, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ error: error.message || 'Deriv OAuth exchange failed.' }));
+  }
+}
+
 async function nanaAiProxy(req, res) {
   let parsedBody = {};
   if (req.method === 'POST') {
@@ -103,6 +140,7 @@ http.createServer(async (req, res) => {
   const cleanUrl = req.url.split('?')[0];
   if (req.method === 'POST' && cleanUrl === '/api/accounts') return proxy(req, res, 'accounts');
   if (req.method === 'POST' && cleanUrl === '/api/otp') return proxy(req, res, 'otp');
+  if (req.method === 'POST' && cleanUrl === '/api/deriv-oauth-exchange') return derivOauthExchange(req, res);
   if (cleanUrl === '/api/nana-ai') return nanaAiProxy(req, res);
   const rel = cleanUrl === '/' ? 'index.html' : cleanUrl.replace(/^\//, '');
   const file = path.join(pub, rel);
