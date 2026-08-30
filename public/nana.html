@@ -35,7 +35,7 @@
         <div class="hero-copy">
           <div class="eyebrow">WORLD 1-1 · NANA BOOT ROOM</div>
           <h2>Power Nana up.</h2>
-          <p>First give Nana her AI brain. Then connect Deriv and choose the account she will operate. Nothing here starts trading yet.</p>
+          <p>This is the original working Nana connection. OpenRouter stays. Groq and Gemini now join her as extra brains. Deriv login is unchanged.</p>
           <div class="mini-world">
             <span class="block block-a">N</span><span class="block block-b">A</span><span class="block block-c">N</span><span class="block block-d">A</span>
             <span class="pipe-art"></span>
@@ -43,10 +43,15 @@
         </div>
         <div class="login-card pixel-card">
           <div class="brain-box">
-            <div class="card-title"><span class="brain-orb">AI</span><div><small>STEP 1</small><b>NANA BRAIN</b></div></div>
+            <div class="card-title"><span class="brain-orb">AI</span><div><small>STEP 1</small><b>NANA BRAIN · 3 BRAINS</b></div></div>
             <label>OPENROUTER API KEY<input id="aiToken" type="password" autocomplete="off" spellcheck="false" placeholder="sk-or-v1-..."></label>
-            <p class="microcopy">Kept only in this open page. It is not written to GitHub or localStorage.</p>
-            <p id="aiTokenStatus" class="status token-status">AI KEY NOT LOADED</p>
+            <p id="openrouterTokenStatus" class="status token-status">OPENROUTER KEY REQUIRED</p>
+            <label>GROQ API KEY<input id="groqToken" type="password" autocomplete="off" spellcheck="false" placeholder="gsk_..."></label>
+            <p id="groqTokenStatus" class="status token-status">GROQ KEY REQUIRED</p>
+            <label>GOOGLE GEMINI API KEY<input id="geminiToken" type="password" autocomplete="off" spellcheck="false" placeholder="AIza..."></label>
+            <p id="geminiTokenStatus" class="status token-status">GEMINI KEY REQUIRED</p>
+            <p class="microcopy">All AI keys stay only in this open page. They are not written to GitHub or localStorage.</p>
+            <p id="aiTokenStatus" class="status token-status">ADD ALL 3 AI KEYS</p>
           </div>
           <div class="connect-divider"><span>+</span></div>
           <div class="deriv-box">
@@ -80,11 +85,11 @@
           <label>Market<select id="symbol"><option value="1HZ25V">Volatility 25 (1s)</option></select></label>
           <label>Multiplier<select id="multiplier"><option>160</option><option>400</option><option>800</option><option>1200</option><option>1600</option></select></label>
           <label>Maximum time in one trade (seconds)<input id="maxTradeSeconds" type="number" min="10" step="10" value="300"></label>
-          <label>AI model<input id="model" value="openrouter/auto" placeholder="openrouter/auto"></label>
+          <label>OpenRouter referee model<input id="model" value="openrouter/auto" placeholder="openrouter/auto"></label>
         </div>
         <div class="pixel-card mission-card">
           <div class="card-title"><span class="flag-orb">⚑</span><div><small>MISSION BLOCK</small><b>NANA'S JOB</b></div></div>
-          <p>Watch the market. Understand the story. Judge location and risk. Trade only when the opportunity deserves money. Manage the position. Remember what happened.</p>
+          <p>Groq scouts the market. Gemini independently reviews serious candidates. OpenRouter is kept as Nana's referee/fallback instead of being called every few seconds.</p>
           <div class="law">WAIT is allowed.</div>
           <div class="law">Nana may not increase the laws herself.</div>
           <div class="law">Profit target never forces an entry.</div>
@@ -101,17 +106,12 @@
       </div>
       <div class="live-grid">
         <div class="chart-card pixel-card">
-          <div class="chart-head">
-            <div><small>WORLD 1-1 · VOLATILITY 25 (1s)</small><h2 id="lastPrice">--</h2></div>
-            <div class="live-controls"><span id="feedStatus" class="pill">FEED OFF</span></div>
-          </div>
+          <div class="chart-head"><div><small>WORLD 1-1 · VOLATILITY 25 (1s)</small><h2 id="lastPrice">--</h2></div><div class="live-controls"><span id="feedStatus" class="pill">FEED OFF</span></div></div>
           <canvas id="chartCanvas" width="1200" height="540"></canvas>
           <div class="legend"><span>▲ Nana BUY</span><span>▼ Nana SELL</span><span>◆ Nana EXIT</span></div>
         </div>
         <aside class="nana-card pixel-card">
-          <div class="nana-avatar">N</div>
-          <small>NANA SEES</small>
-          <h2 id="decision">WAIT</h2>
+          <div class="nana-avatar">N</div><small>NANA SEES</small><h2 id="decision">WAIT</h2>
           <div class="readout"><span>Main move</span><b id="mainMove">--</b></div>
           <div class="readout"><span>Phase</span><b id="phase">--</b></div>
           <div class="readout"><span>Location</span><b id="location">--</b></div>
@@ -125,13 +125,7 @@
 
     <section data-view="results" class="view">
       <div class="section-head"><div><small>WORLD SCORE</small><h2>Nana Scoreboard</h2></div><button id="downloadResults" class="yellow-button">DOWNLOAD CSV</button></div>
-      <div class="score-grid">
-        <div class="score"><span>SESSION P/L</span><b id="scorePnl">$0.00</b></div>
-        <div class="score"><span>TRADES</span><b id="scoreTrades">0</b></div>
-        <div class="score"><span>WINS</span><b id="scoreWins">0</b></div>
-        <div class="score"><span>LOSSES</span><b id="scoreLosses">0</b></div>
-        <div class="score"><span>WIN RATE</span><b id="scoreWinRate">0%</b></div>
-      </div>
+      <div class="score-grid"><div class="score"><span>SESSION P/L</span><b id="scorePnl">$0.00</b></div><div class="score"><span>TRADES</span><b id="scoreTrades">0</b></div><div class="score"><span>WINS</span><b id="scoreWins">0</b></div><div class="score"><span>LOSSES</span><b id="scoreLosses">0</b></div><div class="score"><span>WIN RATE</span><b id="scoreWinRate">0%</b></div></div>
       <div class="pixel-card table-wrap"><table><thead><tr><th>Time</th><th>Side</th><th>Stake</th><th>Hold</th><th>P/L</th><th>Entry context</th><th>Exit</th></tr></thead><tbody id="resultsRows"><tr><td colspan="7">No trades yet.</td></tr></tbody></table></div>
     </section>
 
