@@ -11,7 +11,22 @@ const mime = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
   '.json': 'application/json', '.xml': 'application/xml', '.svg': 'image/svg+xml', '.png': 'image/png'
 };
-const headers = (appId, token) => ({ 'Deriv-App-ID': String(appId), Authorization: `Bearer ${token}`, Accept: 'application/json' });
+const headers = (appId, token) => ({ 'Deriv-App-ID': String(appId).trim(), Authorization: `Bearer ${String(token).trim()}`, Accept: 'application/json' });
+
+function derivError(payload = {}, status = 500) {
+  const first = Array.isArray(payload?.errors) ? payload.errors[0] : null;
+  const code = String(first?.code || payload?.error?.code || '').trim();
+  const message = String(first?.message || payload?.error?.message || payload?.message || '').trim();
+  let hint = '';
+  if (Number(status) === 401) hint = 'Check that the PAT is valid, belongs to this Deriv application, and that this is a new developers.deriv.com App ID rather than a legacy App ID.';
+  else if (Number(status) === 403) hint = 'The token may be missing the trade permission required to list Options accounts or request an OTP.';
+  return {
+    error: message || (Number(status) === 401 ? 'Invalid or missing Deriv authentication credentials.' : 'Deriv API request failed.'),
+    code: code || `HTTP_${status}`,
+    status: Number(status),
+    hint
+  };
+}
 
 async function body(req) {
   let value = '';
@@ -22,7 +37,8 @@ async function body(req) {
 async function proxy(req, res, type) {
   try {
     const input = await body(req);
-    const { appId, token } = input;
+    const appId = String(input.appId || '').trim();
+    const token = String(input.token || '').trim();
     if (!appId || !token) throw Object.assign(new Error('App ID and token are required.'), { status: 400 });
     let verifiedAccount = null;
 
@@ -31,7 +47,10 @@ async function proxy(req, res, type) {
         method: 'GET', headers: headers(appId, token), cache: 'no-store'
       });
       const checkedPayload = await checked.json().catch(() => ({}));
-      if (!checked.ok) throw Object.assign(new Error(checkedPayload?.errors?.[0]?.message || 'Could not verify Demo account.'), { status: checked.status });
+      if (!checked.ok) {
+        const detail = derivError(checkedPayload, checked.status);
+        throw Object.assign(new Error(`${detail.code} · ${detail.error}${detail.hint ? ` · ${detail.hint}` : ''}`), { status: checked.status });
+      }
       const accounts = Array.isArray(checkedPayload?.data) ? checkedPayload.data : [checkedPayload?.data].filter(Boolean);
       verifiedAccount = accounts.find(account => String(account?.account_id || '') === String(input.accountId || ''));
       if (!verifiedAccount) throw Object.assign(new Error('REFUSED: selected account was not returned by Deriv.'), { status: 403 });
@@ -53,10 +72,10 @@ async function proxy(req, res, type) {
       ? { url: payload?.data?.url, otpExpiresIn: 120, ...(verifiedAccount ? { account: verifiedAccount, demoOnly: true } : {}) }
       : { accounts: Array.isArray(payload.data) ? payload.data : [payload.data].filter(Boolean) };
     res.writeHead(response.status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(response.ok ? success : { error: payload?.errors?.[0]?.message || 'Deriv API error' }));
+    res.end(JSON.stringify(response.ok ? success : derivError(payload, response.status)));
   } catch (error) {
-    res.writeHead(error.status || 500, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: error.message || 'Unexpected error' }));
+    res.writeHead(error.status || 500, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ error: error.message || 'Unexpected error', status: error.status || 500 }));
   }
 }
 
