@@ -8,45 +8,26 @@
   <link rel="stylesheet" href="/nana.css">
 </head>
 <body>
-  <div class="world-cloud cloud-one"></div>
-  <div class="world-cloud cloud-two"></div>
-  <div class="world-cloud cloud-three"></div>
+  <div class="world-cloud cloud-one"></div><div class="world-cloud cloud-two"></div><div class="world-cloud cloud-three"></div>
   <main class="nana-shell">
     <header class="game-bar">
       <div class="brand"><span class="pixel-star">✦</span><div><small>SANI TRADING LAB</small><h1>NANA</h1></div></div>
-      <div class="hud">
-        <div><span>WORLD</span><b>V25</b></div>
-        <div><span>BALANCE</span><b id="hudBalance">--</b></div>
-        <div><span>MISSION</span><b id="hudMission">+$160</b></div>
-        <div><span>NANA</span><b id="hudNana">SLEEPING</b></div>
-      </div>
+      <div class="hud"><div><span>WORLD</span><b>V25</b></div><div><span>BALANCE</span><b id="hudBalance">--</b></div><div><span>MISSION</span><b id="hudMission">+$160</b></div><div><span>NANA</span><b id="hudNana">SLEEPING</b></div></div>
     </header>
-
-    <nav class="level-nav">
-      <button data-page="login" class="active">1 · POWER UP</button>
-      <button data-page="config">2 · LAWS</button>
-      <button data-page="chart">3 · LIVE WORLD</button>
-      <button data-page="results">4 · SCOREBOARD</button>
-      <button data-page="tape">5 · TAPE</button>
-    </nav>
+    <nav class="level-nav"><button data-page="login" class="active">1 · POWER UP</button><button data-page="config">2 · LAWS</button><button data-page="chart">3 · LIVE WORLD</button><button data-page="results">4 · SCOREBOARD</button><button data-page="tape">5 · TAPE</button></nav>
 
     <section data-view="login" class="view active">
       <div class="hero-card">
-        <div class="hero-copy">
-          <div class="eyebrow">WORLD 1-1 · NANA BOOT ROOM</div>
-          <h2>Power Nana up.</h2>
-          <p>First give Nana her AI brain. Then connect Deriv and choose the account she will operate. Nothing here starts trading yet.</p>
-          <div class="mini-world">
-            <span class="block block-a">N</span><span class="block block-b">A</span><span class="block block-c">N</span><span class="block block-d">A</span>
-            <span class="pipe-art"></span>
-          </div>
-        </div>
+        <div class="hero-copy"><div class="eyebrow">WORLD 1-1 · NANA BOOT ROOM</div><h2>Power Nana up.</h2><p>Nana now has two brains. Groq reads the market first. Gemini independently reviews the same market and Groq's call. Nana only risks money when the final judgment survives both views.</p><div class="mini-world"><span class="block block-a">N</span><span class="block block-b">A</span><span class="block block-c">N</span><span class="block block-d">A</span><span class="pipe-art"></span></div></div>
         <div class="login-card pixel-card">
           <div class="brain-box">
-            <div class="card-title"><span class="brain-orb">AI</span><div><small>STEP 1</small><b>NANA BRAIN</b></div></div>
-            <label>OPENROUTER API KEY<input id="aiToken" type="password" autocomplete="off" spellcheck="false" placeholder="sk-or-v1-..."></label>
-            <p class="microcopy">Kept only in this open page. It is not written to GitHub or localStorage.</p>
-            <p id="aiTokenStatus" class="status token-status">AI KEY NOT LOADED</p>
+            <div class="card-title"><span class="brain-orb">AI</span><div><small>STEP 1</small><b>NANA DUO BRAIN</b></div></div>
+            <label>GROQ API KEY<input id="groqToken" type="password" autocomplete="off" spellcheck="false" placeholder="gsk_..."></label>
+            <p id="groqTokenStatus" class="status token-status">GROQ KEY REQUIRED</p>
+            <label>GOOGLE GEMINI API KEY<input id="geminiToken" type="password" autocomplete="off" spellcheck="false" placeholder="AIza..."></label>
+            <p id="geminiTokenStatus" class="status token-status">GEMINI KEY REQUIRED</p>
+            <p class="microcopy">Both keys stay only in this open page. They are never written to GitHub or localStorage.</p>
+            <p id="aiTokenStatus" class="status token-status">ADD BOTH AI KEYS</p>
           </div>
           <div class="connect-divider"><span>+</span></div>
           <div class="deriv-box">
@@ -55,12 +36,9 @@
             <label>PAT / OAUTH TOKEN<input id="token" type="password" autocomplete="off" placeholder="Deriv token"></label>
             <button id="loadAccounts" class="yellow-button">LOAD ACCOUNTS</button>
             <label>ACCOUNT<select id="account"><option value="">Load accounts first</option></select></label>
-            <div id="realConfirm" class="real-confirm hidden">
-              <label class="check"><input id="realUnlock" type="checkbox"> I understand this selected account uses real money.</label>
-            </div>
+            <div id="realConfirm" class="real-confirm hidden"><label class="check"><input id="realUnlock" type="checkbox"> I understand this selected account uses real money.</label></div>
           </div>
-          <div class="row login-actions"><button id="connectAccount" class="primary">CONNECT NANA</button><button id="disconnectAccount">DISCONNECT</button></div>
-          <p id="accountStatus" class="status">OFFLINE</p>
+          <div class="row login-actions"><button id="connectAccount" class="primary">CONNECT NANA</button><button id="disconnectAccount">DISCONNECT</button></div><p id="accountStatus" class="status">OFFLINE</p>
         </div>
       </div>
     </section>
@@ -68,79 +46,20 @@
     <section data-view="config" class="view">
       <div class="section-head"><div><small>WORLD RULES</small><h2>Nana's Laws</h2></div><p>You choose the walls. Nana chooses how to trade inside them.</p></div>
       <div class="config-grid">
-        <div class="pixel-card money-card">
-          <div class="card-title"><span class="coin-orb">$</span><div><small>LAW BLOCK</small><b>MONEY</b></div></div>
-          <label>Maximum risk per trade ($)<input id="maxRisk" type="number" min="0.1" step="0.1" value="1"></label>
-          <label>Maximum session loss ($)<input id="maxLoss" type="number" min="0.1" step="0.1" value="10"></label>
-          <label>Profit mission ($)<input id="profitTarget" type="number" min="1" step="1" value="160"></label>
-          <label>Maximum open trades<input id="maxOpen" type="number" min="1" max="1" step="1" value="1"></label>
-        </div>
-        <div class="pixel-card market-card">
-          <div class="card-title"><span class="world-orb">★</span><div><small>LAW BLOCK</small><b>MARKET</b></div></div>
-          <label>Market<select id="symbol"><option value="1HZ25V">Volatility 25 (1s)</option></select></label>
-          <label>Multiplier<select id="multiplier"><option>160</option><option>400</option><option>800</option><option>1200</option><option>1600</option></select></label>
-          <label>Maximum time in one trade (seconds)<input id="maxTradeSeconds" type="number" min="10" step="10" value="300"></label>
-          <label>AI model<input id="model" value="openrouter/auto" placeholder="openrouter/auto"></label>
-        </div>
-        <div class="pixel-card mission-card">
-          <div class="card-title"><span class="flag-orb">⚑</span><div><small>MISSION BLOCK</small><b>NANA'S JOB</b></div></div>
-          <p>Watch the market. Understand the story. Judge location and risk. Trade only when the opportunity deserves money. Manage the position. Remember what happened.</p>
-          <div class="law">WAIT is allowed.</div>
-          <div class="law">Nana may not increase the laws herself.</div>
-          <div class="law">Profit target never forces an entry.</div>
-          <button id="saveConfig" class="primary">SAVE LAWS</button>
-          <button type="button" class="go-live" data-page-jump="chart">GO TO LIVE WORLD →</button>
-        </div>
+        <div class="pixel-card money-card"><div class="card-title"><span class="coin-orb">$</span><div><small>LAW BLOCK</small><b>MONEY</b></div></div><label>Maximum risk per trade ($)<input id="maxRisk" type="number" min="0.1" step="0.1" value="1"></label><label>Maximum session loss ($)<input id="maxLoss" type="number" min="0.1" step="0.1" value="10"></label><label>Profit mission ($)<input id="profitTarget" type="number" min="1" step="1" value="160"></label><label>Maximum open trades<input id="maxOpen" type="number" min="1" max="1" step="1" value="1"></label></div>
+        <div class="pixel-card market-card"><div class="card-title"><span class="world-orb">★</span><div><small>LAW BLOCK</small><b>MARKET + AI</b></div></div><label>Market<select id="symbol"><option value="1HZ25V">Volatility 25 (1s)</option></select></label><label>Multiplier<select id="multiplier"><option>160</option><option>400</option><option>800</option><option>1200</option><option>1600</option></select></label><label>Maximum time in one trade (seconds)<input id="maxTradeSeconds" type="number" min="10" step="10" value="300"></label><label>Groq brain<input id="model" value="openai/gpt-oss-120b" placeholder="openai/gpt-oss-120b"></label><label>Gemini reviewer<input id="geminiModel" value="gemini-2.5-flash" placeholder="gemini-2.5-flash"></label></div>
+        <div class="pixel-card mission-card"><div class="card-title"><span class="flag-orb">⚑</span><div><small>MISSION BLOCK</small><b>NANA'S JOB</b></div></div><p>Watch the market. Understand the story. Judge location and risk. Trade only when the opportunity deserves money. Manage the position. Remember what happened.</p><div class="law">Groq proposes. Gemini reviews.</div><div class="law">BUY / SELL needs agreement.</div><div class="law">Disagreement means WAIT.</div><div class="law">Profit target never forces an entry.</div><button id="saveConfig" class="primary">SAVE LAWS</button><button type="button" class="go-live" data-page-jump="chart">GO TO LIVE WORLD →</button></div>
       </div>
     </section>
 
     <section data-view="chart" class="view">
-      <div class="trade-gate pixel-card">
-        <div><small>LEVEL READY</small><h2>Connected does not mean trading.</h2><p id="tradingGateText">When you are ready, press START TRADING. Nana will then watch, judge, enter, manage and exit by herself.</p></div>
-        <div class="trade-gate-actions"><button id="wakeNana" class="start-button">▶ START TRADING</button><button id="sleepNana" class="stop-button">■ STOP TRADING</button></div>
-      </div>
-      <div class="live-grid">
-        <div class="chart-card pixel-card">
-          <div class="chart-head">
-            <div><small>WORLD 1-1 · VOLATILITY 25 (1s)</small><h2 id="lastPrice">--</h2></div>
-            <div class="live-controls"><span id="feedStatus" class="pill">FEED OFF</span></div>
-          </div>
-          <canvas id="chartCanvas" width="1200" height="540"></canvas>
-          <div class="legend"><span>▲ Nana BUY</span><span>▼ Nana SELL</span><span>◆ Nana EXIT</span></div>
-        </div>
-        <aside class="nana-card pixel-card">
-          <div class="nana-avatar">N</div>
-          <small>NANA SEES</small>
-          <h2 id="decision">WAIT</h2>
-          <div class="readout"><span>Main move</span><b id="mainMove">--</b></div>
-          <div class="readout"><span>Phase</span><b id="phase">--</b></div>
-          <div class="readout"><span>Location</span><b id="location">--</b></div>
-          <div class="readout"><span>Confidence</span><b id="confidence">--</b></div>
-          <div class="nana-speech"><p id="thesis">Nana is waiting to see the market.</p><ul id="evidence"></ul></div>
-          <div class="position-box"><small>OPEN POSITION</small><b id="positionState">NONE</b><span id="positionPnl">$0.00</span></div>
-          <p id="aiStatus" class="status">AI idle</p>
-        </aside>
-      </div>
+      <div class="trade-gate pixel-card"><div><small>LEVEL READY</small><h2>Connected does not mean trading.</h2><p id="tradingGateText">When you are ready, press START TRADING. Nana will then watch, judge, enter, manage and exit by herself.</p></div><div class="trade-gate-actions"><button id="wakeNana" class="start-button">▶ START TRADING</button><button id="sleepNana" class="stop-button">■ STOP TRADING</button></div></div>
+      <div class="live-grid"><div class="chart-card pixel-card"><div class="chart-head"><div><small>WORLD 1-1 · VOLATILITY 25 (1s)</small><h2 id="lastPrice">--</h2></div><div class="live-controls"><span id="feedStatus" class="pill">FEED OFF</span></div></div><canvas id="chartCanvas" width="1200" height="540"></canvas><div class="legend"><span>▲ Nana BUY</span><span>▼ Nana SELL</span><span>◆ Nana EXIT</span></div></div><aside class="nana-card pixel-card"><div class="nana-avatar">N</div><small>NANA SEES</small><h2 id="decision">WAIT</h2><div class="readout"><span>Main move</span><b id="mainMove">--</b></div><div class="readout"><span>Phase</span><b id="phase">--</b></div><div class="readout"><span>Location</span><b id="location">--</b></div><div class="readout"><span>Confidence</span><b id="confidence">--</b></div><div class="nana-speech"><p id="thesis">Nana is waiting to see the market.</p><ul id="evidence"></ul></div><div class="position-box"><small>OPEN POSITION</small><b id="positionState">NONE</b><span id="positionPnl">$0.00</span></div><p id="aiStatus" class="status">AI idle</p></aside></div>
     </section>
 
-    <section data-view="results" class="view">
-      <div class="section-head"><div><small>WORLD SCORE</small><h2>Nana Scoreboard</h2></div><button id="downloadResults" class="yellow-button">DOWNLOAD CSV</button></div>
-      <div class="score-grid">
-        <div class="score"><span>SESSION P/L</span><b id="scorePnl">$0.00</b></div>
-        <div class="score"><span>TRADES</span><b id="scoreTrades">0</b></div>
-        <div class="score"><span>WINS</span><b id="scoreWins">0</b></div>
-        <div class="score"><span>LOSSES</span><b id="scoreLosses">0</b></div>
-        <div class="score"><span>WIN RATE</span><b id="scoreWinRate">0%</b></div>
-      </div>
-      <div class="pixel-card table-wrap"><table><thead><tr><th>Time</th><th>Side</th><th>Stake</th><th>Hold</th><th>P/L</th><th>Entry context</th><th>Exit</th></tr></thead><tbody id="resultsRows"><tr><td colspan="7">No trades yet.</td></tr></tbody></table></div>
-    </section>
-
-    <section data-view="tape" class="view">
-      <div class="section-head"><div><small>NANA MEMORY</small><h2>Decision Tape</h2></div><button id="downloadTape" class="yellow-button">DOWNLOAD CSV</button></div>
-      <div id="tapeRows" class="tape pixel-card"><div class="empty">Nana's journal will appear here.</div></div>
-    </section>
+    <section data-view="results" class="view"><div class="section-head"><div><small>WORLD SCORE</small><h2>Nana Scoreboard</h2></div><button id="downloadResults" class="yellow-button">DOWNLOAD CSV</button></div><div class="score-grid"><div class="score"><span>SESSION P/L</span><b id="scorePnl">$0.00</b></div><div class="score"><span>TRADES</span><b id="scoreTrades">0</b></div><div class="score"><span>WINS</span><b id="scoreWins">0</b></div><div class="score"><span>LOSSES</span><b id="scoreLosses">0</b></div><div class="score"><span>WIN RATE</span><b id="scoreWinRate">0%</b></div></div><div class="pixel-card table-wrap"><table><thead><tr><th>Time</th><th>Side</th><th>Stake</th><th>Hold</th><th>P/L</th><th>Entry context</th><th>Exit</th></tr></thead><tbody id="resultsRows"><tr><td colspan="7">No trades yet.</td></tr></tbody></table></div></section>
+    <section data-view="tape" class="view"><div class="section-head"><div><small>NANA MEMORY</small><h2>Decision Tape</h2></div><button id="downloadTape" class="yellow-button">DOWNLOAD CSV</button></div><div id="tapeRows" class="tape pixel-card"><div class="empty">Nana's journal will appear here.</div></div></section>
   </main>
-  <script src="/nana-bootstrap.js"></script>
-  <script type="module" src="/nana.js"></script>
+  <script src="/nana-bootstrap.js"></script><script type="module" src="/nana.js"></script>
 </body>
 </html>
