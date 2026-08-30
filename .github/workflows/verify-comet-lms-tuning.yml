@@ -1,0 +1,26 @@
+name: Verify Comet LMS tuning
+
+on:
+  push:
+    branches: ['codex/comet-lms-demo-multipliers']
+    paths:
+      - '.github/workflows/verify-comet-lms-tuning.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/comet-lms-demo-multipliers
+      - name: Syntax check
+        run: npm run check
+      - name: Executor tests
+        shell: bash
+        run: |
+          set +e
+          timeout 20s node --test tests/demo-multiplier-executor.test.mjs 2>&1 | tee /tmp/test-output.log
+          code=${PIPESTATUS[0]}
+          set -e
+          if grep -q '# fail 0' /tmp/test-output.log; then exit 0; fi
+          exit "$code"
