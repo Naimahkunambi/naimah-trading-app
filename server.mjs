@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import nanaAiHandler from './api/nana-ai.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const pub = path.join(root, 'public');
@@ -59,10 +60,51 @@ async function proxy(req, res, type) {
   }
 }
 
+async function nanaAiProxy(req, res) {
+  let parsedBody = {};
+  if (req.method === 'POST') {
+    try { parsedBody = await body(req); }
+    catch (error) {
+      res.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      return res.end(JSON.stringify({ error: `Invalid JSON body: ${error.message}` }));
+    }
+  }
+
+  let statusCode = 200;
+  const reply = {
+    status(code) { statusCode = Number(code) || 200; return this; },
+    json(payload) {
+      if (res.writableEnded) return;
+      res.writeHead(statusCode, {
+        'content-type': 'application/json',
+        'cache-control': 'no-store, max-age=0',
+        'x-content-type-options': 'nosniff',
+        'referrer-policy': 'no-referrer'
+      });
+      res.end(JSON.stringify(payload));
+    }
+  };
+
+  try {
+    await nanaAiHandler({
+      method: req.method,
+      body: parsedBody,
+      headers: req.headers || {}
+    }, reply);
+  } catch (error) {
+    if (!res.writableEnded) {
+      res.writeHead(500, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ error: error?.message || 'Nana AI route failed.' }));
+    }
+  }
+}
+
 http.createServer(async (req, res) => {
-  if (req.method === 'POST' && req.url === '/api/accounts') return proxy(req, res, 'accounts');
-  if (req.method === 'POST' && req.url === '/api/otp') return proxy(req, res, 'otp');
-  const rel = req.url === '/' ? 'index.html' : req.url.split('?')[0].replace(/^\//, '');
+  const cleanUrl = req.url.split('?')[0];
+  if (req.method === 'POST' && cleanUrl === '/api/accounts') return proxy(req, res, 'accounts');
+  if (req.method === 'POST' && cleanUrl === '/api/otp') return proxy(req, res, 'otp');
+  if (cleanUrl === '/api/nana-ai') return nanaAiProxy(req, res);
+  const rel = cleanUrl === '/' ? 'index.html' : cleanUrl.replace(/^\//, '');
   const file = path.join(pub, rel);
   if (!file.startsWith(pub)) { res.writeHead(403); return res.end(); }
   try {
