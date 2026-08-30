@@ -1,0 +1,1 @@
+Trigger macro trend gate workflow for COMET and Last Man Standing.
