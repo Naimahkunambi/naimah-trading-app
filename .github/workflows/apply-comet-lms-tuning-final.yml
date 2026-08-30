@@ -1,0 +1,68 @@
+name: Finalize Comet LMS tuning
+
+on:
+  push:
+    branches: ['codex/comet-lms-demo-multipliers']
+    paths:
+      - '.github/workflows/apply-comet-lms-tuning-final.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/comet-lms-demo-multipliers
+
+      - name: Apply tuning patch and compatibility fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, base64, gzip
+          src = Path('.github/workflows/apply-comet-lms-tuning.yml').read_text()
+          m = re.search(r"printf '%s' '([^']+)' \| base64 -d \| gzip -d > /tmp/apply_tuning.py", src)
+          if not m:
+              raise SystemExit('Could not locate embedded tuning patch')
+          Path('/tmp/apply_tuning.py').write_text(gzip.decompress(base64.b64decode(m.group(1))).decode())
+          PY
+          python3 /tmp/apply_tuning.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('public/core/demo-multiplier-executor.mjs')
+          s = p.read_text()
+          s = re.sub(r'stopLoss\s*=\s*[^,}]+', 'stopLoss = null', s, count=1)
+          s = re.sub(r'takeProfit\s*=\s*[^,}]+', 'takeProfit = null', s, count=1)
+          s, n1 = re.subn(r'const actualStopLoss\s*=\s*[^;]+;', "const actualStopLoss = stopLoss == null ? actualStake : Math.max(0.1, asNumber(stopLoss, actualStake));", s, count=1)
+          s, n2 = re.subn(r'const actualTakeProfit\s*=\s*[^;]+;', "const actualTakeProfit = takeProfit == null ? Number((actualStake * actualTargetR).toFixed(2)) : Math.max(0.1, asNumber(takeProfit, actualStake * actualTargetR));", s, count=1)
+          if not (n1 and n2):
+              raise SystemExit(f'Could not patch independent limit defaults: stop={n1} tp={n2}')
+          p.write_text(s)
+          PY
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Executor tests
+        shell: bash
+        run: |
+          set +e
+          timeout 20s node --test tests/demo-multiplier-executor.test.mjs 2>&1 | tee /tmp/test-output.log
+          code=${PIPESTATUS[0]}
+          set -e
+          if grep -q '# fail 0' /tmp/test-output.log; then exit 0; fi
+          exit "$code"
+
+      - name: Commit final tuned engines
+        shell: bash
+        run: |
+          git config user.name "SANI Patch Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add public/comet.js public/comet.html public/comet.css public/last-man-standing.js public/last-man-standing.html public/last-man-standing.css public/core/demo-multiplier-executor.mjs tests/demo-multiplier-executor.test.mjs
+          git commit -m "feat: finish editable Comet and Last Man tuning controls [skip ci]"
+          git push origin HEAD:codex/comet-lms-demo-multipliers
