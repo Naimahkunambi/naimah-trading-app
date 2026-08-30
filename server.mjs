@@ -3,56 +3,93 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
+import accountsHandler from './api/accounts.js';
+import otpHandler from './api/otp.js';
+import naiAiHandler from './api/nai-ai.js';
+import derivSessionStartHandler from './api/deriv-session-start.js';
+import derivSessionCompleteHandler from './api/deriv-session-complete.js';
+import derivSessionAccountsHandler from './api/deriv-session-accounts.js';
+
 const root=path.dirname(fileURLToPath(import.meta.url));
 const pub=path.join(root,'public');
 const port=Number(process.env.PORT||3000);
-const mime={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.json':'application/json','.svg':'image/svg+xml','.png':'image/png'};
+const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp'};
 
-async function body(req){let s='';for await(const c of req)s+=c;return s?JSON.parse(s):{}}
-async function upstreamPayload(r){
-  const text=await r.text();
-  if(!text)return{};
-  try{return JSON.parse(text)}catch{return{__plainText:text}}
+async function readBody(req){
+  let s='';
+  for await(const c of req)s+=c;
+  if(!s)return{};
+  try{return JSON.parse(s)}catch{return{}}
 }
-function upstreamError(j,status){
-  return j?.errors?.[0]?.message||j?.error?.message||j?.message||j?.__plainText||`Deriv request failed (${status}).`;
+
+function augmentResponse(res){
+  if(typeof res.status!=='function')res.status=code=>{res.statusCode=code;return res};
+  if(typeof res.json!=='function')res.json=value=>{
+    if(!res.headersSent)res.setHeader('content-type','application/json; charset=utf-8');
+    res.end(JSON.stringify(value));
+    return res;
+  };
+  if(typeof res.send!=='function')res.send=value=>{
+    if(value!=null&&typeof value==='object'&&!Buffer.isBuffer(value)){
+      if(!res.headersSent)res.setHeader('content-type','application/json; charset=utf-8');
+      res.end(JSON.stringify(value));
+    }else res.end(value==null?'':String(value));
+    return res;
+  };
+  return res;
 }
-async function proxy(req,res,type){
-  try{
-    const b=await body(req),{appId,token}=b;
-    if(!appId||!token)throw Object.assign(new Error('App ID and token are required.'),{status:400});
-    let url='https://api.derivws.com/trading/v1/options/accounts',method='GET';
-    if(type==='otp'){
-      if(!b.accountId)throw Object.assign(new Error('Account ID is required.'),{status:400});
-      url+=`/${encodeURIComponent(b.accountId)}/otp`;method='POST';
+
+const API_ROUTES=new Map([
+  ['/api/accounts',accountsHandler],
+  ['/api/otp',otpHandler],
+  ['/api/nai-ai',naiAiHandler],
+  ['/api/deriv-session-start',derivSessionStartHandler],
+  ['/api/deriv-session-complete',derivSessionCompleteHandler],
+  ['/api/deriv-session-accounts',derivSessionAccountsHandler]
+]);
+
+async function serveApi(req,res,url){
+  const handler=API_ROUTES.get(url.pathname);
+  if(!handler)return false;
+  req.query=Object.fromEntries(url.searchParams.entries());
+  if(['POST','PUT','PATCH','DELETE'].includes(req.method||''))req.body=await readBody(req);
+  augmentResponse(res);
+  res.setHeader('cache-control','no-store, max-age=0');
+  res.setHeader('x-content-type-options','nosniff');
+  try{await handler(req,res)}catch(e){
+    if(!res.writableEnded){
+      res.statusCode=500;
+      res.setHeader('content-type','application/json; charset=utf-8');
+      res.end(JSON.stringify({error:e?.message||'Unhandled API error.'}));
     }
-    const r=await fetch(url,{method,headers:{'Deriv-App-ID':String(appId),Authorization:`Bearer ${token}`,Accept:'application/json'}});
-    const j=await upstreamPayload(r);
-    res.writeHead(r.status,{'content-type':'application/json','cache-control':'no-store'});
-    if(!r.ok)return res.end(JSON.stringify({error:upstreamError(j,r.status)}));
-    if(type==='otp'){
-      const socketUrl=j?.data?.url;
-      if(!socketUrl)return res.end(JSON.stringify({error:'Deriv authorized the account but returned no trading WebSocket URL.'}));
-      return res.end(JSON.stringify({url:socketUrl,otpExpiresIn:120}));
-    }
-    const data=j?.data;
-    const accounts=Array.isArray(data)?data:[data].filter(Boolean);
-    return res.end(JSON.stringify({accounts}));
-  }catch(e){
-    res.writeHead(e.status||500,{'content-type':'application/json','cache-control':'no-store'});
-    res.end(JSON.stringify({error:e.message||'Unexpected error'}));
   }
+  return true;
+}
+
+async function findPublicFile(pathname){
+  let rel=pathname==='/'?'index.html':pathname.replace(/^\//,'');
+  let candidate=path.join(pub,rel);
+  if(!candidate.startsWith(pub))return null;
+  try{const st=await fs.stat(candidate);if(st.isFile())return candidate}catch{}
+  if(!path.extname(candidate)){
+    const html=`${candidate}.html`;
+    try{const st=await fs.stat(html);if(st.isFile())return html}catch{}
+  }
+  return null;
 }
 
 http.createServer(async(req,res)=>{
-  if(req.method==='POST'&&req.url==='/api/accounts')return proxy(req,res,'accounts');
-  if(req.method==='POST'&&req.url==='/api/otp')return proxy(req,res,'otp');
-  let rel=req.url==='/'?'index.html':req.url.split('?')[0].replace(/^\//,'');
-  const f=path.join(pub,rel);
-  if(!f.startsWith(pub)){res.writeHead(403);return res.end();}
+  const url=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);
+  if(await serveApi(req,res,url))return;
+
+  const file=await findPublicFile(url.pathname);
+  if(!file){res.writeHead(404,{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});return res.end('Not found');}
   try{
-    const data=await fs.readFile(f);
-    res.writeHead(200,{'content-type':mime[path.extname(f)]||'application/octet-stream','cache-control':'no-store'});
+    const data=await fs.readFile(file);
+    res.writeHead(200,{'content-type':mime[path.extname(file)]||'application/octet-stream','cache-control':'no-store'});
     res.end(data);
-  }catch{res.writeHead(404);res.end('Not found');}
+  }catch{
+    res.writeHead(500,{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+    res.end('Server error');
+  }
 }).listen(port,()=>console.log(`SANI BOS Executor http://localhost:${port}`));
