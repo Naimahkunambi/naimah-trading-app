@@ -492,6 +492,9 @@ function renderAll() {
 
   $('cometPnl').textContent = money(session.pnl + u.pnl);
   $('cometState').textContent = demoExecutor?.snapshot().armed ? 'DERIV DEMO EXECUTION' : auto ? 'PAPER ACTIVE' : 'PAPER LAB';
+  const startBtn = $('startAuto'), pauseBtn = $('pauseAuto');
+  if (startBtn) { startBtn.textContent = auto ? 'AUTO ACTIVE ✓' : 'START AUTO'; startBtn.disabled = auto; startBtn.setAttribute('aria-pressed', String(auto)); }
+  if (pauseBtn) pauseBtn.disabled = !auto;
   const goal = Math.max(1, Number($('goalDollars')?.value || 650));
   $('goalFill').style.width = `${clamp(session.pnl / goal * 100, 0, 100)}%`;
   $('goalCaption').textContent = `${money(session.pnl)} / $${goal.toFixed(0)}`;
@@ -684,7 +687,14 @@ function bind() {
   $('cometArmDemo').addEventListener('click', armDemoExecution);
   $('cometDisarmDemo').addEventListener('click', disarmDemoExecution);
   $('cometCloseDemo').addEventListener('click', closeDemoExecution);
-  $('startAuto').addEventListener('click', () => { auto = true; addTape('SYSTEM', demoExecutor?.snapshot().armed ? 'AUTO armed · actual Deriv Demo multiplier contracts enabled.' : 'AUTO PAPER armed · no Deriv transaction will occur until DEMO EXECUTION is armed.'); renderAll(); });
+  $('startAuto').addEventListener('click', () => {
+    if (!auto) {
+      auto = true;
+      if (manualDisconnect || !ws || ws.readyState !== WebSocket.OPEN) connect();
+      addTape('SYSTEM', demoExecutor?.snapshot().armed ? 'AUTO ACTIVE · live feed + actual Deriv Demo multiplier execution.' : 'AUTO PAPER ACTIVE · live feed started automatically. Arm DEMO EXECUTION separately for actual Demo contracts.');
+    }
+    renderAll();
+  });
   $('pauseAuto').addEventListener('click', () => { auto = false; addTape('SYSTEM', 'AUTO PAPER paused.'); renderAll(); });
   $('closePosition').addEventListener('click', () => closePaperPosition('MANUAL CLOSE'));
   $('resetComet').addEventListener('click', resetCometBot);
