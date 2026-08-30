@@ -6,23 +6,25 @@ const GEMINI_BASE='https://generativelanguage.googleapis.com/v1beta/models';
 
 function loadSchool(){try{const p=path.join(process.cwd(),'public','nana-knowledge-base.json');const rows=JSON.parse(fs.readFileSync(p,'utf8'));return Array.isArray(rows)?rows:[]}catch{return[]}}
 const SCHOOL=loadSchool();
-// Keep Nana's full school in her brain, but keep each lesson to one compact sentence.
 const SCHOOL_TEXT=SCHOOL.map(x=>`${x.id}.${x.topic}: ${x.rule}`).join('\n');
 
 const CORE=`You are NANA, an autonomous Deriv Volatility 25 (1s) trading analyst.
-Judge the whole price path, not isolated indicators. WAIT is a valid active decision.
+Judge the whole ordered price path, not isolated indicators. WAIT is a valid active decision.
 
 NANA TRADING SCHOOL:
 ${SCHOOL_TEXT}
 
 Operating principles:
+- Read the FILMSTRIP chronologically. What happened first matters.
 - Separate main move, current phase and entry location.
+- A large fresh directional impulse followed by a small pause/bounce is not CHOP merely because the last few ticks retraced.
+- Call CHOP only when recent blocks repeatedly alternate with weak dominant displacement.
 - A move against the main move can be a pullback, not automatically a reversal.
 - Do not count the same movement repeatedly as separate confirmation.
 - Correct direction at poor location is still a bad trade.
 - Every trade needs a thesis and invalidation.
 - Profit mission never forces a trade.
-- If evidence is unclear, WAIT.
+- If evidence is unclear, WAIT, but label the market honestly.
 - If a position is open, normally HOLD or EXIT; never add another position.
 - Give concise auditable conclusions only, not private chain-of-thought.`;
 
@@ -34,16 +36,36 @@ function normalize(j={}){const actions=['WAIT','BUY','SELL','HOLD','EXIT'];const
 
 function round(v,d=2){const n=Number(v);return Number.isFinite(n)?Number(n.toFixed(d)):null}
 function sampled(values,count){if(values.length<=count)return values.map(v=>round(v));const out=[];for(let i=0;i<count;i++){const idx=Math.round(i*(values.length-1)/(count-1));out.push(round(values[idx]))}return out}
+function blockStats(rows,label){
+  const p=rows.map(x=>Number(x?.quote)).filter(Number.isFinite);if(p.length<2)return null;
+  const open=p[0],close=p.at(-1),high=Math.max(...p),low=Math.min(...p),net=close-open,range=high-low;
+  let path=0,upSteps=0,downSteps=0;for(let i=1;i<p.length;i++){const d=p[i]-p[i-1];path+=Math.abs(d);if(d>0)upSteps++;if(d<0)downSteps++}
+  return{label,open:round(open),high:round(high),low:round(low),close:round(close),net:round(net),range:round(range),efficiency:round(path?Math.abs(net)/path:0,3),up_steps:upSteps,down_steps:downSteps};
+}
+function buildFilmstrip(rows){
+  const tail=rows.slice(-180);const out=[];
+  for(let i=Math.max(0,tail.length-120),n=0;i<tail.length;i+=10,n++){
+    const block=tail.slice(i,i+10);if(block.length>=5)out.push(blockStats(block,`T-${Math.max(0,Math.ceil((tail.length-i)/10)*10)}..${Math.max(0,Math.ceil((tail.length-i-10)/10)*10)}s`));
+  }
+  return out.filter(Boolean).slice(-12);
+}
+function directionalSummary(rows){
+  const p=rows.map(x=>Number(x?.quote)).filter(Number.isFinite);if(p.length<20)return{};
+  const seg=n=>{const a=p.slice(-n);const net=a.at(-1)-a[0];const high=Math.max(...a),low=Math.min(...a);let path=0;for(let i=1;i<a.length;i++)path+=Math.abs(a[i]-a[i-1]);return{net:round(net),range:round(high-low),efficiency:round(path?Math.abs(net)/path:0,3),from_high:round(a.at(-1)-high),from_low:round(a.at(-1)-low)}};
+  return{s10:seg(10),s30:seg(30),s60:seg(60),s120:seg(120)};
+}
 function compactMarket(market={}){
   const rows=Array.isArray(market.ticks)?market.ticks:[];
   const prices=rows.map(x=>Number(x?.quote)).filter(Number.isFinite);
-  const recent=prices.slice(-72).map(v=>round(v));
-  const older=prices.slice(Math.max(0,prices.length-360),Math.max(0,prices.length-72));
+  const recent=prices.slice(-60).map(v=>round(v));
+  const older=prices.slice(Math.max(0,prices.length-300),Math.max(0,prices.length-60));
   return{
     symbol:market.symbol,
     last_price:round(market.lastPrice),
     recent_prices_1s:recent,
-    prior_context_sample:sampled(older,24),
+    prior_context_sample:sampled(older,18),
+    filmstrip_10s_blocks:buildFilmstrip(rows),
+    directional_windows:directionalSummary(rows),
     derived:market.derived||{}
   };
 }
@@ -59,7 +81,7 @@ async function callGroq(apiKey,model,payload){
 
 async function callGemini(apiKey,model,payload,groq){
   const url=`${GEMINI_BASE}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const reviewPrompt=`${CORE}\nYou are Nana's independent SECOND reviewer. Groq proposes:\n${JSON.stringify(groq.judgment)}\nReview the same compact market. Do not agree just to agree. ${OUTPUT_RULE}\nMARKET:${JSON.stringify(payload)}`;
+  const reviewPrompt=`${CORE}\nYou are Nana's independent SECOND reviewer. Groq proposes:\n${JSON.stringify(groq.judgment)}\nReview the same compact market and FILMSTRIP. Do not agree just to agree. ${OUTPUT_RULE}\nMARKET:${JSON.stringify(payload)}`;
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{role:'user',parts:[{text:reviewPrompt}]}],generationConfig:{temperature:0.1,maxOutputTokens:360,responseMimeType:'application/json'}})});
   const j=await r.json().catch(()=>({}));
   if(!r.ok)throw Object.assign(new Error(j?.error?.message||`Gemini failed (${r.status})`),{status:r.status,provider:'Gemini'});
@@ -67,7 +89,7 @@ async function callGemini(apiKey,model,payload,groq){
   return{judgment:normalize(out),model,usage:j?.usageMetadata||null}
 }
 
-function scoutOnly(g,hasPosition){const a=g.judgment;if(hasPosition)return normalize({...a,action:a.action==='EXIT'?'HOLD':'HOLD',thesis:`Groq scout: ${a.thesis}`});return normalize({...a,action:'WAIT',thesis:`Groq scout is watching. Gemini review is reserved for trade candidates. ${a.thesis}`})}
+function scoutOnly(g,hasPosition){const a=g.judgment;if(hasPosition)return normalize({...a,action:'HOLD',thesis:`Groq scout: ${a.thesis}`});return normalize({...a,action:'WAIT',thesis:`Groq scout is watching. Gemini review is reserved for trade candidates. ${a.thesis}`})}
 function combine(g,g2,hasPosition){const a=g.judgment,b=g2.judgment;const sameEntry=(a.action==='BUY'||a.action==='SELL')&&a.action===b.action;const bothHold=a.action==='HOLD'&&b.action==='HOLD';const anyExit=hasPosition&&(a.action==='EXIT'||b.action==='EXIT');let finalAction='WAIT';let reason='The two brains did not agree on a new entry.';
   if(hasPosition){if(anyExit){finalAction='EXIT';reason='At least one independent brain sees enough deterioration to exit.'}else if(bothHold){finalAction='HOLD';reason='Both brains agree the position still deserves to be held.'}else{finalAction='HOLD';reason='The brains disagree, so Nana keeps monitoring rather than flipping impulsively.'}}
   else if(sameEntry){finalAction=a.action;reason='Groq and Gemini independently agree on the same entry direction.'}
