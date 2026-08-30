@@ -1,0 +1,61 @@
+name: Hotfix Comet LMS Auto Start
+
+on:
+  push:
+    branches:
+      - codex/comet-lms-demo-multipliers
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[auto-start-fixed]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/comet-lms-demo-multipliers
+          fetch-depth: 0
+
+      - name: Make START AUTO one-click and visible
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          files = [Path('public/comet.js'), Path('public/last-man-standing.js')]
+          for path in files:
+              s = path.read_text()
+              if path.name == 'comet.js':
+                  old = "  $('startAuto').addEventListener('click', () => { auto = true; addTape('SYSTEM', demoExecutor?.snapshot().armed ? 'AUTO armed · actual Deriv Demo multiplier contracts enabled.' : 'AUTO PAPER armed · no Deriv transaction will occur until DEMO EXECUTION is armed.'); renderAll(); });"
+                  new = "  $('startAuto').addEventListener('click', () => {\n    if (!auto) {\n      auto = true;\n      if (manualDisconnect || !ws || ws.readyState !== WebSocket.OPEN) connect();\n      addTape('SYSTEM', demoExecutor?.snapshot().armed ? 'AUTO ACTIVE · live feed + actual Deriv Demo multiplier execution.' : 'AUTO PAPER ACTIVE · live feed started automatically. Arm DEMO EXECUTION separately for actual Demo contracts.');\n    }\n    renderAll();\n  });"
+                  marker = "  $('cometPnl').textContent = money(session.pnl + u.pnl);\n  $('cometState').textContent = demoExecutor?.snapshot().armed ? 'DERIV DEMO EXECUTION' : auto ? 'PAPER ACTIVE' : 'PAPER LAB';"
+                  replacement = marker + "\n  const startBtn = $('startAuto'), pauseBtn = $('pauseAuto');\n  if (startBtn) { startBtn.textContent = auto ? 'AUTO ACTIVE ✓' : 'START AUTO'; startBtn.disabled = auto; startBtn.setAttribute('aria-pressed', String(auto)); }\n  if (pauseBtn) pauseBtn.disabled = !auto;"
+              else:
+                  old = "  $('startAuto').addEventListener('click',()=>{auto=true;addTape('SYSTEM',demoExecutor?.snapshot().armed?'AUTO armed · actual Deriv Demo multiplier contracts enabled.':'AUTO PAPER armed · no Deriv transaction will occur until DEMO EXECUTION is armed.');renderAll()});"
+                  new = "  $('startAuto').addEventListener('click',()=>{\n    if(!auto){\n      auto=true;\n      if(manualDisconnect||!ws||ws.readyState!==WebSocket.OPEN)connect();\n      addTape('SYSTEM',demoExecutor?.snapshot().armed?'AUTO ACTIVE · live feed + actual Deriv Demo multiplier execution.':'AUTO PAPER ACTIVE · live feed started automatically. Arm DEMO EXECUTION separately for actual Demo contracts.');\n    }\n    renderAll();\n  });"
+                  marker = "  $('lmsPnl').textContent = money(session.pnl + u.pnl); $('lmsState').textContent = demoExecutor?.snapshot().armed ? 'DERIV DEMO EXECUTION' : auto ? 'PAPER ACTIVE' : 'PAPER LAB';"
+                  replacement = marker + "\n  const startBtn=$('startAuto'),pauseBtn=$('pauseAuto');if(startBtn){startBtn.textContent=auto?'AUTO ACTIVE ✓':'START AUTO';startBtn.disabled=auto;startBtn.setAttribute('aria-pressed',String(auto))}if(pauseBtn)pauseBtn.disabled=!auto;"
+
+              if old not in s:
+                  raise SystemExit(f'Expected START AUTO handler not found in {path}')
+              s = s.replace(old, new, 1)
+              if marker not in s:
+                  raise SystemExit(f'Expected render marker not found in {path}')
+              s = s.replace(marker, replacement, 1)
+              path.write_text(s)
+          PY
+
+          node --check public/comet.js
+          node --check public/last-man-standing.js
+          grep -n "AUTO ACTIVE" public/comet.js public/last-man-standing.js
+
+      - name: Commit hotfix
+        shell: bash
+        run: |
+          git config user.name "SANI Auto Fix"
+          git config user.email "actions@users.noreply.github.com"
+          git add public/comet.js public/last-man-standing.js
+          git commit -m "fix: make Comet and LMS START AUTO one-click [auto-start-fixed]"
+          git push origin HEAD:codex/comet-lms-demo-multipliers
