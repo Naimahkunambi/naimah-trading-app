@@ -68,6 +68,7 @@ public class NaiAutopilot : Robot
         Print("NAI AUTOPILOT DEMO started | {0} | internal signal TF M1 | Risk {1:F2}% | Min RR {2:F2}", SymbolName, RiskPercent, MinimumRR);
         Print("SYMBOL CHECK | tick={0} pip={1} minVolume={2} maxVolume={3} step={4}",
             Symbol.TickSize, Symbol.PipSize, Symbol.VolumeInUnitsMin, Symbol.VolumeInUnitsMax, Symbol.VolumeInUnitsStep);
+        Print("NAI DIAGNOSTICS ON | one status line will print after every closed M1 bar.");
     }
 
     protected override void OnStop()
@@ -87,16 +88,28 @@ public class NaiAutopilot : Robot
 
         ManagePosition();
 
-        if (FindNaiPosition() != null)
-            return;
-
         // BarClosed omits the new live bar. Count - 1 is therefore the bar that just closed.
         var i = _signalBars.Count - 1;
         if (i < Math.Max(TrendLookback + 10, 70))
+        {
+            Print("NAI STATUS | WARMING UP | M1 bars={0} need>{1}", i + 1, Math.Max(TrendLookback + 10, 70));
             return;
+        }
+
+        var openPosition = FindNaiPosition();
+        if (openPosition != null)
+        {
+            PrintPositionDiagnostic(openPosition);
+            return;
+        }
 
         if (i - _lastEntryBar < CooldownBars)
+        {
+            Print("NAI STATUS | WAIT | cooldown {0}/{1} M1 bars", i - _lastEntryBar, CooldownBars);
             return;
+        }
+
+        PrintMarketDiagnostic(i);
 
         var plan = FindPullbackSniper(i) ?? FindReversalRetestSniper(i);
         if (plan == null)
@@ -115,6 +128,81 @@ public class NaiAutopilot : Robot
             return;
 
         ManagePosition();
+    }
+
+    private void PrintMarketDiagnostic(int i)
+    {
+        var atr = Atr(i);
+        if (atr <= Symbol.TickSize * 5)
+        {
+            Print("NAI STATUS | WAIT | ATR too small {0:F2}", atr);
+            return;
+        }
+
+        var trend = TrendDirection(i);
+        var trendText = trend > 0 ? "LONG" : trend < 0 ? "SHORT" : "NONE";
+        var impulseStart = i - ImpulseLookback;
+        var impulseMove = _signalBars.ClosePrices[i - 2] - _signalBars.ClosePrices[impulseStart];
+        var impulseAtr = Math.Abs(impulseMove) / atr;
+        var impulseDirection = Math.Sign(impulseMove);
+        var efficiency = Efficiency(impulseStart, i - 2);
+
+        var pullbackText = "n/a";
+        var rejectionText = "n/a";
+        var rrText = "n/a";
+        var pullbackGate = "NO";
+
+        if (trend != 0)
+        {
+            var impulseHigh = HighestHigh(impulseStart, i - 1);
+            var impulseLow = LowestLow(impulseStart, i - 1);
+            var impulseRange = Math.Max(Symbol.TickSize, impulseHigh - impulseLow);
+            var close = _signalBars.ClosePrices[i];
+            var retracement = trend > 0 ? (impulseHigh - close) / impulseRange : (close - impulseLow) / impulseRange;
+            var rejection = RejectionBar(i, trend, atr);
+            pullbackText = $"{retracement:P0}";
+            rejectionText = rejection ? "YES" : "NO";
+
+            var recentLow = LowestLow(Math.Max(1, i - 4), i);
+            var recentHigh = HighestHigh(Math.Max(1, i - 4), i);
+            var entry = trend > 0 ? Symbol.Ask : Symbol.Bid;
+            var stop = trend > 0 ? recentLow - atr * 0.18 : recentHigh + atr * 0.18;
+            var risk = Math.Abs(entry - stop);
+            var logicalTarget = trend > 0 ? impulseHigh : impulseLow;
+            var availableReward = trend > 0 ? logicalTarget - entry : entry - logicalTarget;
+            if (risk > Symbol.TickSize)
+                rrText = (availableReward / risk).ToString("F2");
+
+            var sameImpulse = impulseDirection == trend;
+            var impulseGood = impulseAtr >= 1.4 && efficiency >= 0.58;
+            var retraceGood = retracement >= 0.22 && retracement <= 0.58;
+            var riskGood = risk >= atr * 0.35 && risk <= atr * 1.8;
+            var rrGood = risk > Symbol.TickSize && availableReward / risk >= MinimumRR;
+            pullbackGate = sameImpulse && impulseGood && retraceGood && rejection && riskGood && rrGood ? "READY" : "WAIT";
+        }
+
+        var priorHigh = HighestHigh(i - 24, i - 4);
+        var priorLow = LowestLow(i - 24, i - 4);
+        var longBreak = _signalBars.HighPrices[i - 2] > priorHigh + atr * 0.15;
+        var shortBreak = _signalBars.LowPrices[i - 2] < priorLow - atr * 0.15;
+        var reversalText = longBreak ? "LONG BREAK" : shortBreak ? "SHORT BREAK" : "NO BREAK";
+
+        Print("NAI STATUS | {0} | trend={1} | impulse={2:F2}ATR eff={3:F2} aligned={4} | pullback={5} rejection={6} structureRR={7} | reversal={8}",
+            pullbackGate, trendText, impulseAtr, efficiency, impulseDirection == trend ? "YES" : "NO", pullbackText, rejectionText, rrText, reversalText);
+    }
+
+    private void PrintPositionDiagnostic(Position p)
+    {
+        var originalRisk = p.TakeProfit.HasValue
+            ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / MinimumRR
+            : p.StopLoss.HasValue ? Math.Abs(p.EntryPrice - p.StopLoss.Value) : 0;
+        var price = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+        var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
+        var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
+        Print("NAI STATUS | HOLD | {0} | entry={1} current={2} | P/L={3:F2} | R={4:F2} | SL={5} TP={6}",
+            p.TradeType, p.EntryPrice, price, p.NetProfit, r,
+            p.StopLoss.HasValue ? p.StopLoss.Value.ToString("F2") : "--",
+            p.TakeProfit.HasValue ? p.TakeProfit.Value.ToString("F2") : "--");
     }
 
     private TradePlan? FindPullbackSniper(int i)
