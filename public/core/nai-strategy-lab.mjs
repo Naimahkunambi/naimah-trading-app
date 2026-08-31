@@ -1,46 +1,138 @@
 const n=(v,f=0)=>Number.isFinite(Number(v))?Number(v):f;
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
-const same=(a,b)=>a&&b&&a===b;
 const sideNet=(side,v)=>side==='LONG'?n(v):-n(v);
+const sameSide=(a,b)=>['LONG','SHORT'].includes(a)&&a===b;
 
-const ZONES={
-  Z1:'IGNITION',Z2:'EARLY IMPULSE',Z3:'FIRST PULLBACK',Z4:'RESUMPTION',Z5:'BREAKOUT',Z6:'BREAKOUT RETEST',Z7:'MID-TREND CONTINUATION',Z8:'EXTENDED / SUMMIT',Z9:'REVERSAL / NEW MOUNTAIN'
-};
-const defs=[
- ['M01','Z1','IGNITION EARLY','AGGRESSIVE'],['M02','Z1','IGNITION BALANCED','BALANCED'],['M03','Z1','IGNITION CONFIRMED','CONFIRMED'],
- ['M04','Z2','EARLY IMPULSE','AGGRESSIVE'],['M05','Z2','EARLY IMPULSE','BALANCED'],['M06','Z2','EARLY IMPULSE','CONFIRMED'],
- ['M07','Z3','SHALLOW PULLBACK TURN','AGGRESSIVE'],['M08','Z3','HEALTHY PULLBACK TURN','BALANCED'],['M09','Z3','DEEP PULLBACK TURN','CONFIRMED'],
- ['M10','Z4','FIRST-TICK RESUMPTION','AGGRESSIVE'],['M11','Z4','BALANCED RESUMPTION','BALANCED'],['M12','Z4','CONFIRMED RESUMPTION','CONFIRMED'],
- ['M13','Z5','FRESH BREAKOUT','AGGRESSIVE'],['M14','Z5','STRONG BREAKOUT','BALANCED'],['M15','Z5','CONFIRMED BREAKOUT','CONFIRMED'],
- ['M16','Z6','TOUCH / REJECT RETEST','AGGRESSIVE'],['M17','Z6','HOLD / RECOVER RETEST','BALANCED'],['M18','Z6','STRUCTURE RETEST','CONFIRMED'],
- ['M19','Z7','CONTINUATION MOMENTUM','AGGRESSIVE'],['M20','Z7','CONTINUATION BALANCED','BALANCED'],['M21','Z7','CONTINUATION STRUCTURE','CONFIRMED'],
- ['M22','Z8','EXTENDED BREAKOUT ATTACK','AGGRESSIVE'],['M23','Z8','EXTENDED PULLBACK CONTINUATION','BALANCED'],['M24','Z8','EXTREME CONFIDENCE CONTINUATION','CONFIRMED'],
- ['M25','Z9','EXHAUSTION REVERSAL','AGGRESSIVE'],['M26','Z9','STRUCTURE REVERSAL','BALANCED'],['M27','Z9','NEW MOUNTAIN CONFIRMED','CONFIRMED']
+export const ENTRY_MASTERS=[
+  {id:'P01',zone:'FOLLOW',zoneName:'EARLY TREND',name:'EARLY TREND FOLLOW-THROUGH',style:'CONFIRMED',minAge:2,maxAge:9,minSteps:1.35},
+  {id:'P02',zone:'FOLLOW',zoneName:'PULLBACK',name:'TRUE PULLBACK RESUMPTION',style:'CONFIRMED',minAge:2,maxAge:10,minSteps:1.25},
+  {id:'P03',zone:'FOLLOW',zoneName:'BREAKOUT',name:'BREAKOUT HOLD + CONTINUATION',style:'CONFIRMED',minAge:3,maxAge:10,minSteps:1.55},
+  {id:'P04',zone:'FOLLOW',zoneName:'RETEST',name:'RETEST + ACCELERATION',style:'CONFIRMED',minAge:2,maxAge:10,minSteps:1.35},
+  {id:'P05',zone:'FOLLOW',zoneName:'TAKEOVER',name:'WEAK-TREND TAKEOVER',style:'REVERSAL',minAge:3,maxAge:9,minSteps:1.65}
 ];
-export const MOUNTAIN_ZONES=ZONES;
-export const ENTRY_MASTERS=defs.map(([id,zone,name,style])=>({id,zone,name,style,zoneName:ZONES[zone]}));
-export function makeStrategies(){return ENTRY_MASTERS.map(x=>({...x,label:`${x.id} · ${x.zone} · ${x.name}`}))}
+export const MOUNTAIN_ZONES={FOLLOW:'FOLLOW-THROUGH PROFIT GATES'};
+export function makeStrategies(){return ENTRY_MASTERS.map(x=>({...x,label:`${x.id} · ${x.name}`}))}
+export function createEntryTracker(){return{}}
 
-const reject=reason=>({action:'WAIT',side:null,score:0,reason});
-const accept=(side,score,reason)=>({action:'ENTER',side,score:Math.round(clamp(score,0,100)),reason});
+const reject=(reason,extra={})=>({action:'WAIT',side:null,score:0,reason,...extra});
+const accept=(side,score,reason,extra={})=>({action:'ENTER',side,score:Math.round(clamp(score,0,100)),reason,...extra});
 const trendSide=m=>['LONG','SHORT'].includes(m?.trend?.direction)?m.trend.direction:null;
-const pullDepth=m=>n(m?.pullback?.depth);
+const px=m=>n(m?.price);
+const med=m=>Math.max(n(m?.medianStep,1),1e-9);
 const progress=m=>n(m?.mountain?.progress);
 const conf=m=>n(m?.trend?.confidence);
-const aligned=m=>Boolean(m?.momentum?.aligned10&&m?.momentum?.aligned20);
+const momentumSide=(m,k)=>m?.momentum?.[k]||'NONE';
+const legSide=m=>m?.currentLeg?.direction||'NONE';
 const structureGood=m=>Boolean(m?.structure?.aligned);
+const currentBreak=m=>m?.breakout||m?.lastBreakout||null;
 
-function ignition(master,m){const s=trendSide(m);if(!s)return reject('No new mountain trend');const age=n(m.trend.ageSec),p=progress(m),c=conf(m),changed=Boolean(m.trend.changed)||n(m.trend.changeAgeSec)<=12;if(!changed||age>28||p>36)return reject('Mountain no longer in ignition');if(master.id==='M01'){if(c<32)return reject('Ignition confidence too low');return accept(s,c+12,`new ${s} mountain · age ${age}s · progress ${p}%`)}if(master.id==='M02'){if(c<44||!m.momentum.aligned20)return reject('Needs balanced ignition agreement');return accept(s,c+16,`balanced ignition · ${m.pattern}`)}if(c<56||!aligned(m)||!structureGood(m))return reject('Needs confirmed ignition structure');return accept(s,c+20,`confirmed new mountain · ${m.structure.sequence}`)}
-function impulse(master,m){const s=trendSide(m);if(!s)return reject('No trend');const p=progress(m),c=conf(m),phase=m.phase,okPhase=['IMPULSE','TRENDING','BREAKOUT'].includes(phase);if(!okPhase||p<12||p>48)return reject('Not early impulse zone');if(master.id==='M04'){if(c<38||!m.momentum.aligned10)return reject('No early acceleration');return accept(s,c+10,`early impulse ${phase} · progress ${p}%`)}if(master.id==='M05'){if(c<50||!aligned(m)||n(m.momentum.eff20)<.26)return reject('Impulse quality insufficient');return accept(s,c+15,`balanced impulse · eff ${n(m.momentum.eff20).toFixed(2)}`)}if(c<62||!aligned(m)||!m.momentum.aligned40||!structureGood(m))return reject('Needs fully confirmed impulse');return accept(s,c+20,`confirmed impulse · ${m.structure.sequence}`)}
-function pullbackTurn(master,m){const s=trendSide(m);if(!s)return reject('No trend');const d=pullDepth(m),rec=n(m.pullback.recovery),recent=Boolean(m.pullback.recent);if(!recent)return reject('No active/recent pullback');if(master.id==='M07'){if(d<.08||d>.28||rec<.22)return reject('Not shallow pullback turn');return accept(s,conf(m)+12,`shallow pullback ${(d*100).toFixed(0)}% · recovery ${(rec*100).toFixed(0)}%`)}if(master.id==='M08'){if(d<.18||d>.44||rec<.42||!structureGood(m))return reject('Not healthy balanced pullback');return accept(s,conf(m)+18,`healthy pullback ${(d*100).toFixed(0)}% · protected structure held`)}if(d<.32||d>.62||rec<.62||!structureGood(m)||!aligned(m))return reject('Deep pullback has not confirmed turn');return accept(s,conf(m)+22,`deep pullback ${(d*100).toFixed(0)}% · confirmed recovery`)}
-function resumption(master,m){const s=trendSide(m);if(!s)return reject('No trend');if(!m.pullback.recent)return reject('No recent pullback');if(!['RESUMPTION','TRENDING','BREAKOUT'].includes(m.phase))return reject(`Waiting resumption, now ${m.phase}`);const rec=n(m.pullback.recovery);if(master.id==='M10'){if(!m.momentum.aligned10||rec<.18)return reject('First resumption tick absent');return accept(s,conf(m)+15,`first resumption · recovery ${(rec*100).toFixed(0)}%`)}if(master.id==='M11'){if(!aligned(m)||rec<.35||!structureGood(m))return reject('Balanced resumption incomplete');return accept(s,conf(m)+22,`balanced resumption · ${m.structure.sequence}`)}if(!aligned(m)||!m.momentum.aligned40||rec<.58||!structureGood(m))return reject('Confirmed resumption incomplete');return accept(s,conf(m)+26,`confirmed resumption · recovery ${(rec*100).toFixed(0)}%`)}
-function breakout(master,m){const b=m.breakout;if(!b)return reject('No fresh breakout');if(trendSide(m)&&b.direction!==trendSide(m)&&conf(m)>45)return reject('Breakout fights dominant mountain');if(master.id==='M13'){if(n(b.ageSec)>2)return reject('Fresh breakout window passed');return accept(b.direction,conf(m)+16,`fresh break ${b.level} · ${b.ageSec}s`)}if(master.id==='M14'){if(n(b.ageSec)>6||!m.momentum.aligned20||n(m.momentum.eff20)<.3)return reject('Breakout lacks strength');return accept(b.direction,conf(m)+22,`strong breakout · eff ${n(m.momentum.eff20).toFixed(2)}`)}if(n(b.ageSec)>10||!aligned(m)||!structureGood(m))return reject('Breakout not confirmed');return accept(b.direction,conf(m)+26,`confirmed breakout · ${m.structure.sequence}`)}
-function retest(master,m){const rt=m.retest;if(!rt||!rt.touched)return reject('No breakout retest');if(!rt.held)return reject('Retest failed level');const s=rt.direction;if(master.id==='M16'){if(n(rt.touchAgeSec)>4)return reject('Touch/reject window passed');if(!m.momentum.aligned10)return reject('No immediate rejection');return accept(s,conf(m)+18,`touch/reject ${rt.level} · ${rt.touchAgeSec}s`)}if(master.id==='M17'){if(!rt.recovered||!aligned(m))return reject('Retest has not held/recovered');return accept(s,conf(m)+24,`held retest ${rt.level} · recovered`)}if(!rt.recovered||!aligned(m)||!structureGood(m)||n(rt.touchAgeSec)<2)return reject('Structure retest not confirmed');return accept(s,conf(m)+28,`confirmed structure retest · ${m.structure.sequence}`)}
-function continuation(master,m){const s=trendSide(m);if(!s)return reject('No trend');const p=progress(m);if(p<32||p>74||!['TRENDING','RESUMPTION','IMPULSE'].includes(m.phase))return reject('Not mid-trend continuation');if(master.id==='M19'){if(!m.momentum.aligned10||conf(m)<42)return reject('Continuation momentum absent');return accept(s,conf(m)+12,`mid-trend momentum · progress ${p}%`)}if(master.id==='M20'){if(!aligned(m)||conf(m)<54||!structureGood(m))return reject('Balanced continuation incomplete');return accept(s,conf(m)+18,`balanced continuation · ${m.pattern}`)}if(!aligned(m)||!m.momentum.aligned40||conf(m)<64||!structureGood(m))return reject('Continuation structure incomplete');return accept(s,conf(m)+24,`confirmed continuation · ${m.structure.sequence}`)}
-function extended(master,m){const s=trendSide(m);if(!s)return reject('No trend');const p=progress(m),c=conf(m);if(p<68&&!['EXTENDED'].includes(m.phase))return reject('Not extended zone');if(master.id==='M22'){if(!m.breakout||m.breakout.direction!==s||!aligned(m))return reject('No extended breakout attack');return accept(s,c+8,`extended breakout · progress ${p}%`)}if(master.id==='M23'){if(!m.pullback.recent||pullDepth(m)<.18||!aligned(m))return reject('No late pullback continuation');return accept(s,c+12,`late pullback continuation · depth ${(pullDepth(m)*100).toFixed(0)}%`)}if(c<90||!aligned(m)||!structureGood(m))return reject('Extreme-confidence continuation absent');return accept(s,c,`90%+ confidence experiment · progress ${p}%`)}
-function reversal(master,m){const rev=m.reversal,trend=trendSide(m);if(master.id==='M25'){if(!rev||n(rev.ageSec)>8)return reject('No fresh exhaustion break');const old=rev.oldTrend,opp=rev.direction;if(conf(m)>72&&trend===old)return reject('Old trend still too strong');return accept(opp,55+Math.max(0,30-conf(m)),`exhaustion reversal attempt · broke ${rev.level}`)}if(master.id==='M26'){if(!rev||n(rev.ageSec)>15||!m.momentum.aligned20)return reject('No confirmed structure reversal');return accept(rev.direction,62+Math.min(25,n(m.momentum.strength20)*8),`structure reversal · protected level ${rev.level} broke`)}if(!trend||!m.trend.changed||n(m.trend.changeAgeSec)>18||conf(m)<58||!aligned(m)||!structureGood(m))return reject('New mountain not confirmed');return accept(trend,conf(m)+20,`new mountain confirmed · ${m.pattern}`)}
+function hardGate(master,m){
+  if(!m)return'NO MASTER MAP';
+  if(m.phase==='CHOP')return'CHOP · no trade';
+  if(progress(m)>=90)return'SUMMIT 90%+ · no chase';
+  if(master.id!=='P05'&&conf(m)>=82)return'OVERCONFIDENT / LATE TREND · no trade';
+  if(!Number.isFinite(px(m))||!Number.isFinite(med(m)))return'NO PRICE COORDINATES';
+  return null;
+}
 
-export function entryDecision(master,m){if(!master||!m)return reject('No master map');const z=master.zone;const d=z==='Z1'?ignition(master,m):z==='Z2'?impulse(master,m):z==='Z3'?pullbackTurn(master,m):z==='Z4'?resumption(master,m):z==='Z5'?breakout(master,m):z==='Z6'?retest(master,m):z==='Z7'?continuation(master,m):z==='Z8'?extended(master,m):reversal(master,m);return{...d,master:master.id,zone:master.zone,zoneName:master.zoneName,name:master.name,style:master.style}}
+function baseSignal(master,m){
+  const trend=trendSide(m),p=progress(m),c=conf(m),phase=m.phase;
+  if(master.id==='P01'){
+    if(!trend)return null;
+    if(p<28||p>72||c<18||c>76)return null;
+    if(!['IMPULSE','TRENDING','RESUMPTION'].includes(phase))return null;
+    if(!structureGood(m)||momentumSide(m,'s20')!==trend||momentumSide(m,'s40')!==trend)return null;
+    if(m.location==='AT_TREND_EDGE'&&p>65)return null;
+    return{side:trend,reason:`trend established · ${phase} · progress ${p}%`,score:52+c*.35};
+  }
+  if(master.id==='P02'){
+    if(!trend||!m?.pullback?.recent)return null;
+    const d=n(m.pullback.depth),r=n(m.pullback.recovery);
+    if(p<35||p>88||c>78||d<.16||d>.52||r<.22||r>1.15)return null;
+    if(!['RESUMPTION','TRENDING','TRANSITION'].includes(phase))return null;
+    if(!structureGood(m)||momentumSide(m,'s20')!==trend)return null;
+    return{side:trend,reason:`pullback ${(d*100).toFixed(0)}% · recovery ${(r*100).toFixed(0)}%`,score:62+c*.25};
+  }
+  if(master.id==='P03'){
+    const b=currentBreak(m);if(!b)return null;
+    const side=b.direction,age=n(b.ageSec,99);
+    if(!['LONG','SHORT'].includes(side)||age>8||p<38||p>88)return null;
+    if(trend&&side!==trend)return null;
+    if(c>78||!structureGood(m))return null;
+    if(momentumSide(m,'s20')!==side)return null;
+    return{side,reason:`break ${b.level} held · age ${age}s`,score:66+c*.22};
+  }
+  if(master.id==='P04'){
+    const rt=m?.retest;if(!rt||!rt.touched||!rt.held||!rt.recovered)return null;
+    const side=rt.direction;if(!['LONG','SHORT'].includes(side))return null;
+    if(p<40||p>88||n(rt.touchAgeSec,99)>12||c>78)return null;
+    if(trend&&side!==trend)return null;
+    if(!structureGood(m)||momentumSide(m,'s20')!==side)return null;
+    return{side,reason:`retest ${rt.level} held + recovered`,score:70+c*.20};
+  }
+  const b=currentBreak(m),rev=m?.reversal;
+  let side=null,why='';
+  if(rev&&n(rev.ageSec,99)<=8){side=rev.direction;why=`protected ${rev.level} broke`}
+  else if(b&&n(b.ageSec,99)<=6){side=b.direction;why=`opposite breakout ${b.level}`}
+  if(!['LONG','SHORT'].includes(side))return null;
+  if(trend&&side===trend)return null;
+  if(c>25||p<38||p>66)return null;
+  if(!['TRANSITION','PULLBACK','RESUMPTION','BREAKOUT'].includes(phase))return null;
+  return{side,reason:`weak old trend ${c}% · ${why}`,score:74+(25-c)};
+}
+
+function invalidated(candidate,m){
+  if(!candidate)return true;
+  if(candidate.mountainId!==m?.mountain?.id)return true;
+  if(progress(m)>=90)return true;
+  if(m.phase==='CHOP')return true;
+  const adverse=sideNet(candidate.side,px(m)-candidate.anchorPrice)/med(m);
+  return adverse<=-1.15;
+}
+
+function followThrough(master,m,candidate,now){
+  const age=(now-candidate.armedAt)/1000;
+  if(age>master.maxAge)return{ready:false,expired:true,reason:`candidate expired ${age.toFixed(1)}s`};
+  const favorable=sideNet(candidate.side,px(m)-candidate.anchorPrice)/med(m);
+  const s10=momentumSide(m,'s10'),s20=momentumSide(m,'s20'),leg=legSide(m);
+  const directionAlive=s10===candidate.side&&s20===candidate.side&&leg===candidate.side;
+  if(age<master.minAge)return{ready:false,reason:`armed · waiting persistence ${age.toFixed(1)}/${master.minAge}s`,favorable};
+  if(!directionAlive)return{ready:false,reason:`armed · waiting 10s/20s/current-leg agreement`,favorable};
+  if(favorable<master.minSteps)return{ready:false,reason:`armed · follow-through ${favorable.toFixed(2)}/${master.minSteps.toFixed(2)} steps`,favorable};
+  if(master.id==='P01'&&momentumSide(m,'s40')!==candidate.side)return{ready:false,reason:'armed · 40s confirmation lost',favorable};
+  if(master.id==='P02'&&n(m?.pullback?.recovery)>1.25)return{ready:false,expired:true,reason:'resumption already overextended',favorable};
+  if(master.id==='P03'){
+    const b=currentBreak(m);if(!b||b.direction!==candidate.side)return{ready:false,expired:true,reason:'breakout event lost',favorable};
+    const level=n(b.level),held=candidate.side==='LONG'?px(m)>level+med(m)*.45:px(m)<level-med(m)*.45;
+    if(!held)return{ready:false,reason:'break level not yet held',favorable};
+  }
+  if(master.id==='P04'&&(!m?.retest?.held||!m?.retest?.recovered))return{ready:false,expired:true,reason:'retest failed',favorable};
+  if(master.id==='P05'){
+    if(conf(m)>45&&trendSide(m)===candidate.side)return{ready:false,reason:'waiting takeover to settle, not chasing new confidence',favorable};
+    if(momentumSide(m,'s40')===candidate.opposedTrend)return{ready:false,reason:'old 40s trend still dominant',favorable};
+  }
+  return{ready:true,favorable,age};
+}
+
+export function entryDecision(master,m,tracker={},now=Date.now()){
+  const gate=hardGate(master,m);if(gate){delete tracker[master.id];return reject(gate)}
+  let c=tracker[master.id];
+  if(c&&invalidated(c,m)){delete tracker[master.id];c=null}
+  const base=baseSignal(master,m);
+  if(!c){
+    if(!base)return reject('No qualified setup');
+    c={side:base.side,armedAt:now,anchorPrice:px(m),anchorMapId:m.id,mountainId:m.mountain.id,baseProgress:progress(m),baseConfidence:conf(m),baseReason:base.reason,opposedTrend:trendSide(m)};
+    tracker[master.id]=c;
+    return reject(`ARMED ${base.side} · ${base.reason}`,{candidate:true,candidateAge:0,candidateSteps:0});
+  }
+  if(base&&base.side!==c.side){delete tracker[master.id];return reject('Candidate direction changed · reset')}
+  const ft=followThrough(master,m,c,now);
+  if(ft.expired){delete tracker[master.id];return reject(ft.reason)}
+  if(!ft.ready)return reject(ft.reason,{candidate:true,candidateAge:(now-c.armedAt)/1000,candidateSteps:ft.favorable});
+  delete tracker[master.id];
+  const score=clamp(70+ft.favorable*7+(master.id==='P05'?8:0),0,100);
+  return accept(c.side,score,`${c.baseReason} · FOLLOW-THROUGH ${ft.favorable.toFixed(2)} steps / ${ft.age.toFixed(1)}s`,{candidateAge:ft.age,candidateSteps:ft.favorable,armedPx:c.anchorPrice});
+}
 
 export const SHARED_EXIT={name:'FAIR EXIT',profitTarget:.75,lossCut:.55,staleSec:95,maxSec:180,trendFlipConfidence:68};
 export const SHARED_TRAIL={name:'FAIR TRAIL',activation:.18,gap:.16,minLock:.04};
