@@ -5,116 +5,63 @@ using cAlgo.API;
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiAutopilot : Robot
+public class NaiRunnerV1 : Robot
 {
-    private const string Label = "NAI-AUTOPILOT";
+    private const string Label = "NAI-RUNNER-V1";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
 
-    [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 2.00, Step = 0.10)]
+    [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 1.00, Step = 0.10)]
     public double RiskPercent { get; set; }
 
-    [Parameter("Minimum R:R", DefaultValue = 2.00, MinValue = 1.50, MaxValue = 5.00, Step = 0.10)]
-    public double MinimumRR { get; set; }
+    [Parameter("Target R", DefaultValue = 1.50, MinValue = 1.20, MaxValue = 3.00, Step = 0.10)]
+    public double TargetR { get; set; }
 
-    [Parameter("Daily Equity Stop %", DefaultValue = 3.00, MinValue = 1.00, MaxValue = 10.00, Step = 0.50)]
+    [Parameter("Daily Equity Stop %", DefaultValue = 2.00, MinValue = 1.00, MaxValue = 5.00, Step = 0.50)]
     public double DailyEquityStopPercent { get; set; }
 
-    [Parameter("Cooldown M1 Bars", DefaultValue = 3, MinValue = 1, MaxValue = 20)]
+    [Parameter("Cooldown M1 Bars", DefaultValue = 2, MinValue = 1, MaxValue = 10)]
     public int CooldownBars { get; set; }
 
-    [Parameter("ATR Period", DefaultValue = 14, MinValue = 8, MaxValue = 50)]
+    [Parameter("ATR Period", DefaultValue = 14, MinValue = 8, MaxValue = 40)]
     public int AtrPeriod { get; set; }
 
-    [Parameter("Trend Lookback", DefaultValue = 30, MinValue = 15, MaxValue = 100)]
-    public int TrendLookback { get; set; }
-
-    [Parameter("Impulse Lookback", DefaultValue = 8, MinValue = 4, MaxValue = 20)]
-    public int ImpulseLookback { get; set; }
-
-    [Parameter("Break-even at R", DefaultValue = 1.0, MinValue = 0.5, MaxValue = 3.0, Step = 0.1)]
+    [Parameter("Break-even at R", DefaultValue = 0.80, MinValue = 0.50, MaxValue = 1.50, Step = 0.10)]
     public double BreakEvenAtR { get; set; }
 
-    [Parameter("Trail at R", DefaultValue = 1.5, MinValue = 1.0, MaxValue = 5.0, Step = 0.1)]
+    [Parameter("Trail at R", DefaultValue = 1.20, MinValue = 0.80, MaxValue = 2.50, Step = 0.10)]
     public double TrailAtR { get; set; }
 
-    private Bars _signalBars = null!;
+    private Bars _bars = null!;
+    private DateTime _lastLiveBarOpen = DateTime.MinValue;
     private double _dayStartEquity;
     private DateTime _equityDay;
-    private int _lastEntryBar = -1000;
+    private int _lastEntryIndex = -10000;
+    private int _entryIndex = -1;
     private bool _halted;
+    private int _scanCount;
 
     protected override void OnStart()
     {
         if (Account.IsLive)
         {
-            Print("NAI AUTOPILOT BLOCKED: DEMO accounts only while under development.");
+            Print("NAI RUNNER V1 BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI AUTOPILOT BLOCKED: attach it to Volatility 25 (1s) Index. Current symbol: {0}", SymbolName);
+            Print("NAI RUNNER V1 BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
 
-        _signalBars = MarketData.GetBars(TimeFrame.Minute, SymbolName);
-        _signalBars.BarClosed += OnSignalBarClosed;
-
+        _bars = MarketData.GetBars(TimeFrame.Minute, SymbolName);
         _dayStartEquity = Account.Equity;
         _equityDay = Server.Time.Date;
 
-        Print("NAI AUTOPILOT DEMO started | {0} | internal signal TF M1 | Risk {1:F2}% | Min RR {2:F2}", SymbolName, RiskPercent, MinimumRR);
-        Print("SYMBOL CHECK | tick={0} pip={1} minVolume={2} maxVolume={3} step={4}",
-            Symbol.TickSize, Symbol.PipSize, Symbol.VolumeInUnitsMin, Symbol.VolumeInUnitsMax, Symbol.VolumeInUnitsStep);
-        Print("NAI SCANNER V2 | majority trend + adaptive impulse + protected swing reversal retest.");
-    }
-
-    protected override void OnStop()
-    {
-        if (_signalBars != null)
-            _signalBars.BarClosed -= OnSignalBarClosed;
-    }
-
-    private void OnSignalBarClosed(BarClosedEventArgs args)
-    {
-        if (_halted || Account.IsLive)
-            return;
-
-        ResetDailyEquityAnchorIfNeeded();
-        if (HitDailyEquityStop())
-            return;
-
-        ManagePosition();
-
-        var i = _signalBars.Count - 1;
-        if (i < Math.Max(TrendLookback + 10, 70))
-        {
-            Print("NAI STATUS | WARMING UP | M1 bars={0} need>{1}", i + 1, Math.Max(TrendLookback + 10, 70));
-            return;
-        }
-
-        var openPosition = FindNaiPosition();
-        if (openPosition != null)
-        {
-            PrintPositionDiagnostic(openPosition);
-            return;
-        }
-
-        if (i - _lastEntryBar < CooldownBars)
-        {
-            Print("NAI STATUS | WAIT | cooldown {0}/{1} M1 bars", i - _lastEntryBar, CooldownBars);
-            return;
-        }
-
-        PrintMarketDiagnostic(i);
-
-        var plan = FindPullbackSniper(i) ?? FindReversalRetestSniper(i);
-        if (plan == null)
-            return;
-
-        ExecutePlan(plan, i);
+        Print("NAI RUNNER V1 STARTED | {0} | TICK-DRIVEN M1 | risk={1:F2}% target={2:F2}R | BE={3:F2}R trail={4:F2}R", SymbolName, RiskPercent, TargetR, BreakEvenAtR, TrailAtR);
+        Print("RUNNER SYMBOL | tick={0} pip={1} minVol={2} maxVol={3} step={4}", Symbol.TickSize, Symbol.PipSize, Symbol.VolumeInUnitsMin, Symbol.VolumeInUnitsMax, Symbol.VolumeInUnitsStep);
     }
 
     protected override void OnTick()
@@ -122,233 +69,155 @@ public class NaiAutopilot : Robot
         if (_halted || Account.IsLive)
             return;
 
-        ResetDailyEquityAnchorIfNeeded();
-        if (HitDailyEquityStop())
+        ResetDailyAnchorIfNeeded();
+        if (HitDailyStop())
             return;
 
-        ManagePosition();
+        ManageOpenPosition();
+
+        if (_bars == null || _bars.Count < 45)
+            return;
+
+        var liveOpen = _bars.OpenTimes[_bars.Count - 1];
+        if (liveOpen == _lastLiveBarOpen)
+            return;
+
+        _lastLiveBarOpen = liveOpen;
+        var closedIndex = _bars.Count - 2;
+        ProcessClosedMinute(closedIndex);
     }
 
-    private void PrintMarketDiagnostic(int i)
+    private void ProcessClosedMinute(int i)
     {
-        var atr = Atr(i);
-        if (atr <= Symbol.TickSize * 5)
+        _scanCount++;
+        if (i < 35)
+            return;
+
+        var open = FindRunnerPosition();
+        if (open != null)
         {
-            Print("NAI STATUS | WAIT | ATR too small {0:F2}", atr);
+            EvaluateEarlyExit(open, i);
+            PrintPositionStatus(open, i);
             return;
         }
 
-        TrendVotes(i, out var bullVotes, out var bearVotes);
-        var trend = TrendDirection(i);
-        var trendText = trend > 0 ? "LONG" : trend < 0 ? "SHORT" : "NONE";
-        var impulseStart = i - ImpulseLookback;
-        var impulseMove = _signalBars.ClosePrices[i - 2] - _signalBars.ClosePrices[impulseStart];
-        var impulseAtr = Math.Abs(impulseMove) / atr;
-        var impulseDirection = Math.Sign(impulseMove);
-        var efficiency = Efficiency(impulseStart, i - 2);
-        var requiredImpulseAtr = RequiredImpulseAtr(efficiency);
-
-        var pullbackText = "n/a";
-        var rejectionText = "n/a";
-        var rrText = "n/a";
-        var pullbackGate = "WAIT";
-
-        if (trend != 0)
+        var barsSinceEntry = i - _lastEntryIndex;
+        if (barsSinceEntry < CooldownBars)
         {
-            var impulseHigh = HighestHigh(impulseStart, i - 1);
-            var impulseLow = LowestLow(impulseStart, i - 1);
-            var impulseRange = Math.Max(Symbol.TickSize, impulseHigh - impulseLow);
-            var close = _signalBars.ClosePrices[i];
-            var retracement = trend > 0 ? (impulseHigh - close) / impulseRange : (close - impulseLow) / impulseRange;
-            var rejection = RejectionBar(i, trend, atr);
-            pullbackText = $"{retracement:P0}";
-            rejectionText = rejection ? "YES" : "NO";
-
-            var recentLow = LowestLow(Math.Max(1, i - 4), i);
-            var recentHigh = HighestHigh(Math.Max(1, i - 4), i);
-            var entry = trend > 0 ? Symbol.Ask : Symbol.Bid;
-            var stop = trend > 0 ? recentLow - atr * 0.18 : recentHigh + atr * 0.18;
-            var risk = Math.Abs(entry - stop);
-            var logicalTarget = trend > 0 ? impulseHigh : impulseLow;
-            var availableReward = trend > 0 ? logicalTarget - entry : entry - logicalTarget;
-            if (risk > Symbol.TickSize)
-                rrText = (availableReward / risk).ToString("F2");
-
-            var sameImpulse = impulseDirection == trend;
-            var impulseGood = efficiency >= 0.58 && impulseAtr >= requiredImpulseAtr;
-            var retraceGood = retracement >= 0.22 && retracement <= 0.58;
-            var riskGood = risk >= atr * 0.35 && risk <= atr * 1.8;
-            var rrGood = risk > Symbol.TickSize && availableReward / risk >= MinimumRR;
-            pullbackGate = sameImpulse && impulseGood && retraceGood && rejection && riskGood && rrGood ? "READY" : "WAIT";
+            Print("NAI RUNNER | WAIT | scan={0} cooldown={1}/{2}", _scanCount, barsSinceEntry, CooldownBars);
+            return;
         }
 
-        var reversal = DetectReversalRetest(i, atr);
-        var reversalText = reversal == null ? "NONE" : $"{(reversal.Direction > 0 ? "LONG" : "SHORT")} RETEST @{reversal.Level:F2}";
-
-        Print("NAI STATUS | {0} | trend={1} votes={2}/{3} | impulse={4:F2}ATR need={5:F2} eff={6:F2} aligned={7} | pullback={8} rejection={9} RR={10} | reversal={11}",
-            pullbackGate, trendText, bullVotes, bearVotes, impulseAtr, requiredImpulseAtr, efficiency,
-            impulseDirection == trend && trend != 0 ? "YES" : "NO", pullbackText, rejectionText, rrText, reversalText);
-    }
-
-    private void PrintPositionDiagnostic(Position p)
-    {
-        var originalRisk = p.TakeProfit.HasValue
-            ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / MinimumRR
-            : p.StopLoss.HasValue ? Math.Abs(p.EntryPrice - p.StopLoss.Value) : 0;
-        var price = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
-        var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
-        var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
-        Print("NAI STATUS | HOLD | {0} | entry={1} current={2} | P/L={3:F2} | R={4:F2} | SL={5} TP={6}",
-            p.TradeType, p.EntryPrice, price, p.NetProfit, r,
-            p.StopLoss.HasValue ? p.StopLoss.Value.ToString("F2") : "--",
-            p.TakeProfit.HasValue ? p.TakeProfit.Value.ToString("F2") : "--");
-    }
-
-    private TradePlan? FindPullbackSniper(int i)
-    {
         var atr = Atr(i);
         if (atr <= Symbol.TickSize * 5)
-            return null;
+        {
+            Print("NAI RUNNER | WAIT | scan={0} ATR={1:F2} too small", _scanCount, atr);
+            return;
+        }
 
-        var trend = TrendDirection(i);
-        if (trend == 0)
-            return null;
+        TrendVotes(i, out var bull, out var bear);
+        var trend = bull >= 3 && bull > bear ? 1 : bear >= 3 && bear > bull ? -1 : 0;
+        var trendText = trend > 0 ? "LONG" : trend < 0 ? "SHORT" : "MIXED";
 
-        var impulseStart = i - ImpulseLookback;
-        var impulseMove = _signalBars.ClosePrices[i - 2] - _signalBars.ClosePrices[impulseStart];
-        var impulseDirection = Math.Sign(impulseMove);
-        if (impulseDirection != trend)
-            return null;
+        var setup = trend == 0 ? null : FindPullbackEntry(i, trend, atr) ?? FindMomentumEntry(i, trend, atr);
 
-        var efficiency = Efficiency(impulseStart, i - 2);
-        var requiredImpulseAtr = RequiredImpulseAtr(efficiency);
-        if (efficiency < 0.58 || Math.Abs(impulseMove) < atr * requiredImpulseAtr)
-            return null;
-
-        var impulseHigh = HighestHigh(impulseStart, i - 1);
-        var impulseLow = LowestLow(impulseStart, i - 1);
-        var impulseRange = Math.Max(Symbol.TickSize, impulseHigh - impulseLow);
-        var close = _signalBars.ClosePrices[i];
-
-        double retracement;
-        if (trend > 0)
-            retracement = (impulseHigh - close) / impulseRange;
-        else
-            retracement = (close - impulseLow) / impulseRange;
-
-        if (retracement < 0.22 || retracement > 0.58)
-            return null;
-
-        if (!RejectionBar(i, trend, atr))
-            return null;
-
-        var recentLow = LowestLow(Math.Max(1, i - 4), i);
-        var recentHigh = HighestHigh(Math.Max(1, i - 4), i);
-        var entry = trend > 0 ? Symbol.Ask : Symbol.Bid;
-        var stop = trend > 0 ? recentLow - atr * 0.18 : recentHigh + atr * 0.18;
-        var risk = Math.Abs(entry - stop);
-        if (risk < atr * 0.35 || risk > atr * 1.8)
-            return null;
-
-        var logicalTarget = trend > 0 ? impulseHigh : impulseLow;
-        var availableReward = trend > 0 ? logicalTarget - entry : entry - logicalTarget;
-        var rrToStructure = availableReward / risk;
-        if (rrToStructure < MinimumRR)
-            return null;
-
-        var target = trend > 0 ? entry + risk * MinimumRR : entry - risk * MinimumRR;
-        return new TradePlan(trend, "PULLBACK SNIPER", entry, stop, target, rrToStructure, atr,
-            $"impulse={Math.Abs(impulseMove / atr):F2}ATR need={requiredImpulseAtr:F2} eff={efficiency:F2} retrace={retracement:P0} structureRR={rrToStructure:F2}");
-    }
-
-    private TradePlan? FindReversalRetestSniper(int i)
-    {
-        var atr = Atr(i);
-        if (atr <= Symbol.TickSize * 5 || i < 55)
-            return null;
-
-        var setup = DetectReversalRetest(i, atr);
         if (setup == null)
+        {
+            var fast = AverageClose(i - 5, i);
+            var slow = AverageClose(i - 17, i);
+            var distance = Math.Abs(_bars.ClosePrices[i] - fast) / atr;
+            Print("NAI RUNNER | WAIT | scan={0} trend={1} votes={2}/{3} fastSlow={4:F2}ATR priceFast={5:F2}ATR", _scanCount, trendText, bull, bear, Math.Abs(fast - slow) / atr, distance);
+            return;
+        }
+
+        ExecuteSetup(setup, i);
+    }
+
+    private Setup? FindPullbackEntry(int i, int trend, double atr)
+    {
+        var fast = AverageClose(i - 5, i);
+        var slow = AverageClose(i - 17, i);
+        var open = _bars.OpenPrices[i];
+        var close = _bars.ClosePrices[i];
+        var high = _bars.HighPrices[i];
+        var low = _bars.LowPrices[i];
+        var range = Math.Max(Symbol.TickSize, high - low);
+        var body = Math.Abs(close - open);
+
+        var trendSeparated = trend > 0 ? fast > slow + atr * 0.05 : fast < slow - atr * 0.05;
+        if (!trendSeparated)
             return null;
 
-        var direction = setup.Direction;
-        var brokenLevel = setup.Level;
-        var entry = direction > 0 ? Symbol.Ask : Symbol.Bid;
-        var stop = direction > 0 ? LowestLow(i - 3, i) - atr * 0.15 : HighestHigh(i - 3, i) + atr * 0.15;
+        var touchedValue = trend > 0 ? low <= fast + atr * 0.18 : high >= fast - atr * 0.18;
+        var closedBack = trend > 0 ? close > fast : close < fast;
+        var candleAligned = trend > 0 ? close > open : close < open;
+        var closeStrong = trend > 0 ? close >= low + range * 0.58 : close <= high - range * 0.58;
+
+        if (!touchedValue || !closedBack || !candleAligned || !closeStrong || body < atr * 0.12)
+            return null;
+
+        var entry = trend > 0 ? Symbol.Ask : Symbol.Bid;
+        var swing = trend > 0 ? LowestLow(i - 4, i) : HighestHigh(i - 4, i);
+        var stop = trend > 0 ? swing - atr * 0.10 : swing + atr * 0.10;
         var risk = Math.Abs(entry - stop);
-        if (risk < atr * 0.35 || risk > atr * 1.8)
+
+        if (risk < atr * 0.45)
+        {
+            risk = atr * 0.55;
+            stop = trend > 0 ? entry - risk : entry + risk;
+        }
+        if (risk > atr * 1.55)
             return null;
 
-        var targetStructure = direction > 0 ? HighestHigh(i - 45, i - 5) : LowestLow(i - 45, i - 5);
-        var room = direction > 0 ? targetStructure - entry : entry - targetStructure;
-        var rrToStructure = room / risk;
-
-        if (rrToStructure < MinimumRR)
-        {
-            var range = HighestHigh(i - 30, i) - LowestLow(i - 30, i);
-            var expansionRoom = range / Math.Max(risk, Symbol.TickSize);
-            if (expansionRoom < MinimumRR * 1.25)
-                return null;
-            rrToStructure = MinimumRR;
-        }
-
-        var target = direction > 0 ? entry + risk * MinimumRR : entry - risk * MinimumRR;
-        return new TradePlan(direction, "REVERSAL RETEST", entry, stop, target, rrToStructure, atr,
-            $"protectedBreak={brokenLevel:F2} breakAge={setup.BreakAge} retest={setup.RetestDistanceAtr:F2}ATR structureRR={rrToStructure:F2}");
+        var target = trend > 0 ? entry + risk * TargetR : entry - risk * TargetR;
+        return new Setup(trend, "PULLBACK RUNNER", entry, stop, target, risk,
+            $"valueTouch fast={fast:F2} body={body / atr:F2}ATR risk={risk / atr:F2}ATR");
     }
 
-    private ReversalSetup? DetectReversalRetest(int i, double atr)
+    private Setup? FindMomentumEntry(int i, int trend, double atr)
     {
-        if (i < 55)
+        var open = _bars.OpenPrices[i];
+        var close = _bars.ClosePrices[i];
+        var high = _bars.HighPrices[i];
+        var low = _bars.LowPrices[i];
+        var range = Math.Max(Symbol.TickSize, high - low);
+        var body = Math.Abs(close - open);
+        var fast = AverageClose(i - 5, i);
+
+        var priorHigh = HighestHigh(i - 4, i - 1);
+        var priorLow = LowestLow(i - 4, i - 1);
+        var broke = trend > 0 ? close > priorHigh : close < priorLow;
+        var aligned = trend > 0 ? close > open : close < open;
+        var closeStrong = trend > 0 ? close >= low + range * 0.70 : close <= high - range * 0.70;
+        var distanceFromFast = Math.Abs(close - fast) / atr;
+        var efficiency = Efficiency(i - 4, i);
+
+        if (!broke || !aligned || !closeStrong || body < atr * 0.28 || efficiency < 0.48 || distanceFromFast > 1.25)
             return null;
 
-        // The protected level is deliberately frozen BEFORE the recent break bars.
-        var protectedHigh = HighestHigh(i - 16, i - 5);
-        var protectedLow = LowestLow(i - 16, i - 5);
-        var oldTrend = TrendDirection(i - 4);
-        var oldStructure = StructureDirection(i - 4);
+        var entry = trend > 0 ? Symbol.Ask : Symbol.Bid;
+        var swing = trend > 0 ? LowestLow(i - 3, i) : HighestHigh(i - 3, i);
+        var stop = trend > 0 ? swing - atr * 0.08 : swing + atr * 0.08;
+        var risk = Math.Abs(entry - stop);
 
-        for (var breakBar = i - 1; breakBar >= i - 3; breakBar--)
+        if (risk < atr * 0.50)
         {
-            var brokeHigh = _signalBars.ClosePrices[breakBar] > protectedHigh + atr * 0.08;
-            var brokeLow = _signalBars.ClosePrices[breakBar] < protectedLow - atr * 0.08;
-
-            if (brokeHigh && (oldTrend < 0 || oldStructure < 0))
-            {
-                var retestDistance = Math.Abs(_signalBars.LowPrices[i] - protectedHigh);
-                var retestNear = retestDistance <= atr * 0.50;
-                var held = _signalBars.ClosePrices[i] > protectedHigh;
-                if (retestNear && held && RejectionBar(i, 1, atr))
-                    return new ReversalSetup(1, protectedHigh, i - breakBar, retestDistance / atr);
-            }
-
-            if (brokeLow && (oldTrend > 0 || oldStructure > 0))
-            {
-                var retestDistance = Math.Abs(_signalBars.HighPrices[i] - protectedLow);
-                var retestNear = retestDistance <= atr * 0.50;
-                var held = _signalBars.ClosePrices[i] < protectedLow;
-                if (retestNear && held && RejectionBar(i, -1, atr))
-                    return new ReversalSetup(-1, protectedLow, i - breakBar, retestDistance / atr);
-            }
+            risk = atr * 0.60;
+            stop = trend > 0 ? entry - risk : entry + risk;
         }
+        if (risk > atr * 1.40)
+            return null;
 
-        return null;
+        var target = trend > 0 ? entry + risk * TargetR : entry - risk * TargetR;
+        return new Setup(trend, "MOMENTUM RUNNER", entry, stop, target, risk,
+            $"break4 eff={efficiency:F2} body={body / atr:F2}ATR fastDist={distanceFromFast:F2}ATR");
     }
 
-    private double RequiredImpulseAtr(double efficiency)
+    private void ExecuteSetup(Setup setup, int i)
     {
-        if (efficiency >= 0.78)
-            return 0.65;
-        if (efficiency >= 0.68)
-            return 0.80;
-        return 1.00;
-    }
-
-    private void ExecutePlan(TradePlan plan, int barIndex)
-    {
-        var stopPips = Math.Abs(plan.Entry - plan.Stop) / Symbol.PipSize;
-        var takeProfitPips = Math.Abs(plan.Target - plan.Entry) / Symbol.PipSize;
-        if (stopPips <= 0 || takeProfitPips / stopPips < MinimumRR - 0.02)
+        var stopPips = Math.Abs(setup.Entry - setup.Stop) / Symbol.PipSize;
+        var tpPips = Math.Abs(setup.Target - setup.Entry) / Symbol.PipSize;
+        if (stopPips <= 0 || tpPips <= 0)
             return;
 
         var volume = Symbol.VolumeForProportionalRisk(ProportionalAmountType.Equity, RiskPercent, stopPips, RoundingMode.Down);
@@ -356,36 +225,32 @@ public class NaiAutopilot : Robot
 
         if (volume < Symbol.VolumeInUnitsMin)
         {
-            Print("NAI SKIP | calculated risk size {0} is below broker minimum {1}", volume, Symbol.VolumeInUnitsMin);
+            Print("NAI RUNNER | SKIP | risk-size {0} below broker min {1} | stop={2:F0} pips", volume, Symbol.VolumeInUnitsMin, stopPips);
             return;
         }
 
-        volume = Math.Min(Symbol.VolumeInUnitsMax, volume);
-
-        var tradeType = plan.Direction > 0 ? TradeType.Buy : TradeType.Sell;
-        var result = ExecuteMarketOrder(tradeType, SymbolName, volume, Label, stopPips, takeProfitPips, plan.Name);
+        volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
+        var tradeType = setup.Direction > 0 ? TradeType.Buy : TradeType.Sell;
+        var result = ExecuteMarketOrder(tradeType, SymbolName, volume, Label, stopPips, tpPips, setup.Name);
 
         if (!result.IsSuccessful)
         {
-            Print("NAI ENTRY REJECTED | {0} | {1}", plan.Name, result.Error);
+            Print("NAI RUNNER | ENTRY REJECTED | {0} | {1}", setup.Name, result.Error);
             return;
         }
 
-        _lastEntryBar = barIndex;
-        Print("NAI ENTER {0} | {1} | entry {2} | SL {3} | TP {4} | RR {5:F2} | risk {6:F2}% | volume {7} | {8}",
-            tradeType, plan.Name, result.Position.EntryPrice, plan.Stop, plan.Target, MinimumRR, RiskPercent, volume, plan.Reason);
+        _lastEntryIndex = i;
+        _entryIndex = i;
+        Print("NAI RUNNER | ENTER {0} | {1} | entry={2} SL={3} TP={4} volume={5} target={6:F2}R | {7}", tradeType, setup.Name, result.Position.EntryPrice, setup.Stop, setup.Target, volume, TargetR, setup.Reason);
     }
 
-    private void ManagePosition()
+    private void ManageOpenPosition()
     {
-        var p = FindNaiPosition();
-        if (p == null || p.StopLoss == null)
+        var p = FindRunnerPosition();
+        if (p == null || !p.TakeProfit.HasValue || !p.StopLoss.HasValue)
             return;
 
-        var originalRisk = p.TakeProfit.HasValue
-            ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / MinimumRR
-            : Math.Abs(p.EntryPrice - p.StopLoss.Value);
-
+        var originalRisk = Math.Abs(p.TakeProfit.Value - p.EntryPrice) / TargetR;
         if (originalRisk <= Symbol.TickSize)
             return;
 
@@ -395,62 +260,68 @@ public class NaiAutopilot : Robot
 
         if (r >= BreakEvenAtR)
         {
-            var breakEven = p.EntryPrice;
-            var improve = p.TradeType == TradeType.Buy ? p.StopLoss.Value < breakEven : p.StopLoss.Value > breakEven;
+            var be = p.EntryPrice;
+            var improve = p.TradeType == TradeType.Buy ? p.StopLoss.Value < be : p.StopLoss.Value > be;
             if (improve)
-                ModifyPosition(p, breakEven, p.TakeProfit, false);
+            {
+                ModifyPosition(p, be, p.TakeProfit, false);
+                Print("NAI RUNNER | PROTECT | break-even locked at {0}", be);
+            }
         }
 
-        if (r >= TrailAtR)
+        if (r >= TrailAtR && _bars.Count > 5)
         {
-            var atr = Atr(Math.Max(1, _signalBars.Count - 1));
+            var i = _bars.Count - 2;
+            var atr = Atr(i);
             var candidate = p.TradeType == TradeType.Buy
-                ? LowestLow(Math.Max(1, _signalBars.Count - 5), _signalBars.Count - 1) - atr * 0.10
-                : HighestHigh(Math.Max(1, _signalBars.Count - 5), _signalBars.Count - 1) + atr * 0.10;
+                ? LowestLow(i - 2, i) - atr * 0.08
+                : HighestHigh(i - 2, i) + atr * 0.08;
 
-            var improve = p.TradeType == TradeType.Buy ? candidate > (p.StopLoss ?? double.MinValue) && candidate < Symbol.Bid
-                                                        : candidate < (p.StopLoss ?? double.MaxValue) && candidate > Symbol.Ask;
+            var improve = p.TradeType == TradeType.Buy
+                ? candidate > p.StopLoss.Value && candidate < Symbol.Bid
+                : candidate < p.StopLoss.Value && candidate > Symbol.Ask;
+
             if (improve)
+            {
                 ModifyPosition(p, candidate, p.TakeProfit, false);
+                Print("NAI RUNNER | TRAIL | SL -> {0:F2} | liveR={1:F2}", candidate, r);
+            }
         }
     }
 
-    private Position? FindNaiPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label);
-
-    private void ResetDailyEquityAnchorIfNeeded()
-    {
-        if (Server.Time.Date == _equityDay)
-            return;
-        _equityDay = Server.Time.Date;
-        _dayStartEquity = Account.Equity;
-        _halted = false;
-    }
-
-    private bool HitDailyEquityStop()
-    {
-        if (_dayStartEquity <= 0)
-            return false;
-        var drawdown = (_dayStartEquity - Account.Equity) / _dayStartEquity * 100.0;
-        if (drawdown < DailyEquityStopPercent)
-            return false;
-
-        _halted = true;
-        var p = FindNaiPosition();
-        if (p != null)
-            ClosePosition(p);
-        Print("NAI HALTED FOR THE DAY | equity drawdown {0:F2}% reached limit {1:F2}%", drawdown, DailyEquityStopPercent);
-        return true;
-    }
-
-    private int TrendDirection(int i)
+    private void EvaluateEarlyExit(Position p, int i)
     {
         TrendVotes(i, out var bull, out var bear);
-        if (bull >= 2 && bull > bear)
-            return 1;
-        if (bear >= 2 && bear > bull)
-            return -1;
-        return 0;
+        var strongOpposite = p.TradeType == TradeType.Buy ? bear >= 4 : bull >= 4;
+        if (!strongOpposite)
+            return;
+
+        var originalRisk = p.TakeProfit.HasValue ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / TargetR : 0;
+        var price = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+        var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
+        var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
+        var ageBars = _entryIndex >= 0 ? i - _entryIndex : 99;
+
+        if (ageBars >= 2 && r < 0.40)
+        {
+            ClosePosition(p);
+            Print("NAI RUNNER | EARLY EXIT | strong opposite trend votes bull={0} bear={1} | R={2:F2}", bull, bear, r);
+        }
     }
+
+    private void PrintPositionStatus(Position p, int i)
+    {
+        var originalRisk = p.TakeProfit.HasValue ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / TargetR : 0;
+        var price = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+        var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
+        var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
+        TrendVotes(i, out var bull, out var bear);
+        Print("NAI RUNNER | HOLD | {0} P/L={1:F2} R={2:F2} votes={3}/{4} SL={5} TP={6}", p.TradeType, p.NetProfit, r, bull, bear,
+            p.StopLoss.HasValue ? p.StopLoss.Value.ToString("F2") : "--",
+            p.TakeProfit.HasValue ? p.TakeProfit.Value.ToString("F2") : "--");
+    }
+
+    private Position? FindRunnerPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label);
 
     private void TrendVotes(int i, out int bull, out int bear)
     {
@@ -460,75 +331,61 @@ public class NaiAutopilot : Robot
         if (atr <= Symbol.TickSize)
             return;
 
-        // Vote 1: immediate price momentum.
-        var shortMove = _signalBars.ClosePrices[i] - _signalBars.ClosePrices[i - 3];
-        if (shortMove > atr * 0.18) bull++;
-        else if (shortMove < -atr * 0.18) bear++;
-
-        // Vote 2: short value versus previous value.
         var fast = AverageClose(i - 5, i);
-        var priorFast = AverageClose(i - 11, i - 6);
-        if (fast > priorFast + atr * 0.08) bull++;
-        else if (fast < priorFast - atr * 0.08) bear++;
+        var slow = AverageClose(i - 17, i);
+        if (fast > slow + atr * 0.04) bull++; else if (fast < slow - atr * 0.04) bear++;
 
-        // Vote 3: broader slope. Much less binary than the old 0.55 ATR gate.
-        var mediumNow = AverageClose(i - 11, i);
-        var mediumPast = AverageClose(i - TrendLookback, i - TrendLookback + 9);
-        var slope = mediumNow - mediumPast;
-        if (slope > atr * 0.22) bull++;
-        else if (slope < -atr * 0.22) bear++;
+        var fastPast = AverageClose(i - 9, i - 4);
+        if (fast > fastPast + atr * 0.05) bull++; else if (fast < fastPast - atr * 0.05) bear++;
 
-        // Vote 4: recent HH/HL or LL/LH structure.
+        var move3 = _bars.ClosePrices[i] - _bars.ClosePrices[i - 3];
+        if (move3 > atr * 0.12) bull++; else if (move3 < -atr * 0.12) bear++;
+
         var structure = StructureDirection(i);
-        if (structure > 0) bull++;
-        else if (structure < 0) bear++;
+        if (structure > 0) bull++; else if (structure < 0) bear++;
+
+        var body = _bars.ClosePrices[i] - _bars.OpenPrices[i];
+        if (body > atr * 0.10) bull++; else if (body < -atr * 0.10) bear++;
     }
 
     private int StructureDirection(int i)
     {
         if (i < 12)
             return 0;
-
         var recentHigh = HighestHigh(i - 5, i);
         var recentLow = LowestLow(i - 5, i);
         var priorHigh = HighestHigh(i - 11, i - 6);
         var priorLow = LowestLow(i - 11, i - 6);
         var atr = Atr(i);
-        var tolerance = atr * 0.08;
-
-        var higherHigh = recentHigh > priorHigh + tolerance;
-        var higherLow = recentLow > priorLow - tolerance;
-        if (higherHigh && higherLow)
-            return 1;
-
-        var lowerLow = recentLow < priorLow - tolerance;
-        var lowerHigh = recentHigh < priorHigh + tolerance;
-        if (lowerLow && lowerHigh)
-            return -1;
-
+        var tol = atr * 0.05;
+        if (recentHigh > priorHigh + tol && recentLow >= priorLow - tol) return 1;
+        if (recentLow < priorLow - tol && recentHigh <= priorHigh + tol) return -1;
         return 0;
     }
 
-    private bool RejectionBar(int i, int direction, double atr)
+    private void ResetDailyAnchorIfNeeded()
     {
-        var open = _signalBars.OpenPrices[i];
-        var close = _signalBars.ClosePrices[i];
-        var high = _signalBars.HighPrices[i];
-        var low = _signalBars.LowPrices[i];
-        var body = Math.Abs(close - open);
-        var range = Math.Max(Symbol.TickSize, high - low);
+        if (Server.Time.Date == _equityDay)
+            return;
+        _equityDay = Server.Time.Date;
+        _dayStartEquity = Account.Equity;
+        _halted = false;
+        Print("NAI RUNNER | NEW DAY | equity anchor={0:F2}", _dayStartEquity);
+    }
 
-        if (range < atr * 0.28 || body / range < 0.24)
+    private bool HitDailyStop()
+    {
+        if (_dayStartEquity <= 0)
             return false;
-
-        if (direction > 0)
-        {
-            var lowerWick = Math.Min(open, close) - low;
-            return close > open && close >= low + range * 0.62 && lowerWick >= body * 0.35;
-        }
-
-        var upperWick = high - Math.Max(open, close);
-        return close < open && close <= high - range * 0.62 && upperWick >= body * 0.35;
+        var dd = (_dayStartEquity - Account.Equity) / _dayStartEquity * 100.0;
+        if (dd < DailyEquityStopPercent)
+            return false;
+        _halted = true;
+        var p = FindRunnerPosition();
+        if (p != null)
+            ClosePosition(p);
+        Print("NAI RUNNER HALTED | daily equity drawdown={0:F2}% limit={1:F2}%", dd, DailyEquityStopPercent);
+        return true;
     }
 
     private double Atr(int i)
@@ -538,8 +395,8 @@ public class NaiAutopilot : Robot
         var count = 0;
         for (var k = from; k <= i; k++)
         {
-            var tr = Math.Max(_signalBars.HighPrices[k] - _signalBars.LowPrices[k],
-                Math.Max(Math.Abs(_signalBars.HighPrices[k] - _signalBars.ClosePrices[k - 1]), Math.Abs(_signalBars.LowPrices[k] - _signalBars.ClosePrices[k - 1])));
+            var tr = Math.Max(_bars.HighPrices[k] - _bars.LowPrices[k],
+                Math.Max(Math.Abs(_bars.HighPrices[k] - _bars.ClosePrices[k - 1]), Math.Abs(_bars.LowPrices[k] - _bars.ClosePrices[k - 1])));
             total += tr;
             count++;
         }
@@ -550,46 +407,41 @@ public class NaiAutopilot : Robot
     {
         if (to <= from)
             return 0;
-        var net = Math.Abs(_signalBars.ClosePrices[to] - _signalBars.ClosePrices[from]);
+        var net = Math.Abs(_bars.ClosePrices[to] - _bars.ClosePrices[from]);
         double path = 0;
         for (var k = from + 1; k <= to; k++)
-            path += Math.Abs(_signalBars.ClosePrices[k] - _signalBars.ClosePrices[k - 1]);
+            path += Math.Abs(_bars.ClosePrices[k] - _bars.ClosePrices[k - 1]);
         return path <= Symbol.TickSize ? 0 : net / path;
     }
 
     private double AverageClose(int from, int to)
     {
         from = Math.Max(0, from);
-        if (to < from)
-            return _signalBars.ClosePrices[to];
-        double total = 0;
+        double sum = 0;
         var count = 0;
         for (var k = from; k <= to; k++)
         {
-            total += _signalBars.ClosePrices[k];
+            sum += _bars.ClosePrices[k];
             count++;
         }
-        return count == 0 ? _signalBars.ClosePrices[to] : total / count;
+        return count == 0 ? _bars.ClosePrices[to] : sum / count;
     }
 
     private double HighestHigh(int from, int to)
     {
         from = Math.Max(0, from);
-        var value = double.MinValue;
-        for (var k = from; k <= to; k++)
-            value = Math.Max(value, _signalBars.HighPrices[k]);
-        return value;
+        var v = double.MinValue;
+        for (var k = from; k <= to; k++) v = Math.Max(v, _bars.HighPrices[k]);
+        return v;
     }
 
     private double LowestLow(int from, int to)
     {
         from = Math.Max(0, from);
-        var value = double.MaxValue;
-        for (var k = from; k <= to; k++)
-            value = Math.Min(value, _signalBars.LowPrices[k]);
-        return value;
+        var v = double.MaxValue;
+        for (var k = from; k <= to; k++) v = Math.Min(v, _bars.LowPrices[k]);
+        return v;
     }
 
-    private sealed record TradePlan(int Direction, string Name, double Entry, double Stop, double Target, double StructureRR, double Atr, string Reason);
-    private sealed record ReversalSetup(int Direction, double Level, int BreakAge, double RetestDistanceAtr);
+    private sealed record Setup(int Direction, string Name, double Entry, double Stop, double Target, double Risk, string Reason);
 }
