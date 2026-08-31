@@ -8,6 +8,7 @@ namespace cAlgo.Robots;
 public class NaiAutopilot : Robot
 {
     private const string Label = "NAI-AUTOPILOT";
+    private const string RequiredSymbolText = "Volatility 25 (1s)";
 
     [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 2.00, Step = 0.10)]
     public double RiskPercent { get; set; }
@@ -18,7 +19,7 @@ public class NaiAutopilot : Robot
     [Parameter("Daily Equity Stop %", DefaultValue = 3.00, MinValue = 1.00, MaxValue = 10.00, Step = 0.50)]
     public double DailyEquityStopPercent { get; set; }
 
-    [Parameter("Cooldown Bars", DefaultValue = 3, MinValue = 1, MaxValue = 20)]
+    [Parameter("Cooldown M1 Bars", DefaultValue = 3, MinValue = 1, MaxValue = 20)]
     public int CooldownBars { get; set; }
 
     [Parameter("ATR Period", DefaultValue = 14, MinValue = 8, MaxValue = 50)]
@@ -36,6 +37,7 @@ public class NaiAutopilot : Robot
     [Parameter("Trail at R", DefaultValue = 1.5, MinValue = 1.0, MaxValue = 5.0, Step = 0.1)]
     public double TrailAtR { get; set; }
 
+    private Bars _signalBars = null!;
     private double _dayStartEquity;
     private DateTime _equityDay;
     private int _lastEntryBar = -1000;
@@ -50,12 +52,31 @@ public class NaiAutopilot : Robot
             return;
         }
 
+        if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            Print("NAI AUTOPILOT BLOCKED: attach it to Volatility 25 (1s) Index. Current symbol: {0}", SymbolName);
+            Stop();
+            return;
+        }
+
+        _signalBars = MarketData.GetBars(TimeFrame.Minute, SymbolName);
+        _signalBars.BarClosed += OnSignalBarClosed;
+
         _dayStartEquity = Account.Equity;
         _equityDay = Server.Time.Date;
-        Print("NAI AUTOPILOT DEMO started | {0} | {1} | Risk {2:F2}% | Min RR {3:F2}", SymbolName, TimeFrame, RiskPercent, MinimumRR);
+
+        Print("NAI AUTOPILOT DEMO started | {0} | internal signal TF M1 | Risk {1:F2}% | Min RR {2:F2}", SymbolName, RiskPercent, MinimumRR);
+        Print("SYMBOL CHECK | tick={0} pip={1} minVolume={2} maxVolume={3} step={4}",
+            Symbol.TickSize, Symbol.PipSize, Symbol.VolumeInUnitsMin, Symbol.VolumeInUnitsMax, Symbol.VolumeInUnitsStep);
     }
 
-    protected override void OnBarClosed()
+    protected override void OnStop()
+    {
+        if (_signalBars != null)
+            _signalBars.BarClosed -= OnSignalBarClosed;
+    }
+
+    private void OnSignalBarClosed(BarClosedEventArgs args)
     {
         if (_halted || Account.IsLive)
             return;
@@ -69,7 +90,8 @@ public class NaiAutopilot : Robot
         if (FindNaiPosition() != null)
             return;
 
-        var i = Bars.Count - 2;
+        // BarClosed omits the new live bar. Count - 1 is therefore the bar that just closed.
+        var i = _signalBars.Count - 1;
         if (i < Math.Max(TrendLookback + 10, 70))
             return;
 
@@ -106,7 +128,7 @@ public class NaiAutopilot : Robot
             return null;
 
         var impulseStart = i - ImpulseLookback;
-        var impulseMove = Bars.ClosePrices[i - 2] - Bars.ClosePrices[impulseStart];
+        var impulseMove = _signalBars.ClosePrices[i - 2] - _signalBars.ClosePrices[impulseStart];
         var impulseDirection = Math.Sign(impulseMove);
         if (impulseDirection != trend)
             return null;
@@ -118,7 +140,7 @@ public class NaiAutopilot : Robot
         var impulseHigh = HighestHigh(impulseStart, i - 1);
         var impulseLow = LowestLow(impulseStart, i - 1);
         var impulseRange = Math.Max(Symbol.TickSize, impulseHigh - impulseLow);
-        var close = Bars.ClosePrices[i];
+        var close = _signalBars.ClosePrices[i];
 
         double retracement;
         if (trend > 0)
@@ -154,22 +176,21 @@ public class NaiAutopilot : Robot
     private TradePlan? FindReversalRetestSniper(int i)
     {
         var atr = Atr(i);
-        if (atr <= Symbol.TickSize * 5 || i < 35)
+        if (atr <= Symbol.TickSize * 5 || i < 50)
             return null;
 
         var priorHigh = HighestHigh(i - 24, i - 4);
         var priorLow = LowestLow(i - 24, i - 4);
-        var close = Bars.ClosePrices[i];
-        var prevClose = Bars.ClosePrices[i - 1];
+        var close = _signalBars.ClosePrices[i];
 
-        var longBreak = Bars.HighPrices[i - 2] > priorHigh + atr * 0.15;
-        var shortBreak = Bars.LowPrices[i - 2] < priorLow - atr * 0.15;
+        var longBreak = _signalBars.HighPrices[i - 2] > priorHigh + atr * 0.15;
+        var shortBreak = _signalBars.LowPrices[i - 2] < priorLow - atr * 0.15;
         var direction = longBreak ? 1 : shortBreak ? -1 : 0;
         if (direction == 0)
             return null;
 
         var brokenLevel = direction > 0 ? priorHigh : priorLow;
-        var retestDistance = Math.Abs((direction > 0 ? Bars.LowPrices[i] : Bars.HighPrices[i]) - brokenLevel);
+        var retestDistance = Math.Abs((direction > 0 ? _signalBars.LowPrices[i] : _signalBars.HighPrices[i]) - brokenLevel);
         if (retestDistance > atr * 0.55)
             return null;
 
@@ -191,7 +212,6 @@ public class NaiAutopilot : Robot
         var room = direction > 0 ? targetStructure - entry : entry - targetStructure;
         var rrToStructure = room / risk;
 
-        // If the old structure is already behind the entry, demand fresh expansion room of at least 2R.
         if (rrToStructure < MinimumRR)
         {
             var range = HighestHigh(i - 30, i) - LowestLow(i - 30, i);
@@ -215,7 +235,15 @@ public class NaiAutopilot : Robot
 
         var volume = Symbol.VolumeForProportionalRisk(ProportionalAmountType.Equity, RiskPercent, stopPips, RoundingMode.Down);
         volume = Symbol.NormalizeVolumeInUnits(volume, RoundingMode.Down);
-        volume = Math.Max(Symbol.VolumeInUnitsMin, Math.Min(Symbol.VolumeInUnitsMax, volume));
+
+        // Never round UP to the broker minimum because that could exceed intended risk.
+        if (volume < Symbol.VolumeInUnitsMin)
+        {
+            Print("NAI SKIP | calculated risk size {0} is below broker minimum {1}", volume, Symbol.VolumeInUnitsMin);
+            return;
+        }
+
+        volume = Math.Min(Symbol.VolumeInUnitsMax, volume);
 
         var tradeType = plan.Direction > 0 ? TradeType.Buy : TradeType.Sell;
         var result = ExecuteMarketOrder(tradeType, SymbolName, volume, Label, stopPips, takeProfitPips, plan.Name);
@@ -227,8 +255,8 @@ public class NaiAutopilot : Robot
         }
 
         _lastEntryBar = barIndex;
-        Print("NAI ENTER {0} | {1} | entry {2} | SL {3} | TP {4} | RR {5:F2} | risk {6:F2}% | {7}",
-            tradeType, plan.Name, result.Position.EntryPrice, plan.Stop, plan.Target, MinimumRR, RiskPercent, plan.Reason);
+        Print("NAI ENTER {0} | {1} | entry {2} | SL {3} | TP {4} | RR {5:F2} | risk {6:F2}% | volume {7} | {8}",
+            tradeType, plan.Name, result.Position.EntryPrice, plan.Stop, plan.Target, MinimumRR, RiskPercent, volume, plan.Reason);
     }
 
     private void ManagePosition()
@@ -237,7 +265,11 @@ public class NaiAutopilot : Robot
         if (p == null || p.StopLoss == null)
             return;
 
-        var originalRisk = Math.Abs(p.EntryPrice - p.StopLoss.Value);
+        // TP is fixed at MinimumRR × original risk, so it preserves 1R even after SL moves to break-even/trails.
+        var originalRisk = p.TakeProfit.HasValue
+            ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / MinimumRR
+            : Math.Abs(p.EntryPrice - p.StopLoss.Value);
+
         if (originalRisk <= Symbol.TickSize)
             return;
 
@@ -255,10 +287,10 @@ public class NaiAutopilot : Robot
 
         if (r >= TrailAtR)
         {
-            var atr = Atr(Math.Max(1, Bars.Count - 2));
+            var atr = Atr(Math.Max(1, _signalBars.Count - 1));
             var candidate = p.TradeType == TradeType.Buy
-                ? LowestLow(Math.Max(1, Bars.Count - 5), Bars.Count - 2) - atr * 0.10
-                : HighestHigh(Math.Max(1, Bars.Count - 5), Bars.Count - 2) + atr * 0.10;
+                ? LowestLow(Math.Max(1, _signalBars.Count - 5), _signalBars.Count - 1) - atr * 0.10
+                : HighestHigh(Math.Max(1, _signalBars.Count - 5), _signalBars.Count - 1) + atr * 0.10;
 
             var improve = p.TradeType == TradeType.Buy ? candidate > (p.StopLoss ?? double.MinValue) && candidate < Symbol.Bid
                                                         : candidate < (p.StopLoss ?? double.MaxValue) && candidate > Symbol.Ask;
@@ -311,10 +343,10 @@ public class NaiAutopilot : Robot
 
     private bool RejectionBar(int i, int direction, double atr)
     {
-        var open = Bars.OpenPrices[i];
-        var close = Bars.ClosePrices[i];
-        var high = Bars.HighPrices[i];
-        var low = Bars.LowPrices[i];
+        var open = _signalBars.OpenPrices[i];
+        var close = _signalBars.ClosePrices[i];
+        var high = _signalBars.HighPrices[i];
+        var low = _signalBars.LowPrices[i];
         var body = Math.Abs(close - open);
         var range = Math.Max(Symbol.TickSize, high - low);
 
@@ -338,8 +370,8 @@ public class NaiAutopilot : Robot
         var count = 0;
         for (var k = from; k <= i; k++)
         {
-            var tr = Math.Max(Bars.HighPrices[k] - Bars.LowPrices[k],
-                Math.Max(Math.Abs(Bars.HighPrices[k] - Bars.ClosePrices[k - 1]), Math.Abs(Bars.LowPrices[k] - Bars.ClosePrices[k - 1])));
+            var tr = Math.Max(_signalBars.HighPrices[k] - _signalBars.LowPrices[k],
+                Math.Max(Math.Abs(_signalBars.HighPrices[k] - _signalBars.ClosePrices[k - 1]), Math.Abs(_signalBars.LowPrices[k] - _signalBars.ClosePrices[k - 1])));
             total += tr;
             count++;
         }
@@ -350,10 +382,10 @@ public class NaiAutopilot : Robot
     {
         if (to <= from)
             return 0;
-        var net = Math.Abs(Bars.ClosePrices[to] - Bars.ClosePrices[from]);
+        var net = Math.Abs(_signalBars.ClosePrices[to] - _signalBars.ClosePrices[from]);
         double path = 0;
         for (var k = from + 1; k <= to; k++)
-            path += Math.Abs(Bars.ClosePrices[k] - Bars.ClosePrices[k - 1]);
+            path += Math.Abs(_signalBars.ClosePrices[k] - _signalBars.ClosePrices[k - 1]);
         return path <= Symbol.TickSize ? 0 : net / path;
     }
 
@@ -361,15 +393,15 @@ public class NaiAutopilot : Robot
     {
         from = Math.Max(0, from);
         if (to < from)
-            return Bars.ClosePrices[to];
+            return _signalBars.ClosePrices[to];
         double total = 0;
         var count = 0;
         for (var k = from; k <= to; k++)
         {
-            total += Bars.ClosePrices[k];
+            total += _signalBars.ClosePrices[k];
             count++;
         }
-        return count == 0 ? Bars.ClosePrices[to] : total / count;
+        return count == 0 ? _signalBars.ClosePrices[to] : total / count;
     }
 
     private double HighestHigh(int from, int to)
@@ -377,7 +409,7 @@ public class NaiAutopilot : Robot
         from = Math.Max(0, from);
         var value = double.MinValue;
         for (var k = from; k <= to; k++)
-            value = Math.Max(value, Bars.HighPrices[k]);
+            value = Math.Max(value, _signalBars.HighPrices[k]);
         return value;
     }
 
@@ -386,7 +418,7 @@ public class NaiAutopilot : Robot
         from = Math.Max(0, from);
         var value = double.MaxValue;
         for (var k = from; k <= to; k++)
-            value = Math.Min(value, Bars.LowPrices[k]);
+            value = Math.Min(value, _signalBars.LowPrices[k]);
         return value;
     }
 
