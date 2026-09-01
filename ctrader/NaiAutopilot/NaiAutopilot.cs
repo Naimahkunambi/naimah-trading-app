@@ -5,9 +5,9 @@ using cAlgo.API;
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiRunnerV1 : Robot
+public class NaiRunnerV2 : Robot
 {
-    private const string Label = "NAI-RUNNER-V1";
+    private const string Label = "NAI-RUNNER-V2-LONG";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
 
     [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 1.00, Step = 0.10)]
@@ -40,18 +40,24 @@ public class NaiRunnerV1 : Robot
     private bool _halted;
     private int _scanCount;
 
+    private int _consecutiveFullLosses;
+    private bool _lossPause;
+    private bool _lossPauseSawReset;
+    private bool _pauseResetLogged;
+    private double? _lastStopRequestPrice;
+
     protected override void OnStart()
     {
         if (Account.IsLive)
         {
-            Print("NAI RUNNER V1 BLOCKED | DEMO accounts only.");
+            Print("NAI RUNNER V2 BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI RUNNER V1 BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
+            Print("NAI RUNNER V2 BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
@@ -59,9 +65,16 @@ public class NaiRunnerV1 : Robot
         _bars = MarketData.GetBars(TimeFrame.Minute, SymbolName);
         _dayStartEquity = Account.Equity;
         _equityDay = Server.Time.Date;
+        Positions.Closed += OnPositionClosed;
 
-        Print("NAI RUNNER V1 STARTED | {0} | TICK-DRIVEN M1 | risk={1:F2}% target={2:F2}R | BE={3:F2}R trail={4:F2}R", SymbolName, RiskPercent, TargetR, BreakEvenAtR, TrailAtR);
-        Print("RUNNER SYMBOL | tick={0} pip={1} minVol={2} maxVol={3} step={4}", Symbol.TickSize, Symbol.PipSize, Symbol.VolumeInUnitsMin, Symbol.VolumeInUnitsMax, Symbol.VolumeInUnitsStep);
+        Print("NAI RUNNER V2 LONG-ONLY STARTED | {0} | TICK-DRIVEN M1 | risk={1:F2}% target={2:F2}R | BE={3:F2}R trail={4:F2}R", SymbolName, RiskPercent, TargetR, BreakEvenAtR, TrailAtR);
+        Print("V2 PROTECTION | SHORTS OFF | pause after 2 consecutive full SL losses until LONG structure resets");
+        Print("V2 SYMBOL | tick={0} pip={1} minVol={2} maxVol={3} minSL={4} minDistanceType={5}", Symbol.TickSize, Symbol.PipSize, Symbol.VolumeInUnitsMin, Symbol.VolumeInUnitsMax, Symbol.MinStopLossDistance, Symbol.MinDistanceType);
+    }
+
+    protected override void OnStop()
+    {
+        Positions.Closed -= OnPositionClosed;
     }
 
     protected override void OnTick()
@@ -104,33 +117,72 @@ public class NaiRunnerV1 : Robot
         var barsSinceEntry = i - _lastEntryIndex;
         if (barsSinceEntry < CooldownBars)
         {
-            Print("NAI RUNNER | WAIT | scan={0} cooldown={1}/{2}", _scanCount, barsSinceEntry, CooldownBars);
+            Print("NAI V2 | WAIT | scan={0} cooldown={1}/{2}", _scanCount, barsSinceEntry, CooldownBars);
             return;
         }
 
         var atr = Atr(i);
         if (atr <= Symbol.TickSize * 5)
         {
-            Print("NAI RUNNER | WAIT | scan={0} ATR={1:F2} too small", _scanCount, atr);
+            Print("NAI V2 | WAIT | scan={0} ATR={1:F2} too small", _scanCount, atr);
             return;
         }
 
         TrendVotes(i, out var bull, out var bear);
-        var trend = bull >= 3 && bull > bear ? 1 : bear >= 3 && bear > bull ? -1 : 0;
-        var trendText = trend > 0 ? "LONG" : trend < 0 ? "SHORT" : "MIXED";
+        var longTrend = bull >= 3 && bull > bear;
 
-        var setup = trend == 0 ? null : FindPullbackEntry(i, trend, atr) ?? FindMomentumEntry(i, trend, atr);
+        if (HandleLossPause(longTrend, bull, bear))
+            return;
+
+        // V2 deliberately preserves the V1 LONG entry logic exactly and simply refuses SHORT entries.
+        if (!longTrend)
+        {
+            Print("NAI V2 | WAIT | LONG-ONLY | bull/bear votes={0}/{1}", bull, bear);
+            return;
+        }
+
+        var setup = FindPullbackEntry(i, 1, atr) ?? FindMomentumEntry(i, 1, atr);
 
         if (setup == null)
         {
             var fast = AverageClose(i - 5, i);
             var slow = AverageClose(i - 17, i);
             var distance = Math.Abs(_bars.ClosePrices[i] - fast) / atr;
-            Print("NAI RUNNER | WAIT | scan={0} trend={1} votes={2}/{3} fastSlow={4:F2}ATR priceFast={5:F2}ATR", _scanCount, trendText, bull, bear, Math.Abs(fast - slow) / atr, distance);
+            Print("NAI V2 | WAIT | LONG votes={0}/{1} fastSlow={2:F2}ATR priceFast={3:F2}ATR", bull, bear, Math.Abs(fast - slow) / atr, distance);
             return;
         }
 
         ExecuteSetup(setup, i);
+    }
+
+    private bool HandleLossPause(bool longTrend, int bull, int bear)
+    {
+        if (!_lossPause)
+            return false;
+
+        if (!longTrend)
+        {
+            _lossPauseSawReset = true;
+            if (!_pauseResetLogged)
+            {
+                _pauseResetLogged = true;
+                Print("NAI V2 | LOSS PAUSE | LONG structure reset observed | votes={0}/{1} | waiting for fresh LONG", bull, bear);
+            }
+            return true;
+        }
+
+        if (_lossPauseSawReset)
+        {
+            _lossPause = false;
+            _lossPauseSawReset = false;
+            _pauseResetLogged = false;
+            _consecutiveFullLosses = 0;
+            Print("NAI V2 | RESUME | fresh LONG structure formed after loss pause | votes={0}/{1}", bull, bear);
+            return false;
+        }
+
+        Print("NAI V2 | LOSS PAUSE | 2 full losses | current LONG is same regime | votes={0}/{1}", bull, bear);
+        return true;
     }
 
     private Setup? FindPullbackEntry(int i, int trend, double atr)
@@ -215,6 +267,13 @@ public class NaiRunnerV1 : Robot
 
     private void ExecuteSetup(Setup setup, int i)
     {
+        // Safety: even if a future edit accidentally creates a short setup, V2 refuses it here.
+        if (setup.Direction <= 0)
+        {
+            Print("NAI V2 | SHORT BLOCKED | setup={0}", setup.Name);
+            return;
+        }
+
         var stopPips = Math.Abs(setup.Entry - setup.Stop) / Symbol.PipSize;
         var tpPips = Math.Abs(setup.Target - setup.Entry) / Symbol.PipSize;
         if (stopPips <= 0 || tpPips <= 0)
@@ -225,23 +284,23 @@ public class NaiRunnerV1 : Robot
 
         if (volume < Symbol.VolumeInUnitsMin)
         {
-            Print("NAI RUNNER | SKIP | risk-size {0} below broker min {1} | stop={2:F0} pips", volume, Symbol.VolumeInUnitsMin, stopPips);
+            Print("NAI V2 | SKIP | risk-size {0} below broker min {1} | stop={2:F0} pips", volume, Symbol.VolumeInUnitsMin, stopPips);
             return;
         }
 
         volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
-        var tradeType = setup.Direction > 0 ? TradeType.Buy : TradeType.Sell;
-        var result = ExecuteMarketOrder(tradeType, SymbolName, volume, Label, stopPips, tpPips, setup.Name);
+        var result = ExecuteMarketOrder(TradeType.Buy, SymbolName, volume, Label, stopPips, tpPips, setup.Name);
 
         if (!result.IsSuccessful)
         {
-            Print("NAI RUNNER | ENTRY REJECTED | {0} | {1}", setup.Name, result.Error);
+            Print("NAI V2 | ENTRY REJECTED | {0} | {1}", setup.Name, result.Error);
             return;
         }
 
         _lastEntryIndex = i;
         _entryIndex = i;
-        Print("NAI RUNNER | ENTER {0} | {1} | entry={2} SL={3} TP={4} volume={5} target={6:F2}R | {7}", tradeType, setup.Name, result.Position.EntryPrice, setup.Stop, setup.Target, volume, TargetR, setup.Reason);
+        _lastStopRequestPrice = null;
+        Print("NAI V2 | ENTER BUY | {0} | entry={1} SL={2} TP={3} volume={4} target={5:F2}R | {6}", setup.Name, result.Position.EntryPrice, setup.Stop, setup.Target, volume, TargetR, setup.Reason);
     }
 
     private void ManageOpenPosition()
@@ -254,74 +313,141 @@ public class NaiRunnerV1 : Robot
         if (originalRisk <= Symbol.TickSize)
             return;
 
-        var price = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
-        var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
+        var price = Symbol.Bid;
+        var favorable = price - p.EntryPrice;
         var r = favorable / originalRisk;
 
-        if (r >= BreakEvenAtR)
-        {
-            var be = p.EntryPrice;
-            var improve = p.TradeType == TradeType.Buy ? p.StopLoss.Value < be : p.StopLoss.Value > be;
-            if (improve)
-            {
-                ModifyPosition(p, be, p.TakeProfit, false);
-                Print("NAI RUNNER | PROTECT | break-even locked at {0}", be);
-            }
-        }
+        if (r >= BreakEvenAtR && p.StopLoss.Value < p.EntryPrice)
+            TryMoveStop(p, p.EntryPrice, "BREAK-EVEN", r);
 
         if (r >= TrailAtR && _bars.Count > 5)
         {
             var i = _bars.Count - 2;
             var atr = Atr(i);
-            var candidate = p.TradeType == TradeType.Buy
-                ? LowestLow(i - 2, i) - atr * 0.08
-                : HighestHigh(i - 2, i) + atr * 0.08;
-
-            var improve = p.TradeType == TradeType.Buy
-                ? candidate > p.StopLoss.Value && candidate < Symbol.Bid
-                : candidate < p.StopLoss.Value && candidate > Symbol.Ask;
-
-            if (improve)
-            {
-                ModifyPosition(p, candidate, p.TakeProfit, false);
-                Print("NAI RUNNER | TRAIL | SL -> {0:F2} | liveR={1:F2}", candidate, r);
-            }
+            var candidate = LowestLow(i - 2, i) - atr * 0.08;
+            if (candidate > p.StopLoss.Value)
+                TryMoveStop(p, candidate, "TRAIL", r);
         }
+    }
+
+    private void TryMoveStop(Position p, double rawCandidate, string reason, double liveR)
+    {
+        if (!p.StopLoss.HasValue)
+            return;
+
+        var candidate = NormalizePriceDown(rawCandidate);
+        var minDistancePrice = MinimumStopDistancePrice(Symbol.Bid);
+        var safetyDistance = Math.Max(minDistancePrice + Symbol.TickSize * 2.0, (Symbol.Ask - Symbol.Bid) + Symbol.TickSize * 2.0);
+        var maxLegalStop = NormalizePriceDown(Symbol.Bid - safetyDistance);
+        candidate = Math.Min(candidate, maxLegalStop);
+
+        // Never move backwards and never spam the same modification every tick.
+        if (candidate <= p.StopLoss.Value + Symbol.TickSize)
+            return;
+        if (_lastStopRequestPrice.HasValue && Math.Abs(candidate - _lastStopRequestPrice.Value) < Symbol.TickSize * 0.5)
+            return;
+
+        _lastStopRequestPrice = candidate;
+        var result = ModifyPosition(p, candidate, p.TakeProfit, false);
+
+        if (result.IsSuccessful)
+        {
+            Print("NAI V2 | {0} SUCCESS | SL -> {1:F2} | liveR={2:F2}", reason, candidate, liveR);
+            return;
+        }
+
+        Print("NAI V2 | {0} REJECTED | requestedSL={1:F2} bid={2:F2} minSLDistance={3} type={4} | error={5}",
+            reason, candidate, Symbol.Bid, Symbol.MinStopLossDistance, Symbol.MinDistanceType, result.Error);
+    }
+
+    private double MinimumStopDistancePrice(double referencePrice)
+    {
+        if (Symbol.MinStopLossDistance <= 0)
+            return 0;
+
+        if (Symbol.MinDistanceType == SymbolMinDistanceType.Percentage)
+            return referencePrice * Symbol.MinStopLossDistance / 100.0;
+
+        return Symbol.MinStopLossDistance * Symbol.PipSize;
+    }
+
+    private double NormalizePriceDown(double price)
+    {
+        if (Symbol.TickSize <= 0)
+            return Math.Round(price, Symbol.Digits);
+
+        var ticks = Math.Floor((price + Symbol.TickSize * 1e-6) / Symbol.TickSize);
+        return Math.Round(ticks * Symbol.TickSize, Symbol.Digits);
     }
 
     private void EvaluateEarlyExit(Position p, int i)
     {
         TrendVotes(i, out var bull, out var bear);
-        var strongOpposite = p.TradeType == TradeType.Buy ? bear >= 4 : bull >= 4;
+        var strongOpposite = bear >= 4;
         if (!strongOpposite)
             return;
 
         var originalRisk = p.TakeProfit.HasValue ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / TargetR : 0;
-        var price = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
-        var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
+        var favorable = Symbol.Bid - p.EntryPrice;
         var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
         var ageBars = _entryIndex >= 0 ? i - _entryIndex : 99;
 
         if (ageBars >= 2 && r < 0.40)
         {
-            ClosePosition(p);
-            Print("NAI RUNNER | EARLY EXIT | strong opposite trend votes bull={0} bear={1} | R={2:F2}", bull, bear, r);
+            var result = ClosePosition(p);
+            if (result.IsSuccessful)
+                Print("NAI V2 | EARLY EXIT SUCCESS | strong opposite trend votes bull={0} bear={1} | R={2:F2}", bull, bear, r);
+            else
+                Print("NAI V2 | EARLY EXIT REJECTED | {0}", result.Error);
         }
+    }
+
+    private void OnPositionClosed(PositionClosedEventArgs args)
+    {
+        var p = args.Position;
+        if (p.Label != Label || p.SymbolName != SymbolName || p.TradeType != TradeType.Buy)
+            return;
+
+        _lastStopRequestPrice = null;
+        _entryIndex = -1;
+
+        var intendedRiskCash = Math.Max(0.01, Account.Balance * RiskPercent / 100.0);
+        var fullLossThreshold = -intendedRiskCash * 0.65;
+        var fullStopLoss = args.Reason == PositionCloseReason.StopLoss && p.NetProfit <= fullLossThreshold;
+
+        if (fullStopLoss)
+        {
+            _consecutiveFullLosses++;
+            Print("NAI V2 | FULL LOSS {0}/2 | net={1:F2} reason={2}", _consecutiveFullLosses, p.NetProfit, args.Reason);
+
+            if (_consecutiveFullLosses >= 2)
+            {
+                _lossPause = true;
+                _lossPauseSawReset = false;
+                _pauseResetLogged = false;
+                Print("NAI V2 | LOSS PAUSE ARMED | two consecutive full SL losses | waiting for LONG structure reset");
+            }
+            return;
+        }
+
+        // A win, break-even, scratch, or early exit breaks the consecutive FULL-loss chain.
+        if (_consecutiveFullLosses > 0)
+            Print("NAI V2 | FULL-LOSS STREAK RESET | close net={0:F2} reason={1}", p.NetProfit, args.Reason);
+        _consecutiveFullLosses = 0;
     }
 
     private void PrintPositionStatus(Position p, int i)
     {
         var originalRisk = p.TakeProfit.HasValue ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / TargetR : 0;
-        var price = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
-        var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
+        var favorable = Symbol.Bid - p.EntryPrice;
         var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
         TrendVotes(i, out var bull, out var bear);
-        Print("NAI RUNNER | HOLD | {0} P/L={1:F2} R={2:F2} votes={3}/{4} SL={5} TP={6}", p.TradeType, p.NetProfit, r, bull, bear,
+        Print("NAI V2 | HOLD BUY | P/L={0:F2} R={1:F2} votes={2}/{3} SL={4} TP={5}", p.NetProfit, r, bull, bear,
             p.StopLoss.HasValue ? p.StopLoss.Value.ToString("F2") : "--",
             p.TakeProfit.HasValue ? p.TakeProfit.Value.ToString("F2") : "--");
     }
 
-    private Position? FindRunnerPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label);
+    private Position? FindRunnerPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label && p.TradeType == TradeType.Buy);
 
     private void TrendVotes(int i, out int bull, out int bear)
     {
@@ -370,7 +496,11 @@ public class NaiRunnerV1 : Robot
         _equityDay = Server.Time.Date;
         _dayStartEquity = Account.Equity;
         _halted = false;
-        Print("NAI RUNNER | NEW DAY | equity anchor={0:F2}", _dayStartEquity);
+        _consecutiveFullLosses = 0;
+        _lossPause = false;
+        _lossPauseSawReset = false;
+        _pauseResetLogged = false;
+        Print("NAI V2 | NEW DAY | equity anchor={0:F2}", _dayStartEquity);
     }
 
     private bool HitDailyStop()
@@ -384,7 +514,7 @@ public class NaiRunnerV1 : Robot
         var p = FindRunnerPosition();
         if (p != null)
             ClosePosition(p);
-        Print("NAI RUNNER HALTED | daily equity drawdown={0:F2}% limit={1:F2}%", dd, DailyEquityStopPercent);
+        Print("NAI V2 HALTED | daily equity drawdown={0:F2}% limit={1:F2}%", dd, DailyEquityStopPercent);
         return true;
     }
 
