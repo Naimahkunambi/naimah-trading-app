@@ -1,13 +1,14 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using cAlgo.API;
 
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiRunnerV2 : Robot
+public class NaiDecisionEngineV1 : Robot
 {
-    private const string Label = "NAI-RUNNER-V2-LONG";
+    private const string Label = "NAI-DECISION-V1";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
 
     [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 1.00, Step = 0.10)]
@@ -31,50 +32,82 @@ public class NaiRunnerV2 : Robot
     [Parameter("Trail at R", DefaultValue = 1.20, MinValue = 0.80, MaxValue = 2.50, Step = 0.10)]
     public double TrailAtR { get; set; }
 
-    private Bars _bars = null!;
-    private DateTime _lastLiveBarOpen = DateTime.MinValue;
+    [Parameter("Max Chase ATR", DefaultValue = 0.28, MinValue = 0.10, MaxValue = 0.80, Step = 0.02)]
+    public double MaxChaseAtr { get; set; }
+
+    private Bars _m1 = null!;
+    private Bars _m5 = null!;
+    private Bars _m15 = null!;
+
+    private DateTime _lastM1Open = DateTime.MinValue;
+    private DateTime _lastM5Open = DateTime.MinValue;
+    private DateTime _lastM15Open = DateTime.MinValue;
+    private DateTime _summaryHour = DateTime.MinValue;
+
     private double _dayStartEquity;
     private DateTime _equityDay;
-    private int _lastEntryIndex = -10000;
-    private int _entryIndex = -1;
     private bool _halted;
-    private int _scanCount;
-
-    private int _consecutiveFullLosses;
-    private bool _lossPause;
-    private bool _lossPauseSawReset;
-    private bool _pauseResetLogged;
+    private int _lastEntryM1Index = -10000;
+    private int _entryM1Index = -1;
     private double? _lastStopRequestPrice;
+
+    private RegimeState _regime = RegimeState.Mixed;
+    private DirectionChoice _legalDirection = DirectionChoice.None;
+    private string _contextReason = "warming up";
+    private SetupPlan? _armedPlan;
+    private DateTime _armedAt = DateTime.MinValue;
+
+    private int _hourDecisions;
+    private int _hourLongDecisions;
+    private int _hourShortDecisions;
+    private int _hourWaits;
+    private int _hourSkips;
+    private int _hourEntries;
+    private int _hourWins;
+    private int _hourLosses;
+    private int _hourScratch;
+    private int _hourLongTrades;
+    private int _hourShortTrades;
+    private double _hourNet;
+    private readonly Dictionary<string, int> _hourRejectReasons = new();
 
     protected override void OnStart()
     {
         if (Account.IsLive)
         {
-            Print("NAI RUNNER V2 BLOCKED | DEMO accounts only.");
+            Print("NAI DECISION V1 BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI RUNNER V2 BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
+            Print("NAI DECISION V1 BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
 
-        _bars = MarketData.GetBars(TimeFrame.Minute, SymbolName);
+        _m1 = MarketData.GetBars(TimeFrame.Minute, SymbolName);
+        _m5 = MarketData.GetBars(TimeFrame.Minute5, SymbolName);
+        _m15 = MarketData.GetBars(TimeFrame.Minute15, SymbolName);
+
         _dayStartEquity = Account.Equity;
         _equityDay = Server.Time.Date;
-        Positions.Closed += OnPositionClosed;
+        _summaryHour = FloorToHour(Server.Time);
 
-        Print("NAI RUNNER V2 LONG-ONLY STARTED | {0} | TICK-DRIVEN M1 | risk={1:F2}% target={2:F2}R | BE={3:F2}R trail={4:F2}R", SymbolName, RiskPercent, TargetR, BreakEvenAtR, TrailAtR);
-        Print("V2 PROTECTION | SHORTS OFF | pause after 2 consecutive full SL losses until LONG structure resets");
-        Print("V2 SYMBOL | tick={0} pip={1} minVol={2} maxVol={3} minSL={4} minDistanceType={5}", Symbol.TickSize, Symbol.PipSize, Symbol.VolumeInUnitsMin, Symbol.VolumeInUnitsMax, Symbol.MinStopLossDistance, Symbol.MinDistanceType);
+        Positions.Closed += OnPositionClosed;
+        RefreshContext(force: true);
+
+        Print("NAI DECISION ENGINE V1 STARTED | {0} | DEMO | M15/M5 context + M1 decisions + tick execution", SymbolName);
+        Print("DECISION CHOICES | LONG / SHORT / WAIT / SKIP | risk={0:F2}% target={1:F2}R BE={2:F2}R trail={3:F2}R chaseMax={4:F2}ATR", RiskPercent, TargetR, BreakEvenAtR, TrailAtR, MaxChaseAtr);
+        Print("HOURLY SUMMARY ON | screenshot the block beginning '=== NAI HOURLY SUMMARY ==='");
     }
 
     protected override void OnStop()
     {
         Positions.Closed -= OnPositionClosed;
+        if (_summaryHour != DateTime.MinValue)
+            PrintHourlySummary("BOT STOP");
     }
 
     protected override void OnTick()
@@ -86,226 +119,306 @@ public class NaiRunnerV2 : Robot
         if (HitDailyStop())
             return;
 
+        CheckHourlyBoundary();
+        RefreshContext(force: false);
         ManageOpenPosition();
 
-        if (_bars == null || _bars.Count < 45)
+        if (FindDecisionPosition() != null)
             return;
 
-        var liveOpen = _bars.OpenTimes[_bars.Count - 1];
-        if (liveOpen == _lastLiveBarOpen)
-            return;
-
-        _lastLiveBarOpen = liveOpen;
-        var closedIndex = _bars.Count - 2;
-        ProcessClosedMinute(closedIndex);
+        ProcessNewM1IfNeeded();
+        TryExecuteArmedPlan();
     }
 
-    private void ProcessClosedMinute(int i)
+    private void RefreshContext(bool force)
     {
-        _scanCount++;
-        if (i < 35)
+        if (_m5.Count < 30 || _m15.Count < 30)
             return;
 
-        var open = FindRunnerPosition();
-        if (open != null)
-        {
-            EvaluateEarlyExit(open, i);
-            PrintPositionStatus(open, i);
+        var m5Open = _m5.OpenTimes[_m5.Count - 1];
+        var m15Open = _m15.OpenTimes[_m15.Count - 1];
+        if (!force && m5Open == _lastM5Open && m15Open == _lastM15Open)
             return;
+
+        _lastM5Open = m5Open;
+        _lastM15Open = m15Open;
+
+        var i5 = _m5.Count - 2;
+        var i15 = _m15.Count - 2;
+        var s5 = ContextScore(_m5, i5);
+        var s15 = ContextScore(_m15, i15);
+
+        var strongBull15 = s15 >= 3;
+        var strongBear15 = s15 <= -3;
+        var bull5 = s5 >= 2;
+        var bear5 = s5 <= -2;
+
+        if (strongBull15 && bull5)
+        {
+            _regime = RegimeState.Bull;
+            _legalDirection = DirectionChoice.Long;
+            _contextReason = $"M15={s15} M5={s5} aligned bull";
+        }
+        else if (strongBear15 && bear5)
+        {
+            _regime = RegimeState.Bear;
+            _legalDirection = DirectionChoice.Short;
+            _contextReason = $"M15={s15} M5={s5} aligned bear";
+        }
+        else if ((strongBull15 && bear5) || (strongBear15 && bull5))
+        {
+            _regime = RegimeState.Transition;
+            _legalDirection = DirectionChoice.None;
+            _contextReason = $"M15={s15} conflicts M5={s5}";
+        }
+        else
+        {
+            _regime = RegimeState.Mixed;
+            _legalDirection = DirectionChoice.None;
+            _contextReason = $"M15={s15} M5={s5} insufficient alignment";
         }
 
-        var barsSinceEntry = i - _lastEntryIndex;
+        Print("NAI CONTEXT | regime={0} legal={1} | {2}", _regime, _legalDirection, _contextReason);
+
+        if (_armedPlan != null && _armedPlan.Direction != _legalDirection)
+        {
+            Print("NAI DECISION | CANCEL ARMED | context changed from {0} to legal={1}", _armedPlan.Direction, _legalDirection);
+            _armedPlan = null;
+        }
+    }
+
+    private void ProcessNewM1IfNeeded()
+    {
+        if (_m1.Count < 45)
+            return;
+
+        var liveOpen = _m1.OpenTimes[_m1.Count - 1];
+        if (liveOpen == _lastM1Open)
+            return;
+
+        _lastM1Open = liveOpen;
+        var i = _m1.Count - 2;
+        _hourDecisions++;
+
+        var barsSinceEntry = i - _lastEntryM1Index;
         if (barsSinceEntry < CooldownBars)
         {
-            Print("NAI V2 | WAIT | scan={0} cooldown={1}/{2}", _scanCount, barsSinceEntry, CooldownBars);
+            RegisterWait("cooldown");
+            Print("NAI DECISION | WAIT | cooldown {0}/{1} | regime={2}", barsSinceEntry, CooldownBars, _regime);
             return;
         }
 
-        var atr = Atr(i);
+        if (_legalDirection == DirectionChoice.None)
+        {
+            if (_regime == RegimeState.Transition)
+                RegisterWait("timeframe conflict");
+            else
+                RegisterSkip("mixed/chop");
+
+            Print("NAI DECISION | {0} | regime={1} | {2}", _regime == RegimeState.Transition ? "WAIT" : "SKIP", _regime, _contextReason);
+            return;
+        }
+
+        var atr = Atr(_m1, i);
         if (atr <= Symbol.TickSize * 5)
         {
-            Print("NAI V2 | WAIT | scan={0} ATR={1:F2} too small", _scanCount, atr);
+            RegisterSkip("ATR too small");
             return;
         }
 
-        TrendVotes(i, out var bull, out var bear);
-        var longTrend = bull >= 3 && bull > bear;
+        var dir = _legalDirection == DirectionChoice.Long ? 1 : -1;
+        M1TrendVotes(i, out var bull, out var bear);
+        var m1Aligned = dir > 0 ? bull >= 3 && bull > bear : bear >= 3 && bear > bull;
 
-        if (HandleLossPause(longTrend, bull, bear))
-            return;
-
-        // V2 deliberately preserves the V1 LONG entry logic exactly and simply refuses SHORT entries.
-        if (!longTrend)
+        if (!m1Aligned)
         {
-            Print("NAI V2 | WAIT | LONG-ONLY | bull/bear votes={0}/{1}", bull, bear);
+            RegisterWait("M1 not aligned");
+            Print("NAI DECISION | WAIT | regime={0} legal={1} but M1 votes={2}/{3}", _regime, _legalDirection, bull, bear);
             return;
         }
 
-        var setup = FindPullbackEntry(i, 1, atr) ?? FindMomentumEntry(i, 1, atr);
-
+        var setup = FindPullbackEntry(i, dir, atr) ?? FindMomentumEntry(i, dir, atr);
         if (setup == null)
         {
-            var fast = AverageClose(i - 5, i);
-            var slow = AverageClose(i - 17, i);
-            var distance = Math.Abs(_bars.ClosePrices[i] - fast) / atr;
-            Print("NAI V2 | WAIT | LONG votes={0}/{1} fastSlow={2:F2}ATR priceFast={3:F2}ATR", bull, bear, Math.Abs(fast - slow) / atr, distance);
+            RegisterWait("no valid setup");
+            Print("NAI DECISION | WAIT | {0} legal | M1 aligned {1}/{2} | no pullback/momentum setup", _legalDirection, bull, bear);
             return;
         }
 
-        ExecuteSetup(setup, i);
-    }
-
-    private bool HandleLossPause(bool longTrend, int bull, int bear)
-    {
-        if (!_lossPause)
-            return false;
-
-        if (!longTrend)
+        var fast = AverageClose(_m1, i - 5, i);
+        var closedPrice = _m1.ClosePrices[i];
+        var extension = Math.Abs(closedPrice - fast) / atr;
+        if (extension > 1.10)
         {
-            _lossPauseSawReset = true;
-            if (!_pauseResetLogged)
-            {
-                _pauseResetLogged = true;
-                Print("NAI V2 | LOSS PAUSE | LONG structure reset observed | votes={0}/{1} | waiting for fresh LONG", bull, bear);
-            }
-            return true;
+            RegisterSkip("late/extended");
+            Print("NAI DECISION | SKIP | direction={0} setup={1} | TOO EXTENDED {2:F2}ATR from value", _legalDirection, setup.Name, extension);
+            return;
         }
 
-        if (_lossPauseSawReset)
-        {
-            _lossPause = false;
-            _lossPauseSawReset = false;
-            _pauseResetLogged = false;
-            _consecutiveFullLosses = 0;
-            Print("NAI V2 | RESUME | fresh LONG structure formed after loss pause | votes={0}/{1}", bull, bear);
-            return false;
-        }
+        _armedPlan = setup;
+        _armedAt = Server.Time;
+        if (setup.Direction == DirectionChoice.Long) _hourLongDecisions++; else _hourShortDecisions++;
 
-        Print("NAI V2 | LOSS PAUSE | 2 full losses | current LONG is same regime | votes={0}/{1}", bull, bear);
-        return true;
+        Print("NAI DECISION | ARM {0} | regime={1} setup={2} | planned={3:F2} chaseLimit={4:F2}ATR | {5}", setup.Direction, _regime, setup.Name, setup.EntryReference, MaxChaseAtr, setup.Reason);
     }
 
-    private Setup? FindPullbackEntry(int i, int trend, double atr)
+    private void TryExecuteArmedPlan()
     {
-        var fast = AverageClose(i - 5, i);
-        var slow = AverageClose(i - 17, i);
-        var open = _bars.OpenPrices[i];
-        var close = _bars.ClosePrices[i];
-        var high = _bars.HighPrices[i];
-        var low = _bars.LowPrices[i];
+        var plan = _armedPlan;
+        if (plan == null)
+            return;
+
+        if ((Server.Time - _armedAt).TotalMinutes > 1.2)
+        {
+            RegisterSkip("armed setup expired");
+            Print("NAI DECISION | SKIP | armed {0} setup expired", plan.Direction);
+            _armedPlan = null;
+            return;
+        }
+
+        if (_legalDirection != plan.Direction)
+        {
+            RegisterSkip("context invalidated");
+            _armedPlan = null;
+            return;
+        }
+
+        var i = _m1.Count - 2;
+        var atr = Atr(_m1, i);
+        if (atr <= 0)
+            return;
+
+        var marketPrice = plan.Direction == DirectionChoice.Long ? Symbol.Ask : Symbol.Bid;
+        var chase = plan.Direction == DirectionChoice.Long
+            ? (marketPrice - plan.EntryReference) / atr
+            : (plan.EntryReference - marketPrice) / atr;
+
+        if (chase > MaxChaseAtr)
+        {
+            RegisterSkip("chased away");
+            Print("NAI DECISION | SKIP | {0} moved {1:F2}ATR beyond planned entry | no chase", plan.Direction, chase);
+            _armedPlan = null;
+            return;
+        }
+
+        if (chase < -0.35)
+            return;
+
+        ExecutePlan(plan, i, marketPrice, atr);
+    }
+
+    private SetupPlan? FindPullbackEntry(int i, int dir, double atr)
+    {
+        var fast = AverageClose(_m1, i - 5, i);
+        var slow = AverageClose(_m1, i - 17, i);
+        var open = _m1.OpenPrices[i];
+        var close = _m1.ClosePrices[i];
+        var high = _m1.HighPrices[i];
+        var low = _m1.LowPrices[i];
         var range = Math.Max(Symbol.TickSize, high - low);
         var body = Math.Abs(close - open);
 
-        var trendSeparated = trend > 0 ? fast > slow + atr * 0.05 : fast < slow - atr * 0.05;
-        if (!trendSeparated)
+        var trendSeparated = dir > 0 ? fast > slow + atr * 0.05 : fast < slow - atr * 0.05;
+        var touchedValue = dir > 0 ? low <= fast + atr * 0.18 : high >= fast - atr * 0.18;
+        var closedBack = dir > 0 ? close > fast : close < fast;
+        var candleAligned = dir > 0 ? close > open : close < open;
+        var closeStrong = dir > 0 ? close >= low + range * 0.58 : close <= high - range * 0.58;
+
+        if (!trendSeparated || !touchedValue || !closedBack || !candleAligned || !closeStrong || body < atr * 0.12)
             return null;
 
-        var touchedValue = trend > 0 ? low <= fast + atr * 0.18 : high >= fast - atr * 0.18;
-        var closedBack = trend > 0 ? close > fast : close < fast;
-        var candleAligned = trend > 0 ? close > open : close < open;
-        var closeStrong = trend > 0 ? close >= low + range * 0.58 : close <= high - range * 0.58;
-
-        if (!touchedValue || !closedBack || !candleAligned || !closeStrong || body < atr * 0.12)
-            return null;
-
-        var entry = trend > 0 ? Symbol.Ask : Symbol.Bid;
-        var swing = trend > 0 ? LowestLow(i - 4, i) : HighestHigh(i - 4, i);
-        var stop = trend > 0 ? swing - atr * 0.10 : swing + atr * 0.10;
+        var entry = dir > 0 ? Symbol.Ask : Symbol.Bid;
+        var swing = dir > 0 ? LowestLow(_m1, i - 4, i) : HighestHigh(_m1, i - 4, i);
+        var stop = dir > 0 ? swing - atr * 0.10 : swing + atr * 0.10;
         var risk = Math.Abs(entry - stop);
 
         if (risk < atr * 0.45)
         {
             risk = atr * 0.55;
-            stop = trend > 0 ? entry - risk : entry + risk;
+            stop = dir > 0 ? entry - risk : entry + risk;
         }
         if (risk > atr * 1.55)
             return null;
 
-        var target = trend > 0 ? entry + risk * TargetR : entry - risk * TargetR;
-        return new Setup(trend, "PULLBACK RUNNER", entry, stop, target, risk,
-            $"valueTouch fast={fast:F2} body={body / atr:F2}ATR risk={risk / atr:F2}ATR");
+        return new SetupPlan(dir > 0 ? DirectionChoice.Long : DirectionChoice.Short, "PULLBACK", entry, risk, $"valueTouch body={body / atr:F2}ATR risk={risk / atr:F2}ATR");
     }
 
-    private Setup? FindMomentumEntry(int i, int trend, double atr)
+    private SetupPlan? FindMomentumEntry(int i, int dir, double atr)
     {
-        var open = _bars.OpenPrices[i];
-        var close = _bars.ClosePrices[i];
-        var high = _bars.HighPrices[i];
-        var low = _bars.LowPrices[i];
+        var open = _m1.OpenPrices[i];
+        var close = _m1.ClosePrices[i];
+        var high = _m1.HighPrices[i];
+        var low = _m1.LowPrices[i];
         var range = Math.Max(Symbol.TickSize, high - low);
         var body = Math.Abs(close - open);
-        var fast = AverageClose(i - 5, i);
-
-        var priorHigh = HighestHigh(i - 4, i - 1);
-        var priorLow = LowestLow(i - 4, i - 1);
-        var broke = trend > 0 ? close > priorHigh : close < priorLow;
-        var aligned = trend > 0 ? close > open : close < open;
-        var closeStrong = trend > 0 ? close >= low + range * 0.70 : close <= high - range * 0.70;
+        var fast = AverageClose(_m1, i - 5, i);
+        var priorHigh = HighestHigh(_m1, i - 4, i - 1);
+        var priorLow = LowestLow(_m1, i - 4, i - 1);
+        var broke = dir > 0 ? close > priorHigh : close < priorLow;
+        var aligned = dir > 0 ? close > open : close < open;
+        var closeStrong = dir > 0 ? close >= low + range * 0.70 : close <= high - range * 0.70;
         var distanceFromFast = Math.Abs(close - fast) / atr;
-        var efficiency = Efficiency(i - 4, i);
+        var efficiency = Efficiency(_m1, i - 4, i);
 
         if (!broke || !aligned || !closeStrong || body < atr * 0.28 || efficiency < 0.48 || distanceFromFast > 1.25)
             return null;
 
-        var entry = trend > 0 ? Symbol.Ask : Symbol.Bid;
-        var swing = trend > 0 ? LowestLow(i - 3, i) : HighestHigh(i - 3, i);
-        var stop = trend > 0 ? swing - atr * 0.08 : swing + atr * 0.08;
+        var entry = dir > 0 ? Symbol.Ask : Symbol.Bid;
+        var swing = dir > 0 ? LowestLow(_m1, i - 3, i) : HighestHigh(_m1, i - 3, i);
+        var stop = dir > 0 ? swing - atr * 0.08 : swing + atr * 0.08;
         var risk = Math.Abs(entry - stop);
 
         if (risk < atr * 0.50)
-        {
             risk = atr * 0.60;
-            stop = trend > 0 ? entry - risk : entry + risk;
-        }
         if (risk > atr * 1.40)
             return null;
 
-        var target = trend > 0 ? entry + risk * TargetR : entry - risk * TargetR;
-        return new Setup(trend, "MOMENTUM RUNNER", entry, stop, target, risk,
-            $"break4 eff={efficiency:F2} body={body / atr:F2}ATR fastDist={distanceFromFast:F2}ATR");
+        return new SetupPlan(dir > 0 ? DirectionChoice.Long : DirectionChoice.Short, "MOMENTUM", entry, risk, $"break4 eff={efficiency:F2} body={body / atr:F2}ATR fastDist={distanceFromFast:F2}ATR");
     }
 
-    private void ExecuteSetup(Setup setup, int i)
+    private void ExecutePlan(SetupPlan plan, int i, double marketPrice, double atr)
     {
-        // Safety: even if a future edit accidentally creates a short setup, V2 refuses it here.
-        if (setup.Direction <= 0)
-        {
-            Print("NAI V2 | SHORT BLOCKED | setup={0}", setup.Name);
-            return;
-        }
-
-        var stopPips = Math.Abs(setup.Entry - setup.Stop) / Symbol.PipSize;
-        var tpPips = Math.Abs(setup.Target - setup.Entry) / Symbol.PipSize;
-        if (stopPips <= 0 || tpPips <= 0)
-            return;
+        var risk = plan.RiskDistance;
+        var stop = plan.Direction == DirectionChoice.Long ? marketPrice - risk : marketPrice + risk;
+        var target = plan.Direction == DirectionChoice.Long ? marketPrice + risk * TargetR : marketPrice - risk * TargetR;
+        var stopPips = Math.Abs(marketPrice - stop) / Symbol.PipSize;
+        var tpPips = Math.Abs(target - marketPrice) / Symbol.PipSize;
 
         var volume = Symbol.VolumeForProportionalRisk(ProportionalAmountType.Equity, RiskPercent, stopPips, RoundingMode.Down);
         volume = Symbol.NormalizeVolumeInUnits(volume, RoundingMode.Down);
-
         if (volume < Symbol.VolumeInUnitsMin)
         {
-            Print("NAI V2 | SKIP | risk-size {0} below broker min {1} | stop={2:F0} pips", volume, Symbol.VolumeInUnitsMin, stopPips);
+            RegisterSkip("risk-size below minimum");
+            Print("NAI EXECUTION | SKIP | volume={0} below min={1}", volume, Symbol.VolumeInUnitsMin);
+            _armedPlan = null;
             return;
         }
 
         volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
-        var result = ExecuteMarketOrder(TradeType.Buy, SymbolName, volume, Label, stopPips, tpPips, setup.Name);
+        var type = plan.Direction == DirectionChoice.Long ? TradeType.Buy : TradeType.Sell;
+        var result = ExecuteMarketOrder(type, SymbolName, volume, Label, stopPips, tpPips, $"{_regime}:{plan.Name}");
 
         if (!result.IsSuccessful)
         {
-            Print("NAI V2 | ENTRY REJECTED | {0} | {1}", setup.Name, result.Error);
+            RegisterSkip("entry rejected");
+            Print("NAI EXECUTION | REJECTED | {0} {1} | error={2}", plan.Direction, plan.Name, result.Error);
+            _armedPlan = null;
             return;
         }
 
-        _lastEntryIndex = i;
-        _entryIndex = i;
+        _hourEntries++;
+        if (type == TradeType.Buy) _hourLongTrades++; else _hourShortTrades++;
+        _lastEntryM1Index = i;
+        _entryM1Index = i;
         _lastStopRequestPrice = null;
-        Print("NAI V2 | ENTER BUY | {0} | entry={1} SL={2} TP={3} volume={4} target={5:F2}R | {6}", setup.Name, result.Position.EntryPrice, setup.Stop, setup.Target, volume, TargetR, setup.Reason);
+        _armedPlan = null;
+
+        Print("NAI EXECUTION | ENTER {0} | regime={1} setup={2} entry={3:F2} SL={4:F2} TP={5:F2} risk={6:F2}% target={7:F2}R | {8}", type, _regime, plan.Name, result.Position.EntryPrice, stop, target, RiskPercent, TargetR, plan.Reason);
     }
 
     private void ManageOpenPosition()
     {
-        var p = FindRunnerPosition();
+        var p = FindDecisionPosition();
         if (p == null || !p.TakeProfit.HasValue || !p.StopLoss.HasValue)
             return;
 
@@ -313,20 +426,35 @@ public class NaiRunnerV2 : Robot
         if (originalRisk <= Symbol.TickSize)
             return;
 
-        var price = Symbol.Bid;
-        var favorable = price - p.EntryPrice;
+        var marketPrice = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+        var favorable = p.TradeType == TradeType.Buy ? marketPrice - p.EntryPrice : p.EntryPrice - marketPrice;
         var r = favorable / originalRisk;
 
-        if (r >= BreakEvenAtR && p.StopLoss.Value < p.EntryPrice)
-            TryMoveStop(p, p.EntryPrice, "BREAK-EVEN", r);
-
-        if (r >= TrailAtR && _bars.Count > 5)
+        // Fast thesis protection: if higher-timeframe context now legalizes the opposite side, close weak trade.
+        var thesisBroken = p.TradeType == TradeType.Buy ? _legalDirection == DirectionChoice.Short : _legalDirection == DirectionChoice.Long;
+        if (thesisBroken && r < 0.40)
         {
-            var i = _bars.Count - 2;
-            var atr = Atr(i);
-            var candidate = LowestLow(i - 2, i) - atr * 0.08;
-            if (candidate > p.StopLoss.Value)
-                TryMoveStop(p, candidate, "TRAIL", r);
+            var result = ClosePosition(p);
+            if (result.IsSuccessful)
+                Print("NAI POSITION | THESIS BROKEN EXIT | {0} R={1:F2} newLegal={2}", p.TradeType, r, _legalDirection);
+            return;
+        }
+
+        if (r >= BreakEvenAtR)
+        {
+            var improveToBe = p.TradeType == TradeType.Buy ? p.StopLoss.Value < p.EntryPrice : p.StopLoss.Value > p.EntryPrice;
+            if (improveToBe)
+                TryMoveStop(p, p.EntryPrice, "BREAK-EVEN", r);
+        }
+
+        if (r >= TrailAtR && _m1.Count > 5)
+        {
+            var i = _m1.Count - 2;
+            var atr = Atr(_m1, i);
+            var raw = p.TradeType == TradeType.Buy
+                ? LowestLow(_m1, i - 2, i) - atr * 0.08
+                : HighestHigh(_m1, i - 2, i) + atr * 0.08;
+            TryMoveStop(p, raw, "TRAIL", r);
         }
     }
 
@@ -335,243 +463,277 @@ public class NaiRunnerV2 : Robot
         if (!p.StopLoss.HasValue)
             return;
 
-        var candidate = NormalizePriceDown(rawCandidate);
-        var minDistancePrice = MinimumStopDistancePrice(Symbol.Bid);
-        var safetyDistance = Math.Max(minDistancePrice + Symbol.TickSize * 2.0, (Symbol.Ask - Symbol.Bid) + Symbol.TickSize * 2.0);
-        var maxLegalStop = NormalizePriceDown(Symbol.Bid - safetyDistance);
-        candidate = Math.Min(candidate, maxLegalStop);
+        var candidate = NormalizePrice(rawCandidate, p.TradeType == TradeType.Buy ? RoundingMode.Down : RoundingMode.Up);
+        var reference = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+        var minDistancePrice = MinimumStopDistancePrice(reference);
+        var safety = Math.Max(minDistancePrice + Symbol.TickSize * 2.0, (Symbol.Ask - Symbol.Bid) + Symbol.TickSize * 2.0);
 
-        // Never move backwards and never spam the same modification every tick.
-        if (candidate <= p.StopLoss.Value + Symbol.TickSize)
-            return;
+        if (p.TradeType == TradeType.Buy)
+        {
+            var maxLegal = NormalizePrice(Symbol.Bid - safety, RoundingMode.Down);
+            candidate = Math.Min(candidate, maxLegal);
+            if (candidate <= p.StopLoss.Value + Symbol.TickSize) return;
+        }
+        else
+        {
+            var minLegal = NormalizePrice(Symbol.Ask + safety, RoundingMode.Up);
+            candidate = Math.Max(candidate, minLegal);
+            if (candidate >= p.StopLoss.Value - Symbol.TickSize) return;
+        }
+
         if (_lastStopRequestPrice.HasValue && Math.Abs(candidate - _lastStopRequestPrice.Value) < Symbol.TickSize * 0.5)
             return;
 
         _lastStopRequestPrice = candidate;
         var result = ModifyPosition(p, candidate, p.TakeProfit, false);
-
         if (result.IsSuccessful)
-        {
-            Print("NAI V2 | {0} SUCCESS | SL -> {1:F2} | liveR={2:F2}", reason, candidate, liveR);
-            return;
-        }
-
-        Print("NAI V2 | {0} REJECTED | requestedSL={1:F2} bid={2:F2} minSLDistance={3} type={4} | error={5}",
-            reason, candidate, Symbol.Bid, Symbol.MinStopLossDistance, Symbol.MinDistanceType, result.Error);
-    }
-
-    private double MinimumStopDistancePrice(double referencePrice)
-    {
-        if (Symbol.MinStopLossDistance <= 0)
-            return 0;
-
-        if (Symbol.MinDistanceType == SymbolMinDistanceType.Percentage)
-            return referencePrice * Symbol.MinStopLossDistance / 100.0;
-
-        return Symbol.MinStopLossDistance * Symbol.PipSize;
-    }
-
-    private double NormalizePriceDown(double price)
-    {
-        if (Symbol.TickSize <= 0)
-            return Math.Round(price, Symbol.Digits);
-
-        var ticks = Math.Floor((price + Symbol.TickSize * 1e-6) / Symbol.TickSize);
-        return Math.Round(ticks * Symbol.TickSize, Symbol.Digits);
-    }
-
-    private void EvaluateEarlyExit(Position p, int i)
-    {
-        TrendVotes(i, out var bull, out var bear);
-        var strongOpposite = bear >= 4;
-        if (!strongOpposite)
-            return;
-
-        var originalRisk = p.TakeProfit.HasValue ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / TargetR : 0;
-        var favorable = Symbol.Bid - p.EntryPrice;
-        var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
-        var ageBars = _entryIndex >= 0 ? i - _entryIndex : 99;
-
-        if (ageBars >= 2 && r < 0.40)
-        {
-            var result = ClosePosition(p);
-            if (result.IsSuccessful)
-                Print("NAI V2 | EARLY EXIT SUCCESS | strong opposite trend votes bull={0} bear={1} | R={2:F2}", bull, bear, r);
-            else
-                Print("NAI V2 | EARLY EXIT REJECTED | {0}", result.Error);
-        }
+            Print("NAI POSITION | {0} SUCCESS | {1} SL->{2:F2} R={3:F2}", reason, p.TradeType, candidate, liveR);
+        else
+            Print("NAI POSITION | {0} REJECTED | {1} requested={2:F2} error={3}", reason, p.TradeType, candidate, result.Error);
     }
 
     private void OnPositionClosed(PositionClosedEventArgs args)
     {
         var p = args.Position;
-        if (p.Label != Label || p.SymbolName != SymbolName || p.TradeType != TradeType.Buy)
+        if (p.Label != Label || p.SymbolName != SymbolName)
             return;
 
         _lastStopRequestPrice = null;
-        _entryIndex = -1;
+        _entryM1Index = -1;
+        _hourNet += p.NetProfit;
 
         var intendedRiskCash = Math.Max(0.01, Account.Balance * RiskPercent / 100.0);
-        var fullLossThreshold = -intendedRiskCash * 0.65;
-        var fullStopLoss = args.Reason == PositionCloseReason.StopLoss && p.NetProfit <= fullLossThreshold;
+        if (p.NetProfit > intendedRiskCash * 0.15) _hourWins++;
+        else if (p.NetProfit < -intendedRiskCash * 0.15) _hourLosses++;
+        else _hourScratch++;
 
-        if (fullStopLoss)
-        {
-            _consecutiveFullLosses++;
-            Print("NAI V2 | FULL LOSS {0}/2 | net={1:F2} reason={2}", _consecutiveFullLosses, p.NetProfit, args.Reason);
-
-            if (_consecutiveFullLosses >= 2)
-            {
-                _lossPause = true;
-                _lossPauseSawReset = false;
-                _pauseResetLogged = false;
-                Print("NAI V2 | LOSS PAUSE ARMED | two consecutive full SL losses | waiting for LONG structure reset");
-            }
-            return;
-        }
-
-        // A win, break-even, scratch, or early exit breaks the consecutive FULL-loss chain.
-        if (_consecutiveFullLosses > 0)
-            Print("NAI V2 | FULL-LOSS STREAK RESET | close net={0:F2} reason={1}", p.NetProfit, args.Reason);
-        _consecutiveFullLosses = 0;
+        Print("NAI RESULT | {0} | net={1:F2} reason={2} | hourlyNet={3:F2}", p.TradeType, p.NetProfit, args.Reason, _hourNet);
     }
 
-    private void PrintPositionStatus(Position p, int i)
+    private void CheckHourlyBoundary()
     {
-        var originalRisk = p.TakeProfit.HasValue ? Math.Abs(p.TakeProfit.Value - p.EntryPrice) / TargetR : 0;
-        var favorable = Symbol.Bid - p.EntryPrice;
-        var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
-        TrendVotes(i, out var bull, out var bear);
-        Print("NAI V2 | HOLD BUY | P/L={0:F2} R={1:F2} votes={2}/{3} SL={4} TP={5}", p.NetProfit, r, bull, bear,
-            p.StopLoss.HasValue ? p.StopLoss.Value.ToString("F2") : "--",
-            p.TakeProfit.HasValue ? p.TakeProfit.Value.ToString("F2") : "--");
+        var hour = FloorToHour(Server.Time);
+        if (hour == _summaryHour)
+            return;
+
+        PrintHourlySummary("HOUR COMPLETE");
+        ResetHourlyCounters();
+        _summaryHour = hour;
     }
 
-    private Position? FindRunnerPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label && p.TradeType == TradeType.Buy);
+    private void PrintHourlySummary(string trigger)
+    {
+        var topReason = _hourRejectReasons.Count == 0
+            ? "none"
+            : _hourRejectReasons.OrderByDescending(x => x.Value).ThenBy(x => x.Key).First().Key + " x" + _hourRejectReasons.OrderByDescending(x => x.Value).ThenBy(x => x.Key).First().Value;
 
-    private void TrendVotes(int i, out int bull, out int bear)
+        Print("=== NAI HOURLY SUMMARY ===");
+        Print("WINDOW | {0:yyyy-MM-dd HH}:00 UTC | {1}", _summaryHour, trigger);
+        Print("MARKET | regime={0} legal={1} | {2}", _regime, _legalDirection, _contextReason);
+        Print("DECISIONS | total={0} long={1} short={2} wait={3} skip={4} | topBlock={5}", _hourDecisions, _hourLongDecisions, _hourShortDecisions, _hourWaits, _hourSkips, topReason);
+        Print("TRADES | entries={0} W={1} L={2} scratch={3} | LONG={4} SHORT={5}", _hourEntries, _hourWins, _hourLosses, _hourScratch, _hourLongTrades, _hourShortTrades);
+        Print("P/L | net={0:F2} | equity={1:F2} balance={2:F2} | dayFromStart={3:F2}", _hourNet, Account.Equity, Account.Balance, Account.Equity - _dayStartEquity);
+        Print("STATE | armed={0} openPosition={1} halted={2}", _armedPlan == null ? "NO" : _armedPlan.Direction + ":" + _armedPlan.Name, FindDecisionPosition() == null ? "NO" : FindDecisionPosition()!.TradeType.ToString(), _halted);
+        Print("=== END NAI HOURLY SUMMARY ===");
+    }
+
+    private void ResetHourlyCounters()
+    {
+        _hourDecisions = 0;
+        _hourLongDecisions = 0;
+        _hourShortDecisions = 0;
+        _hourWaits = 0;
+        _hourSkips = 0;
+        _hourEntries = 0;
+        _hourWins = 0;
+        _hourLosses = 0;
+        _hourScratch = 0;
+        _hourLongTrades = 0;
+        _hourShortTrades = 0;
+        _hourNet = 0;
+        _hourRejectReasons.Clear();
+    }
+
+    private void RegisterWait(string reason)
+    {
+        _hourWaits++;
+        RegisterReason(reason);
+    }
+
+    private void RegisterSkip(string reason)
+    {
+        _hourSkips++;
+        RegisterReason(reason);
+    }
+
+    private void RegisterReason(string reason)
+    {
+        if (_hourRejectReasons.TryGetValue(reason, out var count)) _hourRejectReasons[reason] = count + 1;
+        else _hourRejectReasons[reason] = 1;
+    }
+
+    private int ContextScore(Bars bars, int i)
+    {
+        if (i < 20)
+            return 0;
+
+        var atr = Atr(bars, i);
+        if (atr <= 0)
+            return 0;
+
+        var score = 0;
+        var fast = AverageClose(bars, i - 5, i);
+        var slow = AverageClose(bars, i - 17, i);
+        if (fast > slow + atr * 0.05) score++; else if (fast < slow - atr * 0.05) score--;
+
+        var move3 = bars.ClosePrices[i] - bars.ClosePrices[i - 3];
+        if (move3 > atr * 0.18) score++; else if (move3 < -atr * 0.18) score--;
+
+        var recentHigh = HighestHigh(bars, i - 5, i);
+        var recentLow = LowestLow(bars, i - 5, i);
+        var priorHigh = HighestHigh(bars, i - 11, i - 6);
+        var priorLow = LowestLow(bars, i - 11, i - 6);
+        if (recentHigh > priorHigh + atr * 0.05 && recentLow >= priorLow - atr * 0.05) score++;
+        else if (recentLow < priorLow - atr * 0.05 && recentHigh <= priorHigh + atr * 0.05) score--;
+
+        var efficiency = Efficiency(bars, i - 6, i);
+        var net = bars.ClosePrices[i] - bars.ClosePrices[i - 6];
+        if (efficiency >= 0.55 && net > atr * 0.35) score++;
+        else if (efficiency >= 0.55 && net < -atr * 0.35) score--;
+
+        return score;
+    }
+
+    private void M1TrendVotes(int i, out int bull, out int bear)
     {
         bull = 0;
         bear = 0;
-        var atr = Atr(i);
+        var atr = Atr(_m1, i);
         if (atr <= Symbol.TickSize)
             return;
 
-        var fast = AverageClose(i - 5, i);
-        var slow = AverageClose(i - 17, i);
+        var fast = AverageClose(_m1, i - 5, i);
+        var slow = AverageClose(_m1, i - 17, i);
         if (fast > slow + atr * 0.04) bull++; else if (fast < slow - atr * 0.04) bear++;
 
-        var fastPast = AverageClose(i - 9, i - 4);
+        var fastPast = AverageClose(_m1, i - 9, i - 4);
         if (fast > fastPast + atr * 0.05) bull++; else if (fast < fastPast - atr * 0.05) bear++;
 
-        var move3 = _bars.ClosePrices[i] - _bars.ClosePrices[i - 3];
+        var move3 = _m1.ClosePrices[i] - _m1.ClosePrices[i - 3];
         if (move3 > atr * 0.12) bull++; else if (move3 < -atr * 0.12) bear++;
 
-        var structure = StructureDirection(i);
-        if (structure > 0) bull++; else if (structure < 0) bear++;
+        var recentHigh = HighestHigh(_m1, i - 5, i);
+        var recentLow = LowestLow(_m1, i - 5, i);
+        var priorHigh = HighestHigh(_m1, i - 11, i - 6);
+        var priorLow = LowestLow(_m1, i - 11, i - 6);
+        if (recentHigh > priorHigh + atr * 0.05 && recentLow >= priorLow - atr * 0.05) bull++;
+        else if (recentLow < priorLow - atr * 0.05 && recentHigh <= priorHigh + atr * 0.05) bear++;
 
-        var body = _bars.ClosePrices[i] - _bars.OpenPrices[i];
+        var body = _m1.ClosePrices[i] - _m1.OpenPrices[i];
         if (body > atr * 0.10) bull++; else if (body < -atr * 0.10) bear++;
-    }
-
-    private int StructureDirection(int i)
-    {
-        if (i < 12)
-            return 0;
-        var recentHigh = HighestHigh(i - 5, i);
-        var recentLow = LowestLow(i - 5, i);
-        var priorHigh = HighestHigh(i - 11, i - 6);
-        var priorLow = LowestLow(i - 11, i - 6);
-        var atr = Atr(i);
-        var tol = atr * 0.05;
-        if (recentHigh > priorHigh + tol && recentLow >= priorLow - tol) return 1;
-        if (recentLow < priorLow - tol && recentHigh <= priorHigh + tol) return -1;
-        return 0;
     }
 
     private void ResetDailyAnchorIfNeeded()
     {
         if (Server.Time.Date == _equityDay)
             return;
+
         _equityDay = Server.Time.Date;
         _dayStartEquity = Account.Equity;
         _halted = false;
-        _consecutiveFullLosses = 0;
-        _lossPause = false;
-        _lossPauseSawReset = false;
-        _pauseResetLogged = false;
-        Print("NAI V2 | NEW DAY | equity anchor={0:F2}", _dayStartEquity);
+        Print("NAI DAY RESET | equity anchor={0:F2}", _dayStartEquity);
     }
 
     private bool HitDailyStop()
     {
         if (_dayStartEquity <= 0)
             return false;
+
         var dd = (_dayStartEquity - Account.Equity) / _dayStartEquity * 100.0;
         if (dd < DailyEquityStopPercent)
             return false;
+
         _halted = true;
-        var p = FindRunnerPosition();
+        _armedPlan = null;
+        var p = FindDecisionPosition();
         if (p != null)
             ClosePosition(p);
-        Print("NAI V2 HALTED | daily equity drawdown={0:F2}% limit={1:F2}%", dd, DailyEquityStopPercent);
+        Print("NAI HALTED | daily equity drawdown={0:F2}% limit={1:F2}%", dd, DailyEquityStopPercent);
         return true;
     }
 
-    private double Atr(int i)
+    private Position? FindDecisionPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label);
+
+    private double MinimumStopDistancePrice(double referencePrice)
+    {
+        if (Symbol.MinStopLossDistance <= 0)
+            return 0;
+        if (Symbol.MinDistanceType == SymbolMinDistanceType.Percentage)
+            return referencePrice * Symbol.MinStopLossDistance / 100.0;
+        return Symbol.MinStopLossDistance * Symbol.PipSize;
+    }
+
+    private double NormalizePrice(double price, RoundingMode mode)
+    {
+        if (Symbol.TickSize <= 0)
+            return Math.Round(price, Symbol.Digits);
+        var rawTicks = price / Symbol.TickSize;
+        var ticks = mode == RoundingMode.Down ? Math.Floor(rawTicks + 1e-8) : Math.Ceiling(rawTicks - 1e-8);
+        return Math.Round(ticks * Symbol.TickSize, Symbol.Digits);
+    }
+
+    private double Atr(Bars bars, int i)
     {
         var from = Math.Max(1, i - AtrPeriod + 1);
         double total = 0;
         var count = 0;
         for (var k = from; k <= i; k++)
         {
-            var tr = Math.Max(_bars.HighPrices[k] - _bars.LowPrices[k],
-                Math.Max(Math.Abs(_bars.HighPrices[k] - _bars.ClosePrices[k - 1]), Math.Abs(_bars.LowPrices[k] - _bars.ClosePrices[k - 1])));
+            var tr = Math.Max(bars.HighPrices[k] - bars.LowPrices[k], Math.Max(Math.Abs(bars.HighPrices[k] - bars.ClosePrices[k - 1]), Math.Abs(bars.LowPrices[k] - bars.ClosePrices[k - 1])));
             total += tr;
             count++;
         }
         return count == 0 ? 0 : total / count;
     }
 
-    private double Efficiency(int from, int to)
+    private double Efficiency(Bars bars, int from, int to)
     {
         if (to <= from)
             return 0;
-        var net = Math.Abs(_bars.ClosePrices[to] - _bars.ClosePrices[from]);
+        var net = Math.Abs(bars.ClosePrices[to] - bars.ClosePrices[from]);
         double path = 0;
-        for (var k = from + 1; k <= to; k++)
-            path += Math.Abs(_bars.ClosePrices[k] - _bars.ClosePrices[k - 1]);
+        for (var k = from + 1; k <= to; k++) path += Math.Abs(bars.ClosePrices[k] - bars.ClosePrices[k - 1]);
         return path <= Symbol.TickSize ? 0 : net / path;
     }
 
-    private double AverageClose(int from, int to)
+    private double AverageClose(Bars bars, int from, int to)
     {
         from = Math.Max(0, from);
         double sum = 0;
         var count = 0;
-        for (var k = from; k <= to; k++)
-        {
-            sum += _bars.ClosePrices[k];
-            count++;
-        }
-        return count == 0 ? _bars.ClosePrices[to] : sum / count;
+        for (var k = from; k <= to; k++) { sum += bars.ClosePrices[k]; count++; }
+        return count == 0 ? bars.ClosePrices[to] : sum / count;
     }
 
-    private double HighestHigh(int from, int to)
+    private double HighestHigh(Bars bars, int from, int to)
     {
         from = Math.Max(0, from);
         var v = double.MinValue;
-        for (var k = from; k <= to; k++) v = Math.Max(v, _bars.HighPrices[k]);
+        for (var k = from; k <= to; k++) v = Math.Max(v, bars.HighPrices[k]);
         return v;
     }
 
-    private double LowestLow(int from, int to)
+    private double LowestLow(Bars bars, int from, int to)
     {
         from = Math.Max(0, from);
         var v = double.MaxValue;
-        for (var k = from; k <= to; k++) v = Math.Min(v, _bars.LowPrices[k]);
+        for (var k = from; k <= to; k++) v = Math.Min(v, bars.LowPrices[k]);
         return v;
     }
 
-    private sealed record Setup(int Direction, string Name, double Entry, double Stop, double Target, double Risk, string Reason);
+    private static DateTime FloorToHour(DateTime t) => new DateTime(t.Year, t.Month, t.Day, t.Hour, 0, 0, t.Kind);
+
+    private enum RegimeState { Bull, Bear, Mixed, Transition }
+    private enum DirectionChoice { None, Long, Short }
+    private sealed record SetupPlan(DirectionChoice Direction, string Name, double EntryReference, double RiskDistance, string Reason);
 }
