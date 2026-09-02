@@ -5,9 +5,9 @@ using cAlgo.API;
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiRunnerV1RegimeLong : Robot
+public class NaiRunnerV1Regime : Robot
 {
-    private const string Label = "NAI-RUNNER-V1-REGIME-LONG";
+    private const string Label = "NAI-RUNNER-V1-REGIME";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
 
     [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 1.00, Step = 0.10)]
@@ -44,22 +44,36 @@ public class NaiRunnerV1RegimeLong : Robot
     private bool _halted;
     private int _scanCount;
     private double? _lastStopRequestPrice;
-    private RegimeState _regime = RegimeState.Yellow;
+    private RegimeState _regime = RegimeState.Mixed;
     private int _m15Score;
     private int _m5Score;
+
+    private int _bullScans;
+    private int _bearScans;
+    private int _mixedBlockedScans;
+    private int _longTrades;
+    private int _shortTrades;
+    private int _longWins;
+    private int _longLosses;
+    private int _longScratch;
+    private int _shortWins;
+    private int _shortLosses;
+    private int _shortScratch;
+    private double _longNet;
+    private double _shortNet;
 
     protected override void OnStart()
     {
         if (Account.IsLive)
         {
-            Print("NAI RUNNER V1 REGIME LONG BLOCKED | DEMO accounts only.");
+            Print("NAI RUNNER V1 REGIME BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI RUNNER V1 REGIME LONG BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
+            Print("NAI RUNNER V1 REGIME BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
@@ -70,14 +84,22 @@ public class NaiRunnerV1RegimeLong : Robot
         _dayStartEquity = Account.Equity;
         _equityDay = Server.Time.Date;
 
+        Positions.Closed += OnPositionClosed;
         RefreshRegime();
 
-        Print("NAI RUNNER V1 REGIME LONG STARTED | {0} | DEMO", SymbolName);
-        Print("ENTRY CORE | EXACT V1 LONG | Pullback Runner + Momentum Runner | SHORT DISABLED");
-        Print("PERMISSION | GREEN=trade V1 LONG | YELLOW/RED=WAIT | regime never closes an open trade");
+        Print("NAI RUNNER V1 REGIME STARTED | {0} | DEMO | SYMMETRIC LONG+SHORT", SymbolName);
+        Print("ENTRY CORE | EXACT RUNNER V1 | Pullback Runner + Momentum Runner | mirrored both directions");
+        Print("PERMISSION | BULL -> LONG only | BEAR -> SHORT only | MIXED -> WAIT");
+        Print("REGIME NEVER CLOSES OPEN TRADE | original V1 early-exit + fixed BE/trail management only");
         Print("RISK | {0:F2}% | TP={1:F2}R | BE={2:F2}R | TRAIL={3:F2}R", RiskPercent, TargetR, BreakEvenAtR, TrailAtR);
         Print("SYMBOL | tick={0} pip={1} minVol={2} maxVol={3} step={4}", Symbol.TickSize, Symbol.PipSize, Symbol.VolumeInUnitsMin, Symbol.VolumeInUnitsMax, Symbol.VolumeInUnitsStep);
         PrintRegime("START");
+    }
+
+    protected override void OnStop()
+    {
+        Positions.Closed -= OnPositionClosed;
+        PrintStats("BOT STOP");
     }
 
     protected override void OnTick()
@@ -125,9 +147,10 @@ public class NaiRunnerV1RegimeLong : Robot
             return;
         }
 
-        if (_regime != RegimeState.Green)
+        if (_regime == RegimeState.Mixed)
         {
-            Print("NAI PERMISSION | {0} | NO LONG ENTRY | M15={1} M5={2}", _regime.ToString().ToUpperInvariant(), _m15Score, _m5Score);
+            _mixedBlockedScans++;
+            Print("NAI PERMISSION | MIXED | NO TRADE | M15={0} M5={1}", _m15Score, _m5Score);
             return;
         }
 
@@ -139,33 +162,35 @@ public class NaiRunnerV1RegimeLong : Robot
         }
 
         TrendVotes(i, out var bull, out var bear);
-        var longTrend = bull >= 3 && bull > bear;
+        var trend = bull >= 3 && bull > bear ? 1 : bear >= 3 && bear > bull ? -1 : 0;
+        var permittedDirection = _regime == RegimeState.Bull ? 1 : -1;
 
-        if (!longTrend)
+        if (_regime == RegimeState.Bull) _bullScans++;
+        else _bearScans++;
+
+        if (trend != permittedDirection)
         {
-            var fast = AverageClose(_m1, i - 5, i);
-            var slow = AverageClose(_m1, i - 17, i);
-            var distance = Math.Abs(_m1.ClosePrices[i] - fast) / atr;
-            Print("NAI RUNNER | WAIT | GREEN regime but V1 LONG trend absent | votes={0}/{1} fastSlow={2:F2}ATR priceFast={3:F2}ATR", bull, bear, Math.Abs(fast - slow) / atr, distance);
+            Print("NAI RUNNER | WAIT | regime={0} but V1 M1 direction not aligned | votes={1}/{2}", _regime.ToString().ToUpperInvariant(), bull, bear);
             return;
         }
 
-        // EXACT Runner V1 LONG entry order: Pullback first, then Momentum.
-        var setup = FindPullbackEntry(i, 1, atr) ?? FindMomentumEntry(i, 1, atr);
+        // EXACT original V1 order: Pullback first, then Momentum. Same code for LONG and SHORT.
+        var setup = FindPullbackEntry(i, trend, atr) ?? FindMomentumEntry(i, trend, atr);
 
         if (setup == null)
         {
             var fast = AverageClose(_m1, i - 5, i);
             var slow = AverageClose(_m1, i - 17, i);
             var distance = Math.Abs(_m1.ClosePrices[i] - fast) / atr;
-            Print("NAI RUNNER | WAIT | GREEN + LONG votes={0}/{1} but no V1 setup | fastSlow={2:F2}ATR priceFast={3:F2}ATR", bull, bear, Math.Abs(fast - slow) / atr, distance);
+            Print("NAI RUNNER | WAIT | regime={0} direction={1} votes={2}/{3} but no V1 setup | fastSlow={4:F2}ATR priceFast={5:F2}ATR",
+                _regime.ToString().ToUpperInvariant(), trend > 0 ? "LONG" : "SHORT", bull, bear, Math.Abs(fast - slow) / atr, distance);
             return;
         }
 
         ExecuteSetup(setup, i);
     }
 
-    // EXACT Runner V1 Pullback LONG logic retained.
+    // EXACT Runner V1 Pullback logic, mirrored by trend sign.
     private Setup? FindPullbackEntry(int i, int trend, double atr)
     {
         var fast = AverageClose(_m1, i - 5, i);
@@ -207,7 +232,7 @@ public class NaiRunnerV1RegimeLong : Robot
             $"valueTouch fast={fast:F2} body={body / atr:F2}ATR risk={risk / atr:F2}ATR");
     }
 
-    // EXACT Runner V1 Momentum LONG logic retained.
+    // EXACT Runner V1 Momentum logic, mirrored by trend sign.
     private Setup? FindMomentumEntry(int i, int trend, double atr)
     {
         var open = _m1.OpenPrices[i];
@@ -264,7 +289,8 @@ public class NaiRunnerV1RegimeLong : Robot
         }
 
         volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
-        var result = ExecuteMarketOrder(TradeType.Buy, SymbolName, volume, Label, stopPips, tpPips, setup.Name);
+        var tradeType = setup.Direction > 0 ? TradeType.Buy : TradeType.Sell;
+        var result = ExecuteMarketOrder(tradeType, SymbolName, volume, Label, stopPips, tpPips, setup.Name);
 
         if (!result.IsSuccessful)
         {
@@ -275,7 +301,11 @@ public class NaiRunnerV1RegimeLong : Robot
         _lastEntryIndex = i;
         _entryIndex = i;
         _lastStopRequestPrice = null;
-        Print("NAI RUNNER | ENTER BUY | {0} | entry={1} SL={2} TP={3} volume={4} target={5:F2}R | regime=GREEN M15={6} M5={7} | {8}", setup.Name, result.Position.EntryPrice, setup.Stop, setup.Target, volume, TargetR, _m15Score, _m5Score, setup.Reason);
+        if (tradeType == TradeType.Buy) _longTrades++; else _shortTrades++;
+
+        Print("NAI RUNNER | ENTER {0} | {1} | entry={2} SL={3} TP={4} volume={5} target={6:F2}R | regime={7} M15={8} M5={9} | {10}",
+            tradeType, setup.Name, result.Position.EntryPrice, setup.Stop, setup.Target, volume, TargetR,
+            _regime.ToString().ToUpperInvariant(), _m15Score, _m5Score, setup.Reason);
     }
 
     private void ManageOpenPosition()
@@ -311,7 +341,7 @@ public class NaiRunnerV1RegimeLong : Robot
         }
     }
 
-    // V2-safe stop movement: same V1 management thresholds, but broker-safe and logs only accepted moves.
+    // Same V1 management thresholds, with the later broker-safe trail fix.
     private void TryMoveStop(Position p, double rawCandidate, string reason, double liveR)
     {
         if (!p.StopLoss.HasValue)
@@ -341,12 +371,12 @@ public class NaiRunnerV1RegimeLong : Robot
         _lastStopRequestPrice = candidate;
         var result = ModifyPosition(p, candidate, p.TakeProfit, false);
         if (result.IsSuccessful)
-            Print("NAI RUNNER | {0} SUCCESS | SL->{1:F2} | liveR={2:F2}", reason, candidate, liveR);
+            Print("NAI RUNNER | {0} SUCCESS | {1} SL->{2:F2} | liveR={3:F2}", reason, p.TradeType, candidate, liveR);
         else
             Print("NAI RUNNER | {0} REJECTED | requested={1:F2} error={2}", reason, candidate, result.Error);
     }
 
-    // Original V1 early-exit logic retained. Regime permission does NOT close open trades.
+    // Original V1 early-exit logic. Regime itself never exits an open trade.
     private void EvaluateEarlyExit(Position p, int i)
     {
         TrendVotes(i, out var bull, out var bear);
@@ -375,30 +405,71 @@ public class NaiRunnerV1RegimeLong : Robot
         var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
         var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
         TrendVotes(i, out var bull, out var bear);
-        Print("NAI RUNNER | HOLD | {0} P/L={1:F2} R={2:F2} votes={3}/{4} SL={5} TP={6} | permissionNow={7}", p.TradeType, p.NetProfit, r, bull, bear,
+        Print("NAI RUNNER | HOLD | {0} P/L={1:F2} R={2:F2} votes={3}/{4} SL={5} TP={6} | regimeNow={7}", p.TradeType, p.NetProfit, r, bull, bear,
             p.StopLoss.HasValue ? p.StopLoss.Value.ToString("F2") : "--",
             p.TakeProfit.HasValue ? p.TakeProfit.Value.ToString("F2") : "--",
             _regime.ToString().ToUpperInvariant());
+    }
+
+    private void OnPositionClosed(PositionClosedEventArgs args)
+    {
+        var p = args.Position;
+        if (p.Label != Label || p.SymbolName != SymbolName)
+            return;
+
+        var intendedRisk = Math.Max(0.01, Account.Balance * RiskPercent / 100.0);
+        var isWin = p.NetProfit > intendedRisk * 0.15;
+        var isLoss = p.NetProfit < -intendedRisk * 0.15;
+
+        if (p.TradeType == TradeType.Buy)
+        {
+            _longNet += p.NetProfit;
+            if (isWin) _longWins++;
+            else if (isLoss) _longLosses++;
+            else _longScratch++;
+        }
+        else
+        {
+            _shortNet += p.NetProfit;
+            if (isWin) _shortWins++;
+            else if (isLoss) _shortLosses++;
+            else _shortScratch++;
+        }
+
+        _lastStopRequestPrice = null;
+        _entryIndex = -1;
+        Print("NAI RESULT | {0} net={1:F2} reason={2}", p.TradeType, p.NetProfit, args.Reason);
+        PrintStats("TRADE CLOSED");
+    }
+
+    private void PrintStats(string trigger)
+    {
+        Print("=== NAI V1 REGIME STATS | {0} ===", trigger);
+        Print("LONG | trades={0} W={1} L={2} scratch={3} net={4:F2}", _longTrades, _longWins, _longLosses, _longScratch, _longNet);
+        Print("SHORT | trades={0} W={1} L={2} scratch={3} net={4:F2}", _shortTrades, _shortWins, _shortLosses, _shortScratch, _shortNet);
+        Print("REGIME SCANS | BULL={0} BEAR={1} MIXED_BLOCKED={2}", _bullScans, _bearScans, _mixedBlockedScans);
+        Print("TOTAL NET | {0:F2}", _longNet + _shortNet);
+        Print("=== END NAI V1 REGIME STATS ===");
     }
 
     private void RefreshRegime()
     {
         if (_m5.Count < 25 || _m15.Count < 25)
         {
-            _regime = RegimeState.Yellow;
+            _regime = RegimeState.Mixed;
             return;
         }
 
         _m15Score = ContextScore(_m15, _m15.Count - 2);
         _m5Score = ContextScore(_m5, _m5.Count - 2);
 
-        // Permission only. GREEN requires both higher timeframes to support LONG.
+        // Fully symmetric permission. No built-in LONG preference.
         if (_m15Score >= 2 && _m5Score >= 1)
-            _regime = RegimeState.Green;
-        else if (_m15Score <= -2 || _m5Score <= -2)
-            _regime = RegimeState.Red;
+            _regime = RegimeState.Bull;
+        else if (_m15Score <= -2 && _m5Score <= -1)
+            _regime = RegimeState.Bear;
         else
-            _regime = RegimeState.Yellow;
+            _regime = RegimeState.Mixed;
 
         if (_lastRegimePrint == DateTime.MinValue || Server.Time - _lastRegimePrint >= TimeSpan.FromMinutes(5))
         {
@@ -439,12 +510,12 @@ public class NaiRunnerV1RegimeLong : Robot
 
     private void PrintRegime(string source)
     {
-        Print("NAI REGIME | {0} | {1} | M15={2} M5={3} | GREEN trades, YELLOW/RED waits", source, _regime.ToString().ToUpperInvariant(), _m15Score, _m5Score);
+        Print("NAI REGIME | {0} | {1} | M15={2} M5={3} | BULL=LONG, BEAR=SHORT, MIXED=WAIT", source, _regime.ToString().ToUpperInvariant(), _m15Score, _m5Score);
     }
 
     private Position? FindRunnerPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label);
 
-    // EXACT Runner V1 M1 trend votes retained.
+    // EXACT original V1 M1 trend votes.
     private void TrendVotes(int i, out int bull, out int bear)
     {
         bull = 0;
@@ -507,6 +578,7 @@ public class NaiRunnerV1RegimeLong : Robot
         if (p != null)
             ClosePosition(p);
         Print("NAI RUNNER HALTED | daily equity drawdown={0:F2}% limit={1:F2}%", dd, DailyEquityStopPercent);
+        PrintStats("DAILY STOP");
         return true;
     }
 
@@ -585,9 +657,9 @@ public class NaiRunnerV1RegimeLong : Robot
 
     private enum RegimeState
     {
-        Green,
-        Yellow,
-        Red
+        Bull,
+        Mixed,
+        Bear
     }
 
     private sealed record Setup(int Direction, string Name, double Entry, double Stop, double Target, double Risk, string Reason);
