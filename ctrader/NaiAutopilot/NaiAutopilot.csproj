@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <AlgoName>NAI-Mountain-Decision-V1</AlgoName>
+    <AlgoName>NAI-Runner-V1-Regime-Long</AlgoName>
     <AlgoBuild>true</AlgoBuild>
     <AlgoPublish>false</AlgoPublish>
     <IncludeSource>true</IncludeSource>
