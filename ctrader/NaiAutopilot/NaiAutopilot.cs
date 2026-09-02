@@ -6,9 +6,9 @@ using cAlgo.API;
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiDecisionEngineV1 : Robot
+public class NaiMountainDecisionV1 : Robot
 {
-    private const string Label = "NAI-DECISION-V1";
+    private const string Label = "NAI-MOUNTAIN-V1";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
 
     [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 1.00, Step = 0.10)]
@@ -32,8 +32,14 @@ public class NaiDecisionEngineV1 : Robot
     [Parameter("Trail at R", DefaultValue = 1.20, MinValue = 0.80, MaxValue = 2.50, Step = 0.10)]
     public double TrailAtR { get; set; }
 
-    [Parameter("Max Chase ATR", DefaultValue = 0.28, MinValue = 0.10, MaxValue = 0.80, Step = 0.02)]
+    [Parameter("Max Chase ATR", DefaultValue = 0.24, MinValue = 0.08, MaxValue = 0.60, Step = 0.02)]
     public double MaxChaseAtr { get; set; }
+
+    [Parameter("Early Validation Bars", DefaultValue = 3, MinValue = 2, MaxValue = 6)]
+    public int EarlyValidationBars { get; set; }
+
+    [Parameter("Early Emergency R", DefaultValue = 0.45, MinValue = 0.25, MaxValue = 0.80, Step = 0.05)]
+    public double EarlyEmergencyR { get; set; }
 
     private Bars _m1 = null!;
     private Bars _m5 = null!;
@@ -51,11 +57,17 @@ public class NaiDecisionEngineV1 : Robot
     private int _entryM1Index = -1;
     private double? _lastStopRequestPrice;
 
-    private RegimeState _regime = RegimeState.Mixed;
-    private DirectionChoice _legalDirection = DirectionChoice.None;
-    private string _contextReason = "warming up";
+    private readonly Queue<int> _m5Trajectory = new();
+    private readonly Queue<int> _m15Trajectory = new();
+    private readonly Queue<int> _m1Trajectory = new();
+
+    private MountainSnapshot _mountain = MountainSnapshot.Neutral;
     private SetupPlan? _armedPlan;
     private DateTime _armedAt = DateTime.MinValue;
+    private TradeMeta? _activeMeta;
+
+    private readonly Dictionary<string, BucketStats> _sessionMemory = new();
+    private readonly HashSet<string> _blockedEarlyBuckets = new();
 
     private int _hourDecisions;
     private int _hourLongDecisions;
@@ -69,20 +81,28 @@ public class NaiDecisionEngineV1 : Robot
     private int _hourLongTrades;
     private int _hourShortTrades;
     private double _hourNet;
+    private int _hourBullForecasts;
+    private int _hourBearForecasts;
+    private int _hourForecastConfirmed;
+    private int _hourForecastFailed;
+    private int _hourEarlyEntries;
+    private int _hourEarlyConfirmed;
+    private int _hourEarlyFailed;
+    private int _hourLateSkips;
     private readonly Dictionary<string, int> _hourRejectReasons = new();
 
     protected override void OnStart()
     {
         if (Account.IsLive)
         {
-            Print("NAI DECISION V1 BLOCKED | DEMO accounts only.");
+            Print("NAI MOUNTAIN V1 BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI DECISION V1 BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
+            Print("NAI MOUNTAIN V1 BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
@@ -96,11 +116,14 @@ public class NaiDecisionEngineV1 : Robot
         _summaryHour = FloorToHour(Server.Time);
 
         Positions.Closed += OnPositionClosed;
-        RefreshContext(force: true);
+        SeedTrajectory();
+        RefreshMountain(force: true);
 
-        Print("NAI DECISION ENGINE V1 STARTED | {0} | DEMO | M15/M5 context + M1 decisions + tick execution", SymbolName);
-        Print("DECISION CHOICES | LONG / SHORT / WAIT / SKIP | risk={0:F2}% target={1:F2}R BE={2:F2}R trail={3:F2}R chaseMax={4:F2}ATR", RiskPercent, TargetR, BreakEvenAtR, TrailAtR, MaxChaseAtr);
-        Print("HOURLY SUMMARY ON | screenshot the block beginning '=== NAI HOURLY SUMMARY ==='");
+        Print("NAI MOUNTAIN DECISION V1 STARTED | {0} | DEMO | trajectory memory + early forecast + fast validation", SymbolName);
+        Print("MOUNTAIN STAGES | BASE / FORMING / CLIMBING / MATURE / FAILING | choices LONG / SHORT / WAIT / SKIP");
+        Print("RISK | {0:F2}% | target={1:F2}R | BE={2:F2}R | trail={3:F2}R | earlyEmergency=-{4:F2}R", RiskPercent, TargetR, BreakEvenAtR, TrailAtR, EarlyEmergencyR);
+        Print("SESSION MEMORY | tracks direction+stage+setup; weak EARLY buckets can be blocked after repeated evidence");
+        Print("HOURLY SUMMARY ON | screenshot block beginning '=== NAI MOUNTAIN HOURLY ==='");
     }
 
     protected override void OnStop()
@@ -120,71 +143,109 @@ public class NaiDecisionEngineV1 : Robot
             return;
 
         CheckHourlyBoundary();
-        RefreshContext(force: false);
-        ManageOpenPosition();
+        RefreshMountain(force: false);
+        ManageOpenPositionFast();
 
-        if (FindDecisionPosition() != null)
+        if (FindPosition() != null)
             return;
 
         ProcessNewM1IfNeeded();
         TryExecuteArmedPlan();
     }
 
-    private void RefreshContext(bool force)
+    private void SeedTrajectory()
     {
-        if (_m5.Count < 30 || _m15.Count < 30)
+        for (var offset = 3; offset >= 1; offset--)
+        {
+            var i5 = Math.Max(20, _m5.Count - 1 - offset);
+            var i15 = Math.Max(20, _m15.Count - 1 - offset);
+            if (i5 < _m5.Count) Push(_m5Trajectory, ContextScore(_m5, i5), 5);
+            if (i15 < _m15.Count) Push(_m15Trajectory, ContextScore(_m15, i15), 5);
+        }
+    }
+
+    private void RefreshMountain(bool force)
+    {
+        if (_m5.Count < 30 || _m15.Count < 30 || _m1.Count < 45)
             return;
 
         var m5Open = _m5.OpenTimes[_m5.Count - 1];
         var m15Open = _m15.OpenTimes[_m15.Count - 1];
-        if (!force && m5Open == _lastM5Open && m15Open == _lastM15Open)
+        var changed5 = m5Open != _lastM5Open;
+        var changed15 = m15Open != _lastM15Open;
+
+        if (!force && !changed5 && !changed15)
             return;
 
-        _lastM5Open = m5Open;
-        _lastM15Open = m15Open;
-
-        var i5 = _m5.Count - 2;
-        var i15 = _m15.Count - 2;
-        var s5 = ContextScore(_m5, i5);
-        var s15 = ContextScore(_m15, i15);
-
-        var strongBull15 = s15 >= 3;
-        var strongBear15 = s15 <= -3;
-        var bull5 = s5 >= 2;
-        var bear5 = s5 <= -2;
-
-        if (strongBull15 && bull5)
+        if (changed5)
         {
-            _regime = RegimeState.Bull;
-            _legalDirection = DirectionChoice.Long;
-            _contextReason = $"M15={s15} M5={s5} aligned bull";
-        }
-        else if (strongBear15 && bear5)
-        {
-            _regime = RegimeState.Bear;
-            _legalDirection = DirectionChoice.Short;
-            _contextReason = $"M15={s15} M5={s5} aligned bear";
-        }
-        else if ((strongBull15 && bear5) || (strongBear15 && bull5))
-        {
-            _regime = RegimeState.Transition;
-            _legalDirection = DirectionChoice.None;
-            _contextReason = $"M15={s15} conflicts M5={s5}";
-        }
-        else
-        {
-            _regime = RegimeState.Mixed;
-            _legalDirection = DirectionChoice.None;
-            _contextReason = $"M15={s15} M5={s5} insufficient alignment";
+            _lastM5Open = m5Open;
+            Push(_m5Trajectory, ContextScore(_m5, _m5.Count - 2), 5);
         }
 
-        Print("NAI CONTEXT | regime={0} legal={1} | {2}", _regime, _legalDirection, _contextReason);
-
-        if (_armedPlan != null && _armedPlan.Direction != _legalDirection)
+        if (changed15)
         {
-            Print("NAI DECISION | CANCEL ARMED | context changed from {0} to legal={1}", _armedPlan.Direction, _legalDirection);
+            _lastM15Open = m15Open;
+            Push(_m15Trajectory, ContextScore(_m15, _m15.Count - 2), 5);
+        }
+
+        _mountain = BuildMountainSnapshot();
+        PrintMountainContext("HTF UPDATE");
+
+        if (_armedPlan != null && _mountain.Direction != DirectionChoice.None && _armedPlan.Direction != _mountain.Direction && _mountain.Strength >= 3)
+        {
+            Print("NAI MOUNTAIN | CANCEL ARMED | new mountain points {0}", _mountain.Direction);
             _armedPlan = null;
         }
+    }
+
+    private MountainSnapshot BuildMountainSnapshot()
+    {
+        var s5 = Last(_m5Trajectory);
+        var s15 = Last(_m15Trajectory);
+        var d5 = Delta(_m5Trajectory);
+        var d15 = Delta(_m15Trajectory);
+
+        var i1 = _m1.Count - 2;
+        var s1 = ContextScore(_m1, i1);
+        var atr1 = Atr(_m1, i1);
+        var fast = AverageClose(_m1, i1 - 5, i1);
+        var extension = atr1 > 0 ? Math.Abs(_m1.ClosePrices[i1] - fast) / atr1 : 0;
+        var efficiency = Efficiency(_m1, i1 - 6, i1);
+
+        var bullTrajectory = 0;
+        var bearTrajectory = 0;
+
+        if (s15 >= 1) bullTrajectory += 2; else if (s15 <= -1) bearTrajectory += 2;
+        if (s5 >= 1) bullTrajectory += 2; else if (s5 <= -1) bearTrajectory += 2;
+        if (s1 >= 2) bullTrajectory += 2; else if (s1 <= -2) bearTrajectory += 2;
+        if (d15 > 0) bullTrajectory += 2; else if (d15 < 0) bearTrajectory += 2;
+        if (d5 > 0) bullTrajectory += 2; else if (d5 < 0) bearTrajectory += 2;
+
+        DirectionChoice direction;
+        var strength = Math.Max(bullTrajectory, bearTrajectory);
+        if (bullTrajectory >= bearTrajectory + 2 && bullTrajectory >= 5) direction = DirectionChoice.Long;
+        else if (bearTrajectory >= bullTrajectory + 2 && bearTrajectory >= 5) direction = DirectionChoice.Short;
+        else direction = DirectionChoice.None;
+
+        MountainStage stage;
+        var accelerating = direction == DirectionChoice.Long ? d5 > 0 || d15 > 0 : direction == DirectionChoice.Short ? d5 < 0 || d15 < 0 : false;
+        var strongAligned = direction == DirectionChoice.Long ? s15 >= 2 && s5 >= 2 && s1 >= 2 : direction == DirectionChoice.Short ? s15 <= -2 && s5 <= -2 && s1 <= -2 : false;
+        var oppositeM1 = direction == DirectionChoice.Long ? s1 <= -2 : direction == DirectionChoice.Short ? s1 >= 2 : false;
+
+        if (direction == DirectionChoice.None)
+            stage = MountainStage.Base;
+        else if (oppositeM1 && !accelerating)
+            stage = MountainStage.Failing;
+        else if (extension >= 1.05 || (strongAligned && !accelerating && efficiency < 0.50))
+            stage = MountainStage.Mature;
+        else if (strongAligned && (extension >= 0.35 || efficiency >= 0.55))
+            stage = MountainStage.Climbing;
+        else
+            stage = MountainStage.Forming;
+
+        var reason = $"M15={s15} d15={d15:+#;-#;0} | M5={s5} d5={d5:+#;-#;0} | M1={s1} | ext={extension:F2}ATR eff={efficiency:F2}";
+        return new MountainSnapshot(direction, stage, strength, s15, s5, s1, d15, d5, extension, efficiency, reason);
     }
 
     private void ProcessNewM1IfNeeded()
@@ -198,24 +259,54 @@ public class NaiDecisionEngineV1 : Robot
 
         _lastM1Open = liveOpen;
         var i = _m1.Count - 2;
+        var s1 = ContextScore(_m1, i);
+        Push(_m1Trajectory, s1, 8);
+        _mountain = BuildMountainSnapshot();
         _hourDecisions++;
+
+        ValidateActiveForecastOnNewBar(i);
+
+        if (FindPosition() != null)
+            return;
 
         var barsSinceEntry = i - _lastEntryM1Index;
         if (barsSinceEntry < CooldownBars)
         {
             RegisterWait("cooldown");
-            Print("NAI DECISION | WAIT | cooldown {0}/{1} | regime={2}", barsSinceEntry, CooldownBars, _regime);
+            Print("NAI MOUNTAIN | WAIT | cooldown {0}/{1} | {2}/{3}", barsSinceEntry, CooldownBars, _mountain.Direction, _mountain.Stage);
             return;
         }
 
-        if (_legalDirection == DirectionChoice.None)
+        if (_mountain.Direction == DirectionChoice.None)
         {
-            if (_regime == RegimeState.Transition)
-                RegisterWait("timeframe conflict");
-            else
-                RegisterSkip("mixed/chop");
+            RegisterWait("no mountain direction");
+            Print("NAI MOUNTAIN | WAIT | BASE/CONFLICT | {0}", _mountain.Reason);
+            return;
+        }
 
-            Print("NAI DECISION | {0} | regime={1} | {2}", _regime == RegimeState.Transition ? "WAIT" : "SKIP", _regime, _contextReason);
+        if (_mountain.Stage == MountainStage.Failing)
+        {
+            RegisterSkip("mountain failing");
+            Print("NAI MOUNTAIN | SKIP | {0} mountain FAILING | {1}", _mountain.Direction, _mountain.Reason);
+            return;
+        }
+
+        if (_mountain.Stage == MountainStage.Mature)
+        {
+            _hourLateSkips++;
+            RegisterSkip("mature/summit risk");
+            Print("NAI MOUNTAIN | SKIP LATE | {0} MATURE | ext={1:F2}ATR | no summit chase", _mountain.Direction, _mountain.ExtensionAtr);
+            return;
+        }
+
+        var dir = _mountain.Direction == DirectionChoice.Long ? 1 : -1;
+        M1TrendVotes(i, out var bull, out var bear);
+        var m1Aligned = dir > 0 ? bull >= 3 && bull > bear : bear >= 3 && bear > bull;
+
+        if (!m1Aligned)
+        {
+            RegisterWait("M1 trigger not aligned");
+            Print("NAI MOUNTAIN | WAIT | {0}/{1} but M1 votes={2}/{3}", _mountain.Direction, _mountain.Stage, bull, bear);
             return;
         }
 
@@ -226,40 +317,34 @@ public class NaiDecisionEngineV1 : Robot
             return;
         }
 
-        var dir = _legalDirection == DirectionChoice.Long ? 1 : -1;
-        M1TrendVotes(i, out var bull, out var bear);
-        var m1Aligned = dir > 0 ? bull >= 3 && bull > bear : bear >= 3 && bear > bull;
-
-        if (!m1Aligned)
-        {
-            RegisterWait("M1 not aligned");
-            Print("NAI DECISION | WAIT | regime={0} legal={1} but M1 votes={2}/{3}", _regime, _legalDirection, bull, bear);
-            return;
-        }
-
         var setup = FindPullbackEntry(i, dir, atr) ?? FindMomentumEntry(i, dir, atr);
         if (setup == null)
         {
             RegisterWait("no valid setup");
-            Print("NAI DECISION | WAIT | {0} legal | M1 aligned {1}/{2} | no pullback/momentum setup", _legalDirection, bull, bear);
+            Print("NAI MOUNTAIN | WAIT | {0}/{1} direction ready, entry pattern absent", _mountain.Direction, _mountain.Stage);
             return;
         }
 
-        var fast = AverageClose(_m1, i - 5, i);
-        var closedPrice = _m1.ClosePrices[i];
-        var extension = Math.Abs(closedPrice - fast) / atr;
-        if (extension > 1.10)
+        var early = _mountain.Stage == MountainStage.Forming;
+        var bucket = BucketKey(_mountain.Direction, _mountain.Stage, setup.Name);
+        if (early && _blockedEarlyBuckets.Contains(bucket))
         {
-            RegisterSkip("late/extended");
-            Print("NAI DECISION | SKIP | direction={0} setup={1} | TOO EXTENDED {2:F2}ATR from value", _legalDirection, setup.Name, extension);
+            RegisterSkip("session memory blocked bucket");
+            Print("NAI MEMORY | BLOCK EARLY | {0} | previous session outcomes weak", bucket);
             return;
         }
 
-        _armedPlan = setup;
+        if (early)
+        {
+            if (_mountain.Direction == DirectionChoice.Long) _hourBullForecasts++; else _hourBearForecasts++;
+            Print("NAI FORECAST | {0} MOUNTAIN FORMING | strength={1} | prediction must validate within {2} M1 bars | {3}", _mountain.Direction, _mountain.Strength, EarlyValidationBars, _mountain.Reason);
+        }
+
+        _armedPlan = setup with { Stage = _mountain.Stage, EarlyForecast = early, Bucket = bucket };
         _armedAt = Server.Time;
         if (setup.Direction == DirectionChoice.Long) _hourLongDecisions++; else _hourShortDecisions++;
 
-        Print("NAI DECISION | ARM {0} | regime={1} setup={2} | planned={3:F2} chaseLimit={4:F2}ATR | {5}", setup.Direction, _regime, setup.Name, setup.EntryReference, MaxChaseAtr, setup.Reason);
+        Print("NAI DECISION | ARM {0} | stage={1} setup={2} early={3} ref={4:F2} | {5}", setup.Direction, _mountain.Stage, setup.Name, early, setup.EntryReference, setup.Reason);
     }
 
     private void TryExecuteArmedPlan()
@@ -271,14 +356,14 @@ public class NaiDecisionEngineV1 : Robot
         if ((Server.Time - _armedAt).TotalMinutes > 1.2)
         {
             RegisterSkip("armed setup expired");
-            Print("NAI DECISION | SKIP | armed {0} setup expired", plan.Direction);
             _armedPlan = null;
             return;
         }
 
-        if (_legalDirection != plan.Direction)
+        if (_mountain.Direction != DirectionChoice.None && _mountain.Direction != plan.Direction && _mountain.Strength >= 3)
         {
-            RegisterSkip("context invalidated");
+            RegisterSkip("mountain invalidated before entry");
+            Print("NAI DECISION | CANCEL | forecast {0} invalidated before entry", plan.Direction);
             _armedPlan = null;
             return;
         }
@@ -289,14 +374,13 @@ public class NaiDecisionEngineV1 : Robot
             return;
 
         var marketPrice = plan.Direction == DirectionChoice.Long ? Symbol.Ask : Symbol.Bid;
-        var chase = plan.Direction == DirectionChoice.Long
-            ? (marketPrice - plan.EntryReference) / atr
-            : (plan.EntryReference - marketPrice) / atr;
+        var chase = plan.Direction == DirectionChoice.Long ? (marketPrice - plan.EntryReference) / atr : (plan.EntryReference - marketPrice) / atr;
 
         if (chase > MaxChaseAtr)
         {
             RegisterSkip("chased away");
-            Print("NAI DECISION | SKIP | {0} moved {1:F2}ATR beyond planned entry | no chase", plan.Direction, chase);
+            _hourLateSkips++;
+            Print("NAI DECISION | SKIP CHASE | {0} moved {1:F2}ATR beyond planned entry", plan.Direction, chase);
             _armedPlan = null;
             return;
         }
@@ -304,7 +388,7 @@ public class NaiDecisionEngineV1 : Robot
         if (chase < -0.35)
             return;
 
-        ExecutePlan(plan, i, marketPrice, atr);
+        ExecutePlan(plan, i, marketPrice);
     }
 
     private SetupPlan? FindPullbackEntry(int i, int dir, double atr)
@@ -318,29 +402,23 @@ public class NaiDecisionEngineV1 : Robot
         var range = Math.Max(Symbol.TickSize, high - low);
         var body = Math.Abs(close - open);
 
-        var trendSeparated = dir > 0 ? fast > slow + atr * 0.05 : fast < slow - atr * 0.05;
-        var touchedValue = dir > 0 ? low <= fast + atr * 0.18 : high >= fast - atr * 0.18;
+        var trendSeparated = dir > 0 ? fast > slow + atr * 0.04 : fast < slow - atr * 0.04;
+        var touchedValue = dir > 0 ? low <= fast + atr * 0.22 : high >= fast - atr * 0.22;
         var closedBack = dir > 0 ? close > fast : close < fast;
         var candleAligned = dir > 0 ? close > open : close < open;
-        var closeStrong = dir > 0 ? close >= low + range * 0.58 : close <= high - range * 0.58;
+        var closeStrong = dir > 0 ? close >= low + range * 0.56 : close <= high - range * 0.56;
 
-        if (!trendSeparated || !touchedValue || !closedBack || !candleAligned || !closeStrong || body < atr * 0.12)
+        if (!trendSeparated || !touchedValue || !closedBack || !candleAligned || !closeStrong || body < atr * 0.10)
             return null;
 
         var entry = dir > 0 ? Symbol.Ask : Symbol.Bid;
         var swing = dir > 0 ? LowestLow(_m1, i - 4, i) : HighestHigh(_m1, i - 4, i);
         var stop = dir > 0 ? swing - atr * 0.10 : swing + atr * 0.10;
         var risk = Math.Abs(entry - stop);
+        if (risk < atr * 0.42) risk = atr * 0.52;
+        if (risk > atr * 1.45) return null;
 
-        if (risk < atr * 0.45)
-        {
-            risk = atr * 0.55;
-            stop = dir > 0 ? entry - risk : entry + risk;
-        }
-        if (risk > atr * 1.55)
-            return null;
-
-        return new SetupPlan(dir > 0 ? DirectionChoice.Long : DirectionChoice.Short, "PULLBACK", entry, risk, $"valueTouch body={body / atr:F2}ATR risk={risk / atr:F2}ATR");
+        return new SetupPlan(dir > 0 ? DirectionChoice.Long : DirectionChoice.Short, "PULLBACK", entry, risk, MountainStage.Base, false, "", $"valueTouch body={body / atr:F2}ATR risk={risk / atr:F2}ATR");
     }
 
     private SetupPlan? FindMomentumEntry(int i, int dir, double atr)
@@ -356,27 +434,24 @@ public class NaiDecisionEngineV1 : Robot
         var priorLow = LowestLow(_m1, i - 4, i - 1);
         var broke = dir > 0 ? close > priorHigh : close < priorLow;
         var aligned = dir > 0 ? close > open : close < open;
-        var closeStrong = dir > 0 ? close >= low + range * 0.70 : close <= high - range * 0.70;
+        var closeStrong = dir > 0 ? close >= low + range * 0.68 : close <= high - range * 0.68;
         var distanceFromFast = Math.Abs(close - fast) / atr;
         var efficiency = Efficiency(_m1, i - 4, i);
 
-        if (!broke || !aligned || !closeStrong || body < atr * 0.28 || efficiency < 0.48 || distanceFromFast > 1.25)
+        if (!broke || !aligned || !closeStrong || body < atr * 0.24 || efficiency < 0.46 || distanceFromFast > 1.05)
             return null;
 
         var entry = dir > 0 ? Symbol.Ask : Symbol.Bid;
         var swing = dir > 0 ? LowestLow(_m1, i - 3, i) : HighestHigh(_m1, i - 3, i);
         var stop = dir > 0 ? swing - atr * 0.08 : swing + atr * 0.08;
         var risk = Math.Abs(entry - stop);
+        if (risk < atr * 0.46) risk = atr * 0.56;
+        if (risk > atr * 1.30) return null;
 
-        if (risk < atr * 0.50)
-            risk = atr * 0.60;
-        if (risk > atr * 1.40)
-            return null;
-
-        return new SetupPlan(dir > 0 ? DirectionChoice.Long : DirectionChoice.Short, "MOMENTUM", entry, risk, $"break4 eff={efficiency:F2} body={body / atr:F2}ATR fastDist={distanceFromFast:F2}ATR");
+        return new SetupPlan(dir > 0 ? DirectionChoice.Long : DirectionChoice.Short, "MOMENTUM", entry, risk, MountainStage.Base, false, "", $"break4 eff={efficiency:F2} body={body / atr:F2}ATR fastDist={distanceFromFast:F2}ATR");
     }
 
-    private void ExecutePlan(SetupPlan plan, int i, double marketPrice, double atr)
+    private void ExecutePlan(SetupPlan plan, int i, double marketPrice)
     {
         var risk = plan.RiskDistance;
         var stop = plan.Direction == DirectionChoice.Long ? marketPrice - risk : marketPrice + risk;
@@ -389,36 +464,72 @@ public class NaiDecisionEngineV1 : Robot
         if (volume < Symbol.VolumeInUnitsMin)
         {
             RegisterSkip("risk-size below minimum");
-            Print("NAI EXECUTION | SKIP | volume={0} below min={1}", volume, Symbol.VolumeInUnitsMin);
             _armedPlan = null;
             return;
         }
 
         volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
         var type = plan.Direction == DirectionChoice.Long ? TradeType.Buy : TradeType.Sell;
-        var result = ExecuteMarketOrder(type, SymbolName, volume, Label, stopPips, tpPips, $"{_regime}:{plan.Name}");
+        var result = ExecuteMarketOrder(type, SymbolName, volume, Label, stopPips, tpPips, $"{plan.Stage}:{plan.Name}");
 
         if (!result.IsSuccessful)
         {
             RegisterSkip("entry rejected");
-            Print("NAI EXECUTION | REJECTED | {0} {1} | error={2}", plan.Direction, plan.Name, result.Error);
+            Print("NAI EXECUTION | REJECTED | {0} {1} error={2}", plan.Direction, plan.Name, result.Error);
             _armedPlan = null;
             return;
         }
 
         _hourEntries++;
         if (type == TradeType.Buy) _hourLongTrades++; else _hourShortTrades++;
+        if (plan.EarlyForecast) _hourEarlyEntries++;
         _lastEntryM1Index = i;
         _entryM1Index = i;
         _lastStopRequestPrice = null;
+        _activeMeta = new TradeMeta(plan.Direction, plan.Stage, plan.Name, plan.EarlyForecast, false, i, plan.Bucket, risk, Account.Balance * RiskPercent / 100.0);
         _armedPlan = null;
 
-        Print("NAI EXECUTION | ENTER {0} | regime={1} setup={2} entry={3:F2} SL={4:F2} TP={5:F2} risk={6:F2}% target={7:F2}R | {8}", type, _regime, plan.Name, result.Position.EntryPrice, stop, target, RiskPercent, TargetR, plan.Reason);
+        Print("NAI EXECUTION | ENTER {0} | mountain={1} setup={2} EARLY={3} entry={4:F2} SL={5:F2} TP={6:F2} | validateBars={7}", type, plan.Stage, plan.Name, plan.EarlyForecast, result.Position.EntryPrice, stop, target, EarlyValidationBars);
     }
 
-    private void ManageOpenPosition()
+    private void ValidateActiveForecastOnNewBar(int i)
     {
-        var p = FindDecisionPosition();
+        var p = FindPosition();
+        var meta = _activeMeta;
+        if (p == null || meta == null || !meta.EarlyForecast || meta.Confirmed)
+            return;
+
+        var age = i - meta.EntryBarIndex;
+        if (age < 1)
+            return;
+
+        var directionStill = _mountain.Direction == meta.Direction;
+        var confirms = directionStill && (_mountain.Stage == MountainStage.Climbing || (_mountain.Stage == MountainStage.Forming && _mountain.Strength >= 7));
+
+        if (confirms)
+        {
+            _activeMeta = meta with { Confirmed = true };
+            _hourForecastConfirmed++;
+            _hourEarlyConfirmed++;
+            Print("NAI FORECAST | CONFIRMED | {0} mountain after {1} bars | stage={2} strength={3}", meta.Direction, age, _mountain.Stage, _mountain.Strength);
+            return;
+        }
+
+        if (age >= EarlyValidationBars || _mountain.Stage == MountainStage.Failing || (_mountain.Direction != DirectionChoice.None && _mountain.Direction != meta.Direction))
+        {
+            var result = ClosePosition(p);
+            if (result.IsSuccessful)
+            {
+                _hourForecastFailed++;
+                _hourEarlyFailed++;
+                Print("NAI FORECAST | FAILED EARLY EXIT | {0} age={1} stageNow={2} directionNow={3}", meta.Direction, age, _mountain.Stage, _mountain.Direction);
+            }
+        }
+    }
+
+    private void ManageOpenPositionFast()
+    {
+        var p = FindPosition();
         if (p == null || !p.TakeProfit.HasValue || !p.StopLoss.HasValue)
             return;
 
@@ -429,31 +540,40 @@ public class NaiDecisionEngineV1 : Robot
         var marketPrice = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
         var favorable = p.TradeType == TradeType.Buy ? marketPrice - p.EntryPrice : p.EntryPrice - marketPrice;
         var r = favorable / originalRisk;
+        var meta = _activeMeta;
 
-        // Fast thesis protection: if higher-timeframe context now legalizes the opposite side, close weak trade.
-        var thesisBroken = p.TradeType == TradeType.Buy ? _legalDirection == DirectionChoice.Short : _legalDirection == DirectionChoice.Long;
-        if (thesisBroken && r < 0.40)
+        if (meta != null && meta.EarlyForecast && !meta.Confirmed && r <= -EarlyEmergencyR)
         {
             var result = ClosePosition(p);
             if (result.IsSuccessful)
-                Print("NAI POSITION | THESIS BROKEN EXIT | {0} R={1:F2} newLegal={2}", p.TradeType, r, _legalDirection);
+            {
+                _hourForecastFailed++;
+                _hourEarlyFailed++;
+                Print("NAI FORECAST | EMERGENCY ABORT | {0} reached {1:F2}R before confirmation", meta.Direction, r);
+            }
+            return;
+        }
+
+        var oppositeStrong = _mountain.Direction != DirectionChoice.None && meta != null && _mountain.Direction != meta.Direction && _mountain.Strength >= 7;
+        if (oppositeStrong && r < 0.40)
+        {
+            var result = ClosePosition(p);
+            if (result.IsSuccessful)
+                Print("NAI POSITION | THESIS BROKEN EXIT | {0} R={1:F2} oppositeMountain={2}/{3}", p.TradeType, r, _mountain.Direction, _mountain.Stage);
             return;
         }
 
         if (r >= BreakEvenAtR)
         {
-            var improveToBe = p.TradeType == TradeType.Buy ? p.StopLoss.Value < p.EntryPrice : p.StopLoss.Value > p.EntryPrice;
-            if (improveToBe)
-                TryMoveStop(p, p.EntryPrice, "BREAK-EVEN", r);
+            var improve = p.TradeType == TradeType.Buy ? p.StopLoss.Value < p.EntryPrice : p.StopLoss.Value > p.EntryPrice;
+            if (improve) TryMoveStop(p, p.EntryPrice, "BREAK-EVEN", r);
         }
 
         if (r >= TrailAtR && _m1.Count > 5)
         {
             var i = _m1.Count - 2;
             var atr = Atr(_m1, i);
-            var raw = p.TradeType == TradeType.Buy
-                ? LowestLow(_m1, i - 2, i) - atr * 0.08
-                : HighestHigh(_m1, i - 2, i) + atr * 0.08;
+            var raw = p.TradeType == TradeType.Buy ? LowestLow(_m1, i - 2, i) - atr * 0.08 : HighestHigh(_m1, i - 2, i) + atr * 0.08;
             TryMoveStop(p, raw, "TRAIL", r);
         }
     }
@@ -470,14 +590,12 @@ public class NaiDecisionEngineV1 : Robot
 
         if (p.TradeType == TradeType.Buy)
         {
-            var maxLegal = NormalizePrice(Symbol.Bid - safety, RoundingMode.Down);
-            candidate = Math.Min(candidate, maxLegal);
+            candidate = Math.Min(candidate, NormalizePrice(Symbol.Bid - safety, RoundingMode.Down));
             if (candidate <= p.StopLoss.Value + Symbol.TickSize) return;
         }
         else
         {
-            var minLegal = NormalizePrice(Symbol.Ask + safety, RoundingMode.Up);
-            candidate = Math.Max(candidate, minLegal);
+            candidate = Math.Max(candidate, NormalizePrice(Symbol.Ask + safety, RoundingMode.Up));
             if (candidate >= p.StopLoss.Value - Symbol.TickSize) return;
         }
 
@@ -489,7 +607,7 @@ public class NaiDecisionEngineV1 : Robot
         if (result.IsSuccessful)
             Print("NAI POSITION | {0} SUCCESS | {1} SL->{2:F2} R={3:F2}", reason, p.TradeType, candidate, liveR);
         else
-            Print("NAI POSITION | {0} REJECTED | {1} requested={2:F2} error={3}", reason, p.TradeType, candidate, result.Error);
+            Print("NAI POSITION | {0} REJECTED | requested={1:F2} error={2}", reason, candidate, result.Error);
     }
 
     private void OnPositionClosed(PositionClosedEventArgs args)
@@ -498,16 +616,49 @@ public class NaiDecisionEngineV1 : Robot
         if (p.Label != Label || p.SymbolName != SymbolName)
             return;
 
+        var meta = _activeMeta;
         _lastStopRequestPrice = null;
         _entryM1Index = -1;
         _hourNet += p.NetProfit;
 
-        var intendedRiskCash = Math.Max(0.01, Account.Balance * RiskPercent / 100.0);
+        var intendedRiskCash = meta?.RiskCash > 0 ? meta.RiskCash : Math.Max(0.01, Account.Balance * RiskPercent / 100.0);
+        var resultR = intendedRiskCash > 0 ? p.NetProfit / intendedRiskCash : 0;
+
         if (p.NetProfit > intendedRiskCash * 0.15) _hourWins++;
         else if (p.NetProfit < -intendedRiskCash * 0.15) _hourLosses++;
         else _hourScratch++;
 
-        Print("NAI RESULT | {0} | net={1:F2} reason={2} | hourlyNet={3:F2}", p.TradeType, p.NetProfit, args.Reason, _hourNet);
+        if (meta != null)
+        {
+            UpdateSessionMemory(meta, resultR);
+            if (meta.EarlyForecast && !meta.Confirmed && p.NetProfit > intendedRiskCash * 0.15)
+            {
+                _hourForecastConfirmed++;
+                _hourEarlyConfirmed++;
+            }
+        }
+
+        Print("NAI RESULT | {0} | net={1:F2} approxR={2:F2} reason={3} | mountainMeta={4}", p.TradeType, p.NetProfit, resultR, args.Reason, meta == null ? "none" : meta.Bucket);
+        _activeMeta = null;
+    }
+
+    private void UpdateSessionMemory(TradeMeta meta, double resultR)
+    {
+        if (!_sessionMemory.TryGetValue(meta.Bucket, out var stats))
+            stats = new BucketStats();
+
+        stats.Trades++;
+        stats.SumR += resultR;
+        if (resultR > 0.15) stats.Wins++;
+        else if (resultR < -0.15) stats.Losses++;
+        else stats.Scratches++;
+        _sessionMemory[meta.Bucket] = stats;
+
+        if (meta.EarlyForecast && stats.Trades >= 6 && stats.SumR <= -1.50 && stats.Wins <= stats.Losses)
+        {
+            if (_blockedEarlyBuckets.Add(meta.Bucket))
+                Print("NAI MEMORY | EARLY BUCKET BLOCKED FOR SESSION | {0} | trades={1} W={2} L={3} sumR={4:F2}", meta.Bucket, stats.Trades, stats.Wins, stats.Losses, stats.SumR);
+        }
     }
 
     private void CheckHourlyBoundary()
@@ -523,63 +674,63 @@ public class NaiDecisionEngineV1 : Robot
 
     private void PrintHourlySummary(string trigger)
     {
-        var topReason = _hourRejectReasons.Count == 0
-            ? "none"
-            : _hourRejectReasons.OrderByDescending(x => x.Value).ThenBy(x => x.Key).First().Key + " x" + _hourRejectReasons.OrderByDescending(x => x.Value).ThenBy(x => x.Key).First().Value;
-
-        Print("=== NAI HOURLY SUMMARY ===");
+        var topReason = TopRejectReason();
+        var topMemory = TopMemoryBucket();
+        Print("=== NAI MOUNTAIN HOURLY ===");
         Print("WINDOW | {0:yyyy-MM-dd HH}:00 UTC | {1}", _summaryHour, trigger);
-        Print("MARKET | regime={0} legal={1} | {2}", _regime, _legalDirection, _contextReason);
+        Print("MOUNTAIN NOW | direction={0} stage={1} strength={2} | {3}", _mountain.Direction, _mountain.Stage, _mountain.Strength, _mountain.Reason);
+        Print("FORECASTS | bull={0} bear={1} confirmed={2} failed={3} | lateSkipped={4}", _hourBullForecasts, _hourBearForecasts, _hourForecastConfirmed, _hourForecastFailed, _hourLateSkips);
         Print("DECISIONS | total={0} long={1} short={2} wait={3} skip={4} | topBlock={5}", _hourDecisions, _hourLongDecisions, _hourShortDecisions, _hourWaits, _hourSkips, topReason);
         Print("TRADES | entries={0} W={1} L={2} scratch={3} | LONG={4} SHORT={5}", _hourEntries, _hourWins, _hourLosses, _hourScratch, _hourLongTrades, _hourShortTrades);
-        Print("P/L | net={0:F2} | equity={1:F2} balance={2:F2} | dayFromStart={3:F2}", _hourNet, Account.Equity, Account.Balance, Account.Equity - _dayStartEquity);
-        Print("STATE | armed={0} openPosition={1} halted={2}", _armedPlan == null ? "NO" : _armedPlan.Direction + ":" + _armedPlan.Name, FindDecisionPosition() == null ? "NO" : FindDecisionPosition()!.TradeType.ToString(), _halted);
-        Print("=== END NAI HOURLY SUMMARY ===");
+        Print("EARLY | entries={0} confirmed={1} failed={2}", _hourEarlyEntries, _hourEarlyConfirmed, _hourEarlyFailed);
+        Print("P/L | hourNet={0:F2} | equity={1:F2} balance={2:F2} | dayFromStart={3:F2}", _hourNet, Account.Equity, Account.Balance, Account.Equity - _dayStartEquity);
+        Print("MEMORY | buckets={0} blockedEarly={1} | bestSample={2}", _sessionMemory.Count, _blockedEarlyBuckets.Count, topMemory);
+        Print("STATE | armed={0} open={1} halted={2}", _armedPlan == null ? "NO" : _armedPlan.Direction + ":" + _armedPlan.Stage + ":" + _armedPlan.Name, FindPosition() == null ? "NO" : FindPosition()!.TradeType.ToString(), _halted);
+        Print("=== END NAI MOUNTAIN HOURLY ===");
+    }
+
+    private string TopRejectReason()
+    {
+        if (_hourRejectReasons.Count == 0) return "none";
+        var x = _hourRejectReasons.OrderByDescending(v => v.Value).ThenBy(v => v.Key).First();
+        return x.Key + " x" + x.Value;
+    }
+
+    private string TopMemoryBucket()
+    {
+        if (_sessionMemory.Count == 0) return "none";
+        var x = _sessionMemory.OrderByDescending(v => v.Value.Trades >= 3 ? v.Value.SumR : double.MinValue).ThenByDescending(v => v.Value.Trades).First();
+        return $"{x.Key} T={x.Value.Trades} W={x.Value.Wins} L={x.Value.Losses} sumR={x.Value.SumR:F2}";
     }
 
     private void ResetHourlyCounters()
     {
-        _hourDecisions = 0;
-        _hourLongDecisions = 0;
-        _hourShortDecisions = 0;
-        _hourWaits = 0;
-        _hourSkips = 0;
-        _hourEntries = 0;
-        _hourWins = 0;
-        _hourLosses = 0;
-        _hourScratch = 0;
-        _hourLongTrades = 0;
-        _hourShortTrades = 0;
+        _hourDecisions = _hourLongDecisions = _hourShortDecisions = _hourWaits = _hourSkips = 0;
+        _hourEntries = _hourWins = _hourLosses = _hourScratch = _hourLongTrades = _hourShortTrades = 0;
+        _hourBullForecasts = _hourBearForecasts = _hourForecastConfirmed = _hourForecastFailed = 0;
+        _hourEarlyEntries = _hourEarlyConfirmed = _hourEarlyFailed = _hourLateSkips = 0;
         _hourNet = 0;
         _hourRejectReasons.Clear();
     }
 
-    private void RegisterWait(string reason)
-    {
-        _hourWaits++;
-        RegisterReason(reason);
-    }
-
-    private void RegisterSkip(string reason)
-    {
-        _hourSkips++;
-        RegisterReason(reason);
-    }
-
+    private void RegisterWait(string reason) { _hourWaits++; RegisterReason(reason); }
+    private void RegisterSkip(string reason) { _hourSkips++; RegisterReason(reason); }
     private void RegisterReason(string reason)
     {
-        if (_hourRejectReasons.TryGetValue(reason, out var count)) _hourRejectReasons[reason] = count + 1;
+        if (_hourRejectReasons.TryGetValue(reason, out var n)) _hourRejectReasons[reason] = n + 1;
         else _hourRejectReasons[reason] = 1;
+    }
+
+    private void PrintMountainContext(string source)
+    {
+        Print("NAI MOUNTAIN | {0} | direction={1} stage={2} strength={3} | {4}", source, _mountain.Direction, _mountain.Stage, _mountain.Strength, _mountain.Reason);
     }
 
     private int ContextScore(Bars bars, int i)
     {
-        if (i < 20)
-            return 0;
-
+        if (i < 20) return 0;
         var atr = Atr(bars, i);
-        if (atr <= 0)
-            return 0;
+        if (atr <= 0) return 0;
 
         var score = 0;
         var fast = AverageClose(bars, i - 5, i);
@@ -587,30 +738,28 @@ public class NaiDecisionEngineV1 : Robot
         if (fast > slow + atr * 0.05) score++; else if (fast < slow - atr * 0.05) score--;
 
         var move3 = bars.ClosePrices[i] - bars.ClosePrices[i - 3];
-        if (move3 > atr * 0.18) score++; else if (move3 < -atr * 0.18) score--;
+        if (move3 > atr * 0.16) score++; else if (move3 < -atr * 0.16) score--;
 
         var recentHigh = HighestHigh(bars, i - 5, i);
         var recentLow = LowestLow(bars, i - 5, i);
         var priorHigh = HighestHigh(bars, i - 11, i - 6);
         var priorLow = LowestLow(bars, i - 11, i - 6);
-        if (recentHigh > priorHigh + atr * 0.05 && recentLow >= priorLow - atr * 0.05) score++;
-        else if (recentLow < priorLow - atr * 0.05 && recentHigh <= priorHigh + atr * 0.05) score--;
+        if (recentHigh > priorHigh + atr * 0.04 && recentLow >= priorLow - atr * 0.05) score++;
+        else if (recentLow < priorLow - atr * 0.04 && recentHigh <= priorHigh + atr * 0.05) score--;
 
         var efficiency = Efficiency(bars, i - 6, i);
         var net = bars.ClosePrices[i] - bars.ClosePrices[i - 6];
-        if (efficiency >= 0.55 && net > atr * 0.35) score++;
-        else if (efficiency >= 0.55 && net < -atr * 0.35) score--;
+        if (efficiency >= 0.52 && net > atr * 0.30) score++;
+        else if (efficiency >= 0.52 && net < -atr * 0.30) score--;
 
         return score;
     }
 
     private void M1TrendVotes(int i, out int bull, out int bear)
     {
-        bull = 0;
-        bear = 0;
+        bull = bear = 0;
         var atr = Atr(_m1, i);
-        if (atr <= Symbol.TickSize)
-            return;
+        if (atr <= Symbol.TickSize) return;
 
         var fast = AverageClose(_m1, i - 5, i);
         var slow = AverageClose(_m1, i - 17, i);
@@ -635,9 +784,7 @@ public class NaiDecisionEngineV1 : Robot
 
     private void ResetDailyAnchorIfNeeded()
     {
-        if (Server.Time.Date == _equityDay)
-            return;
-
+        if (Server.Time.Date == _equityDay) return;
         _equityDay = Server.Time.Date;
         _dayStartEquity = Account.Equity;
         _halted = false;
@@ -646,37 +793,30 @@ public class NaiDecisionEngineV1 : Robot
 
     private bool HitDailyStop()
     {
-        if (_dayStartEquity <= 0)
-            return false;
-
+        if (_dayStartEquity <= 0) return false;
         var dd = (_dayStartEquity - Account.Equity) / _dayStartEquity * 100.0;
-        if (dd < DailyEquityStopPercent)
-            return false;
+        if (dd < DailyEquityStopPercent) return false;
 
         _halted = true;
         _armedPlan = null;
-        var p = FindDecisionPosition();
-        if (p != null)
-            ClosePosition(p);
+        var p = FindPosition();
+        if (p != null) ClosePosition(p);
         Print("NAI HALTED | daily equity drawdown={0:F2}% limit={1:F2}%", dd, DailyEquityStopPercent);
         return true;
     }
 
-    private Position? FindDecisionPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label);
+    private Position? FindPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label);
 
     private double MinimumStopDistancePrice(double referencePrice)
     {
-        if (Symbol.MinStopLossDistance <= 0)
-            return 0;
-        if (Symbol.MinDistanceType == SymbolMinDistanceType.Percentage)
-            return referencePrice * Symbol.MinStopLossDistance / 100.0;
+        if (Symbol.MinStopLossDistance <= 0) return 0;
+        if (Symbol.MinDistanceType == SymbolMinDistanceType.Percentage) return referencePrice * Symbol.MinStopLossDistance / 100.0;
         return Symbol.MinStopLossDistance * Symbol.PipSize;
     }
 
     private double NormalizePrice(double price, RoundingMode mode)
     {
-        if (Symbol.TickSize <= 0)
-            return Math.Round(price, Symbol.Digits);
+        if (Symbol.TickSize <= 0) return Math.Round(price, Symbol.Digits);
         var rawTicks = price / Symbol.TickSize;
         var ticks = mode == RoundingMode.Down ? Math.Floor(rawTicks + 1e-8) : Math.Ceiling(rawTicks - 1e-8);
         return Math.Round(ticks * Symbol.TickSize, Symbol.Digits);
@@ -698,8 +838,7 @@ public class NaiDecisionEngineV1 : Robot
 
     private double Efficiency(Bars bars, int from, int to)
     {
-        if (to <= from)
-            return 0;
+        if (to <= from) return 0;
         var net = Math.Abs(bars.ClosePrices[to] - bars.ClosePrices[from]);
         double path = 0;
         for (var k = from + 1; k <= to; k++) path += Math.Abs(bars.ClosePrices[k] - bars.ClosePrices[k - 1]);
@@ -731,9 +870,34 @@ public class NaiDecisionEngineV1 : Robot
         return v;
     }
 
-    private static DateTime FloorToHour(DateTime t) => new DateTime(t.Year, t.Month, t.Day, t.Hour, 0, 0, t.Kind);
+    private static void Push(Queue<int> q, int value, int max)
+    {
+        q.Enqueue(value);
+        while (q.Count > max) q.Dequeue();
+    }
 
-    private enum RegimeState { Bull, Bear, Mixed, Transition }
+    private static int Last(Queue<int> q) => q.Count == 0 ? 0 : q.Last();
+    private static int Delta(Queue<int> q) => q.Count < 2 ? 0 : q.Last() - q.Reverse().Skip(1).First();
+    private static DateTime FloorToHour(DateTime t) => new DateTime(t.Year, t.Month, t.Day, t.Hour, 0, 0, t.Kind);
+    private static string BucketKey(DirectionChoice direction, MountainStage stage, string setup) => $"{direction}-{stage}-{setup}";
+
     private enum DirectionChoice { None, Long, Short }
-    private sealed record SetupPlan(DirectionChoice Direction, string Name, double EntryReference, double RiskDistance, string Reason);
+    private enum MountainStage { Base, Forming, Climbing, Mature, Failing }
+
+    private sealed record MountainSnapshot(DirectionChoice Direction, MountainStage Stage, int Strength, int M15Score, int M5Score, int M1Score, int M15Delta, int M5Delta, double ExtensionAtr, double Efficiency, string Reason)
+    {
+        public static MountainSnapshot Neutral => new(DirectionChoice.None, MountainStage.Base, 0, 0, 0, 0, 0, 0, 0, 0, "warming up");
+    }
+
+    private sealed record SetupPlan(DirectionChoice Direction, string Name, double EntryReference, double RiskDistance, MountainStage Stage, bool EarlyForecast, string Bucket, string Reason);
+    private sealed record TradeMeta(DirectionChoice Direction, MountainStage Stage, string Setup, bool EarlyForecast, bool Confirmed, int EntryBarIndex, string Bucket, double RiskDistance, double RiskCash);
+
+    private sealed class BucketStats
+    {
+        public int Trades { get; set; }
+        public int Wins { get; set; }
+        public int Losses { get; set; }
+        public int Scratches { get; set; }
+        public double SumR { get; set; }
+    }
 }
