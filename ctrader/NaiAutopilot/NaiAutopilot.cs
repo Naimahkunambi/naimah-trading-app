@@ -10,6 +10,7 @@ public class NaiMountainDecisionV1 : Robot
 {
     private const string Label = "NAI-MOUNTAIN-V1";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
+    private const int MaxTickBuffer = 240;
 
     [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 1.00, Step = 0.10)]
     public double RiskPercent { get; set; }
@@ -54,20 +55,18 @@ public class NaiMountainDecisionV1 : Robot
     private DateTime _equityDay;
     private bool _halted;
     private int _lastEntryM1Index = -10000;
-    private int _entryM1Index = -1;
     private double? _lastStopRequestPrice;
 
     private readonly Queue<int> _m5Trajectory = new();
     private readonly Queue<int> _m15Trajectory = new();
     private readonly Queue<int> _m1Trajectory = new();
+    private readonly List<TickPoint> _ticks = new();
 
     private MountainSnapshot _mountain = MountainSnapshot.Neutral;
+    private TickMountainState? _tickMountain;
     private SetupPlan? _armedPlan;
     private DateTime _armedAt = DateTime.MinValue;
     private TradeMeta? _activeMeta;
-
-    private MountainEntryState? _entryState;
-    private double _lastObservedTick = double.NaN;
 
     private readonly Dictionary<string, BucketStats> _sessionMemory = new();
     private readonly HashSet<string> _blockedEarlyBuckets = new();
@@ -122,12 +121,12 @@ public class NaiMountainDecisionV1 : Robot
         SeedTrajectory();
         RefreshMountain(force: true);
 
-        Print("NAI MOUNTAIN DECISION V1 STARTED | {0} | DEMO | trajectory memory + REAL mountain entry", SymbolName);
-        Print("ENTRY FIX | impulse -> pullback -> candidate turn -> micro break -> 3 confirming ticks -> entry");
-        Print("M15/M5 ARE CONTEXT ONLY | strong opposite context can veto, but scores cannot manufacture an entry");
-        Print("MOUNTAIN STAGES | BASE / FORMING / CLIMBING / MATURE / FAILING | choices LONG / SHORT / WAIT / SKIP");
-        Print("RISK | {0:F2}% | target={1:F2}R | BE={2:F2}R | trail={3:F2}R | earlyEmergency=-{4:F2}R", RiskPercent, TargetR, BreakEvenAtR, TrailAtR, EarlyEmergencyR);
-        Print("SESSION MEMORY | tracks direction+stage+setup; weak EARLY buckets can be blocked after repeated evidence");
+        Print("NAI MOUNTAIN DECISION V1 STARTED | {0} | DEMO | TRUE TICK MOUNTAIN ENTRY", SymbolName);
+        Print("ENTRY ENGINE | rolling ticks -> impulse -> pullback -> turn -> micro-retest -> break -> acceleration -> entry");
+        Print("M15/M5 CONTEXT ONLY | scores cannot manufacture an entry and cannot close a valid tick entry after execution");
+        Print("ENTRY WARMUP | collecting live ticks; first mountain scan begins after 40 ticks");
+        Print("RISK | {0:F2}% | target={1:F2}R | BE={2:F2}R | trail={3:F2}R", RiskPercent, TargetR, BreakEvenAtR, TrailAtR);
+        Print("SESSION MEMORY | tracks direction+stage+setup; weak early buckets can be blocked after repeated evidence");
         Print("HOURLY SUMMARY ON | screenshot block beginning '=== NAI MOUNTAIN HOURLY ==='");
     }
 
@@ -143,6 +142,7 @@ public class NaiMountainDecisionV1 : Robot
         if (_halted || Account.IsLive)
             return;
 
+        AddLiveTick();
         ResetDailyAnchorIfNeeded();
         if (HitDailyStop())
             return;
@@ -150,13 +150,28 @@ public class NaiMountainDecisionV1 : Robot
         CheckHourlyBoundary();
         RefreshMountain(force: false);
         ManageOpenPositionFast();
+        ProcessNewM1IfNeeded();
 
         if (FindPosition() != null)
             return;
 
-        ProcessNewM1IfNeeded();
-        AdvanceMountainEntryOnTick();
+        if (!InCooldown())
+            AdvanceTrueTickMountain();
+        else
+            ResetTickMountain("cooldown", false);
+
         TryExecuteArmedPlan();
+    }
+
+    private void AddLiveTick()
+    {
+        var mid = (Symbol.Bid + Symbol.Ask) / 2.0;
+        if (_ticks.Count > 0 && Math.Abs(_ticks[_ticks.Count - 1].Price - mid) < Symbol.TickSize * 0.25)
+            return;
+
+        _ticks.Add(new TickPoint(Server.Time, mid));
+        while (_ticks.Count > MaxTickBuffer)
+            _ticks.RemoveAt(0);
     }
 
     private void SeedTrajectory()
@@ -198,10 +213,13 @@ public class NaiMountainDecisionV1 : Robot
         _mountain = BuildMountainSnapshot();
         PrintMountainContext("HTF UPDATE");
 
-        if (_entryState != null && HasStrongOppositeContext(_entryState.Direction))
+        if (_tickMountain != null && HasStrongOppositeContext(_tickMountain.Direction))
+            ResetTickMountain("strong opposite HTF veto", true);
+
+        if (_armedPlan != null && HasStrongOppositeContext(_armedPlan.Direction))
         {
-            Print("NAI ENTRY | RESET | strong opposite HTF veto appeared for {0}", _entryState.Direction);
-            _entryState = null;
+            RegisterSkip("HTF veto before execution");
+            Print("NAI ENTRY | CANCEL ARMED {0} | strong opposite context", _armedPlan.Direction);
             _armedPlan = null;
         }
     }
@@ -212,7 +230,6 @@ public class NaiMountainDecisionV1 : Robot
         var s15 = Last(_m15Trajectory);
         var d5 = Delta(_m5Trajectory);
         var d15 = Delta(_m15Trajectory);
-
         var i1 = _m1.Count - 2;
         var s1 = ContextScore(_m1, i1);
         var atr1 = Atr(_m1, i1);
@@ -220,36 +237,30 @@ public class NaiMountainDecisionV1 : Robot
         var extension = atr1 > 0 ? Math.Abs(_m1.ClosePrices[i1] - fast) / atr1 : 0;
         var efficiency = Efficiency(_m1, i1 - 6, i1);
 
-        var bullTrajectory = 0;
-        var bearTrajectory = 0;
-
-        if (s15 >= 1) bullTrajectory += 2; else if (s15 <= -1) bearTrajectory += 2;
-        if (s5 >= 1) bullTrajectory += 2; else if (s5 <= -1) bearTrajectory += 2;
-        if (s1 >= 2) bullTrajectory += 2; else if (s1 <= -2) bearTrajectory += 2;
-        if (d15 > 0) bullTrajectory += 2; else if (d15 < 0) bearTrajectory += 2;
-        if (d5 > 0) bullTrajectory += 2; else if (d5 < 0) bearTrajectory += 2;
+        var bull = 0;
+        var bear = 0;
+        if (s15 >= 1) bull += 2; else if (s15 <= -1) bear += 2;
+        if (s5 >= 1) bull += 2; else if (s5 <= -1) bear += 2;
+        if (s1 >= 2) bull += 2; else if (s1 <= -2) bear += 2;
+        if (d15 > 0) bull += 2; else if (d15 < 0) bear += 2;
+        if (d5 > 0) bull += 2; else if (d5 < 0) bear += 2;
 
         DirectionChoice direction;
-        var strength = Math.Max(bullTrajectory, bearTrajectory);
-        if (bullTrajectory >= bearTrajectory + 2 && bullTrajectory >= 5) direction = DirectionChoice.Long;
-        else if (bearTrajectory >= bullTrajectory + 2 && bearTrajectory >= 5) direction = DirectionChoice.Short;
+        var strength = Math.Max(bull, bear);
+        if (bull >= bear + 2 && bull >= 5) direction = DirectionChoice.Long;
+        else if (bear >= bull + 2 && bear >= 5) direction = DirectionChoice.Short;
         else direction = DirectionChoice.None;
 
         MountainStage stage;
         var accelerating = direction == DirectionChoice.Long ? d5 > 0 || d15 > 0 : direction == DirectionChoice.Short ? d5 < 0 || d15 < 0 : false;
-        var strongAligned = direction == DirectionChoice.Long ? s15 >= 2 && s5 >= 2 && s1 >= 2 : direction == DirectionChoice.Short ? s15 <= -2 && s5 <= -2 && s1 <= -2 : false;
+        var aligned = direction == DirectionChoice.Long ? s15 >= 2 && s5 >= 2 && s1 >= 2 : direction == DirectionChoice.Short ? s15 <= -2 && s5 <= -2 && s1 <= -2 : false;
         var oppositeM1 = direction == DirectionChoice.Long ? s1 <= -2 : direction == DirectionChoice.Short ? s1 >= 2 : false;
 
-        if (direction == DirectionChoice.None)
-            stage = MountainStage.Base;
-        else if (oppositeM1 && !accelerating)
-            stage = MountainStage.Failing;
-        else if (extension >= 1.05 || (strongAligned && !accelerating && efficiency < 0.50))
-            stage = MountainStage.Mature;
-        else if (strongAligned && (extension >= 0.35 || efficiency >= 0.55))
-            stage = MountainStage.Climbing;
-        else
-            stage = MountainStage.Forming;
+        if (direction == DirectionChoice.None) stage = MountainStage.Base;
+        else if (oppositeM1 && !accelerating) stage = MountainStage.Failing;
+        else if (extension >= 1.05 || (aligned && !accelerating && efficiency < 0.50)) stage = MountainStage.Mature;
+        else if (aligned && (extension >= 0.35 || efficiency >= 0.55)) stage = MountainStage.Climbing;
+        else stage = MountainStage.Forming;
 
         var reason = $"M15={s15} d15={d15:+#;-#;0} | M5={s5} d5={d5:+#;-#;0} | M1={s1} | ext={extension:F2}ATR eff={efficiency:F2}";
         return new MountainSnapshot(direction, stage, strength, s15, s5, s1, d15, d5, extension, efficiency, reason);
@@ -266,390 +277,308 @@ public class NaiMountainDecisionV1 : Robot
 
         _lastM1Open = liveOpen;
         var i = _m1.Count - 2;
-        var s1 = ContextScore(_m1, i);
-        Push(_m1Trajectory, s1, 8);
+        Push(_m1Trajectory, ContextScore(_m1, i), 8);
         _mountain = BuildMountainSnapshot();
         _hourDecisions++;
 
-        ValidateActiveForecastOnNewBar(i);
-
-        if (FindPosition() != null)
-            return;
-
-        var barsSinceEntry = i - _lastEntryM1Index;
-        if (barsSinceEntry < CooldownBars)
-        {
-            RegisterWait("cooldown");
-            _entryState = null;
-            Print("NAI ENTRY | WAIT | cooldown {0}/{1}", barsSinceEntry, CooldownBars);
-            return;
-        }
-
-        RefreshEntryStateFromClosedBars(i);
+        if (FindPosition() == null && _tickMountain == null && _armedPlan == null)
+            RegisterWait(_ticks.Count < 40 ? "tick warmup" : "tick mountain searching");
     }
 
-    private void RefreshEntryStateFromClosedBars(int i)
+    private bool InCooldown()
     {
-        var atr = Atr(_m1, i);
+        if (_m1.Count < 3)
+            return true;
+        return (_m1.Count - 2) - _lastEntryM1Index < CooldownBars;
+    }
+
+    private void AdvanceTrueTickMountain()
+    {
+        if (_ticks.Count < 40 || _armedPlan != null)
+            return;
+
+        var atr = Atr(_m1, _m1.Count - 2);
         if (atr <= Symbol.TickSize * 5)
-        {
-            RegisterSkip("ATR too small");
-            _entryState = null;
             return;
-        }
 
-        if (_entryState != null)
+        if (_tickMountain == null)
         {
-            if ((Server.Time - _entryState.CreatedAt).TotalMinutes > 3.2)
-            {
-                RegisterSkip("mountain setup expired");
-                Print("NAI ENTRY | RESET | {0} setup expired", _entryState.Direction);
-                _entryState = null;
-            }
-            else
-            {
-                RefreshCandidateTurnFromLatestBar(i, atr);
+            var impulse = FindBestTickImpulse(atr);
+            if (impulse == null)
                 return;
-            }
-        }
 
-        var longCandidate = DetectPullbackMountainCandidate(i, DirectionChoice.Long, atr);
-        var shortCandidate = DetectPullbackMountainCandidate(i, DirectionChoice.Short, atr);
+            if (HasStrongOppositeContext(impulse.Direction))
+                return;
 
-        MountainEntryState? selected = null;
-        if (longCandidate != null && shortCandidate != null)
-            selected = longCandidate.ImpulseAtr >= shortCandidate.ImpulseAtr ? longCandidate : shortCandidate;
-        else
-            selected = longCandidate ?? shortCandidate;
+            var bucket = BucketKey(impulse.Direction, MountainStage.Forming, "TICK_MOUNTAIN");
+            if (_blockedEarlyBuckets.Contains(bucket))
+                return;
 
-        if (selected == null)
-        {
-            var directLong = DetectDirectMountainCandidate(i, DirectionChoice.Long, atr);
-            var directShort = DetectDirectMountainCandidate(i, DirectionChoice.Short, atr);
-            if (directLong != null && directShort != null)
-                selected = directLong.ImpulseAtr >= directShort.ImpulseAtr ? directLong : directShort;
-            else
-                selected = directLong ?? directShort;
-        }
+            _tickMountain = new TickMountainState
+            {
+                Direction = impulse.Direction,
+                Phase = TickPhase.Pullback,
+                CreatedAt = Server.Time,
+                Base = impulse.Base,
+                Extreme = impulse.Extreme,
+                ImpulseDistance = Math.Abs(impulse.Extreme - impulse.Base),
+                ImpulseAtr = impulse.ImpulseAtr,
+                Atr = atr,
+                CandidateTurn = impulse.Extreme,
+                CandidateTurnIndex = _ticks.Count - 1,
+                PullbackStartIndex = -1,
+                Bucket = bucket
+            };
 
-        if (selected == null)
-        {
-            RegisterWait("no impulse-pullback mountain");
+            if (impulse.Direction == DirectionChoice.Long) _hourBullForecasts++; else _hourBearForecasts++;
+            Print("NAI TICK MOUNTAIN | IMPULSE {0} | {1:F2}ATR | base={2:F2} extreme={3:F2} | waiting pullback", impulse.Direction, impulse.ImpulseAtr, impulse.Base, impulse.Extreme);
             return;
         }
 
-        if (HasStrongOppositeContext(selected.Direction))
+        var state = _tickMountain;
+        if ((Server.Time - state.CreatedAt).TotalMinutes > 3.5)
         {
-            RegisterSkip("HTF veto");
-            Print("NAI ENTRY | VETO {0} | M15={1} M5={2} | geometry found but context strongly opposite",
-                selected.Direction, _mountain.M15Score, _mountain.M5Score);
+            ResetTickMountain("setup expired", true);
             return;
         }
 
-        var bucketStage = _mountain.Stage == MountainStage.Mature ? MountainStage.Forming : _mountain.Stage;
-        var bucket = BucketKey(selected.Direction, bucketStage, selected.Kind);
-        if (_blockedEarlyBuckets.Contains(bucket))
+        if (HasStrongOppositeContext(state.Direction))
         {
-            RegisterSkip("session memory blocked bucket");
-            Print("NAI MEMORY | BLOCK ENTRY | {0}", bucket);
+            ResetTickMountain("HTF veto", true);
             return;
         }
 
-        selected.Bucket = bucket;
-        selected.Stage = bucketStage;
-        _entryState = selected;
-        _lastObservedTick = selected.Direction == DirectionChoice.Long ? Symbol.Ask : Symbol.Bid;
+        var price = _ticks[_ticks.Count - 1].Price;
 
-        if (selected.Direction == DirectionChoice.Long) _hourBullForecasts++; else _hourBearForecasts++;
-        Print("NAI ENTRY | IMPULSE+PULLBACK FOUND | {0} {1} | impulse={2:F2}ATR retrace={3:P0} turn={4:F2} break={5:F2} | waiting live micro-break",
-            selected.Direction, selected.Kind, selected.ImpulseAtr, selected.RetraceFraction, selected.CandidateTurn, selected.MicroBreak);
+        if (state.Phase == TickPhase.Pullback)
+        {
+            AdvancePullback(state, price, atr);
+            return;
+        }
+
+        if (state.Phase == TickPhase.Rebound)
+        {
+            AdvanceRebound(state, price, atr);
+            return;
+        }
+
+        if (state.Phase == TickPhase.AwaitBreak)
+            AdvanceBreakAndAcceleration(state, price, atr);
     }
 
-    private MountainEntryState? DetectPullbackMountainCandidate(int i, DirectionChoice direction, double atr)
+    private TickImpulse? FindBestTickImpulse(double atr)
     {
-        if (i < 12)
-            return null;
+        TickImpulse? best = null;
+        var n = _ticks.Count;
 
-        MountainEntryState? best = null;
-
-        for (var impulseEnd = i - 1; impulseEnd >= i - 4; impulseEnd--)
+        for (var length = 12; length <= 36; length += 4)
         {
-            for (var lookback = 3; lookback <= 6; lookback++)
+            if (n < length + 2)
+                continue;
+
+            var from = n - length;
+            var to = n - 1;
+
+            var minIndex = IndexOfMinTick(from, to);
+            var maxIndex = IndexOfMaxTick(from, to);
+
+            if (minIndex < maxIndex && maxIndex >= to - 4)
             {
-                var impulseStart = impulseEnd - lookback;
-                if (impulseStart < 2)
-                    continue;
-
-                var start = _m1.ClosePrices[impulseStart];
-                var end = _m1.ClosePrices[impulseEnd];
-                var move = direction == DirectionChoice.Long ? end - start : start - end;
-                if (move < atr * 0.80)
-                    continue;
-
-                var efficiency = Efficiency(_m1, impulseStart, impulseEnd);
-                if (efficiency < 0.52)
-                    continue;
-
-                if (direction == DirectionChoice.Long && _m1.HighPrices[impulseEnd] <= _m1.HighPrices[impulseStart])
-                    continue;
-                if (direction == DirectionChoice.Short && _m1.LowPrices[impulseEnd] >= _m1.LowPrices[impulseStart])
-                    continue;
-
-                var pullbackStart = impulseEnd + 1;
-                if (pullbackStart > i)
-                    continue;
-
-                var impulseExtreme = direction == DirectionChoice.Long
-                    ? HighestHigh(_m1, impulseStart, impulseEnd)
-                    : LowestLow(_m1, impulseStart, impulseEnd);
-
-                var impulseBase = direction == DirectionChoice.Long
-                    ? LowestLow(_m1, impulseStart, impulseEnd)
-                    : HighestHigh(_m1, impulseStart, impulseEnd);
-
-                var candidateTurn = direction == DirectionChoice.Long
-                    ? LowestLow(_m1, pullbackStart, i)
-                    : HighestHigh(_m1, pullbackStart, i);
-
-                var impulseDistance = Math.Abs(impulseExtreme - impulseBase);
-                if (impulseDistance <= Symbol.TickSize)
-                    continue;
-
-                var retrace = direction == DirectionChoice.Long
-                    ? (impulseExtreme - candidateTurn) / impulseDistance
-                    : (candidateTurn - impulseExtreme) / impulseDistance;
-
-                if (retrace < 0.16 || retrace > 0.58)
-                    continue;
-
-                var pullbackMoved = direction == DirectionChoice.Long
-                    ? _m1.ClosePrices[i] < _m1.ClosePrices[impulseEnd] - atr * 0.08
-                    : _m1.ClosePrices[i] > _m1.ClosePrices[impulseEnd] + atr * 0.08;
-                if (!pullbackMoved)
-                    continue;
-
-                if (direction == DirectionChoice.Long && candidateTurn <= impulseBase + atr * 0.05)
-                    continue;
-                if (direction == DirectionChoice.Short && candidateTurn >= impulseBase - atr * 0.05)
-                    continue;
-
-                var breakFrom = Math.Max(pullbackStart, i - 2);
-                var microBreak = direction == DirectionChoice.Long
-                    ? HighestHigh(_m1, breakFrom, i)
-                    : LowestLow(_m1, breakFrom, i);
-
-                var current = direction == DirectionChoice.Long ? Symbol.Ask : Symbol.Bid;
-                var distanceFromTurn = Math.Abs(current - candidateTurn) / atr;
-                if (distanceFromTurn > 0.75)
-                    continue;
-
-                var candidate = new MountainEntryState
+                var distance = _ticks[maxIndex].Price - _ticks[minIndex].Price;
+                var efficiency = TickEfficiency(minIndex, maxIndex);
+                var ratio = DirectionalTickRatio(minIndex, maxIndex, DirectionChoice.Long);
+                var impulseAtr = distance / atr;
+                if (impulseAtr >= 0.42 && impulseAtr <= 1.45 && efficiency >= 0.58 && ratio >= 0.58)
                 {
-                    Direction = direction,
-                    Kind = "MOUNTAIN_TURN",
-                    Stage = MountainStage.Forming,
-                    Bucket = "",
-                    CreatedAt = Server.Time,
-                    ImpulseStartIndex = impulseStart,
-                    ImpulseEndIndex = impulseEnd,
-                    CandidateTurn = candidateTurn,
-                    MicroBreak = microBreak,
-                    ImpulseBase = impulseBase,
-                    ImpulseExtreme = impulseExtreme,
-                    ImpulseAtr = impulseDistance / atr,
-                    RetraceFraction = retrace,
-                    AtrAtDetection = atr,
-                    Direct = false
-                };
+                    var candidate = new TickImpulse(DirectionChoice.Long, _ticks[minIndex].Price, _ticks[maxIndex].Price, impulseAtr, efficiency, ratio);
+                    if (best == null || ImpulseQuality(candidate) > ImpulseQuality(best)) best = candidate;
+                }
+            }
 
-                if (best == null || candidate.ImpulseAtr > best.ImpulseAtr)
-                    best = candidate;
+            if (maxIndex < minIndex && minIndex >= to - 4)
+            {
+                var distance = _ticks[maxIndex].Price - _ticks[minIndex].Price;
+                var efficiency = TickEfficiency(maxIndex, minIndex);
+                var ratio = DirectionalTickRatio(maxIndex, minIndex, DirectionChoice.Short);
+                var impulseAtr = distance / atr;
+                if (impulseAtr >= 0.42 && impulseAtr <= 1.45 && efficiency >= 0.58 && ratio >= 0.58)
+                {
+                    var candidate = new TickImpulse(DirectionChoice.Short, _ticks[maxIndex].Price, _ticks[minIndex].Price, impulseAtr, efficiency, ratio);
+                    if (best == null || ImpulseQuality(candidate) > ImpulseQuality(best)) best = candidate;
+                }
             }
         }
 
         return best;
     }
 
-    private MountainEntryState? DetectDirectMountainCandidate(int i, DirectionChoice direction, double atr)
+    private static double ImpulseQuality(TickImpulse x) => x.ImpulseAtr * x.Efficiency * x.DirectionalRatio;
+
+    private void AdvancePullback(TickMountainState state, double price, double atr)
     {
-        if (i < 8)
-            return null;
-
-        var from = i - 4;
-        var start = _m1.ClosePrices[from];
-        var end = _m1.ClosePrices[i];
-        var move = direction == DirectionChoice.Long ? end - start : start - end;
-        if (move < atr * 0.90 || move > atr * 1.80)
-            return null;
-
-        var efficiency = Efficiency(_m1, from, i);
-        if (efficiency < 0.70)
-            return null;
-
-        var fast = AverageClose(_m1, i - 5, i);
-        var extension = Math.Abs(end - fast) / atr;
-        if (extension > 0.55)
-            return null;
-
-        var alignedBars = 0;
-        for (var k = i - 3; k <= i; k++)
+        if (state.Direction == DirectionChoice.Long && price > state.Extreme)
         {
-            if (direction == DirectionChoice.Long && _m1.ClosePrices[k] > _m1.OpenPrices[k]) alignedBars++;
-            if (direction == DirectionChoice.Short && _m1.ClosePrices[k] < _m1.OpenPrices[k]) alignedBars++;
+            state.Extreme = price;
+            state.ImpulseDistance = state.Extreme - state.Base;
+            state.CandidateTurn = price;
+            state.CandidateTurnIndex = _ticks.Count - 1;
+            state.PullbackStartIndex = -1;
+            return;
         }
-        if (alignedBars < 3)
-            return null;
 
-        var impulseBase = direction == DirectionChoice.Long ? LowestLow(_m1, from, i) : HighestHigh(_m1, from, i);
-        var impulseExtreme = direction == DirectionChoice.Long ? HighestHigh(_m1, from, i) : LowestLow(_m1, from, i);
-        var microBreak = direction == DirectionChoice.Long ? _m1.HighPrices[i] : _m1.LowPrices[i];
-
-        return new MountainEntryState
+        if (state.Direction == DirectionChoice.Short && price < state.Extreme)
         {
-            Direction = direction,
-            Kind = "DIRECT_MOUNTAIN",
-            Stage = MountainStage.Climbing,
-            Bucket = "",
-            CreatedAt = Server.Time,
-            ImpulseStartIndex = from,
-            ImpulseEndIndex = i,
-            CandidateTurn = direction == DirectionChoice.Long ? _m1.LowPrices[i] : _m1.HighPrices[i],
-            MicroBreak = microBreak,
-            ImpulseBase = impulseBase,
-            ImpulseExtreme = impulseExtreme,
-            ImpulseAtr = Math.Abs(impulseExtreme - impulseBase) / atr,
-            RetraceFraction = 0,
-            AtrAtDetection = atr,
-            Direct = true
-        };
-    }
+            state.Extreme = price;
+            state.ImpulseDistance = state.Base - state.Extreme;
+            state.CandidateTurn = price;
+            state.CandidateTurnIndex = _ticks.Count - 1;
+            state.PullbackStartIndex = -1;
+            return;
+        }
 
-    private void RefreshCandidateTurnFromLatestBar(int i, double atr)
-    {
-        var state = _entryState;
-        if (state == null)
+        var retrace = state.Direction == DirectionChoice.Long
+            ? (state.Extreme - price) / state.ImpulseDistance
+            : (price - state.Extreme) / state.ImpulseDistance;
+
+        if (state.PullbackStartIndex < 0 && retrace >= 0.08)
+            state.PullbackStartIndex = _ticks.Count - 1;
+
+        if (state.Direction == DirectionChoice.Long && price < state.CandidateTurn)
+        {
+            state.CandidateTurn = price;
+            state.CandidateTurnIndex = _ticks.Count - 1;
+        }
+        else if (state.Direction == DirectionChoice.Short && price > state.CandidateTurn)
+        {
+            state.CandidateTurn = price;
+            state.CandidateTurnIndex = _ticks.Count - 1;
+        }
+
+        var baseBroken = state.Direction == DirectionChoice.Long
+            ? price <= state.Base + atr * 0.03
+            : price >= state.Base - atr * 0.03;
+
+        if (baseBroken || retrace > 0.60)
+        {
+            ResetTickMountain(baseBroken ? "impulse base broken" : "pullback too deep", true);
+            return;
+        }
+
+        if (retrace < 0.14 || retrace > 0.55 || state.PullbackStartIndex < 0)
             return;
 
+        if (!DetectTickTurn(state.Direction, state.CandidateTurnIndex, atr, out var ratio, out var net, out var reboundVelocity))
+            return;
+
+        state.RetraceFraction = retrace;
+        state.PullbackVelocity = PullbackVelocity(state.PullbackStartIndex, state.CandidateTurnIndex);
+        state.ReboundPivot = price;
+        state.ReboundVelocity = reboundVelocity;
+        state.Phase = TickPhase.Rebound;
+
+        Print("NAI TICK MOUNTAIN | TURN {0} | retrace={1:P0} turn={2:F2} tickRatio={3:P0} rebound={4:F2}ATR | waiting micro-retest", state.Direction, retrace, state.CandidateTurn, ratio, Math.Abs(net) / atr);
+    }
+
+    private bool DetectTickTurn(DirectionChoice direction, int turnIndex, double atr, out double ratio, out double net, out double velocity)
+    {
+        ratio = 0;
+        net = 0;
+        velocity = 0;
+
+        var end = _ticks.Count - 1;
+        if (turnIndex < 0 || end - turnIndex < 4)
+            return false;
+
+        var from = Math.Max(turnIndex, end - 7);
+        net = _ticks[end].Price - _ticks[from].Price;
+        var directionalNet = direction == DirectionChoice.Long ? net : -net;
+        ratio = DirectionalTickRatio(from, end, direction);
+        velocity = Math.Abs(net) / Math.Max(1, end - from);
+
+        var awayFromTurn = direction == DirectionChoice.Long
+            ? _ticks[end].Price - _ticks[turnIndex].Price
+            : _ticks[turnIndex].Price - _ticks[end].Price;
+
+        return directionalNet >= atr * 0.035 && awayFromTurn >= atr * 0.045 && ratio >= 0.60;
+    }
+
+    private void AdvanceRebound(TickMountainState state, double price, double atr)
+    {
         if (state.Direction == DirectionChoice.Long)
         {
-            if (_m1.LowPrices[i] <= state.ImpulseBase + atr * 0.05)
+            if (price > state.ReboundPivot)
             {
-                Print("NAI ENTRY | RESET LONG | impulse base broken before entry");
-                _entryState = null;
+                state.ReboundPivot = price;
                 return;
             }
 
-            if (!state.Direct && _m1.LowPrices[i] < state.CandidateTurn)
+            if (price <= state.CandidateTurn - atr * 0.02)
             {
-                state.CandidateTurn = _m1.LowPrices[i];
-                state.MicroBreak = Math.Max(_m1.HighPrices[i], _m1.HighPrices[Math.Max(0, i - 1)]);
-                state.BreakSeen = false;
-                state.ConfirmTicks = 0;
+                ResetTickMountain("turn failed before break", true);
+                return;
             }
+
+            var microRetest = state.ReboundPivot - price;
+            if (microRetest < Math.Max(atr * 0.015, Symbol.TickSize * 2.0))
+                return;
         }
         else
         {
-            if (_m1.HighPrices[i] >= state.ImpulseBase - atr * 0.05)
+            if (price < state.ReboundPivot)
             {
-                Print("NAI ENTRY | RESET SHORT | impulse base broken before entry");
-                _entryState = null;
+                state.ReboundPivot = price;
                 return;
             }
 
-            if (!state.Direct && _m1.HighPrices[i] > state.CandidateTurn)
+            if (price >= state.CandidateTurn + atr * 0.02)
             {
-                state.CandidateTurn = _m1.HighPrices[i];
-                state.MicroBreak = Math.Min(_m1.LowPrices[i], _m1.LowPrices[Math.Max(0, i - 1)]);
-                state.BreakSeen = false;
-                state.ConfirmTicks = 0;
+                ResetTickMountain("turn failed before break", true);
+                return;
             }
+
+            var microRetest = price - state.ReboundPivot;
+            if (microRetest < Math.Max(atr * 0.015, Symbol.TickSize * 2.0))
+                return;
         }
+
+        state.MicroBreak = state.ReboundPivot;
+        state.BreakArmedIndex = _ticks.Count - 1;
+        state.Phase = TickPhase.AwaitBreak;
+        Print("NAI TICK MOUNTAIN | MICRO RETEST HELD {0} | turn={1:F2} break={2:F2} | waiting break+acceleration", state.Direction, state.CandidateTurn, state.MicroBreak);
     }
 
-    private void AdvanceMountainEntryOnTick()
+    private void AdvanceBreakAndAcceleration(TickMountainState state, double price, double atr)
     {
-        var state = _entryState;
-        if (state == null || _armedPlan != null || FindPosition() != null)
-            return;
-
-        if ((Server.Time - state.CreatedAt).TotalMinutes > 3.2)
+        var turnFailed = state.Direction == DirectionChoice.Long
+            ? price <= state.CandidateTurn - atr * 0.02
+            : price >= state.CandidateTurn + atr * 0.02;
+        if (turnFailed)
         {
-            RegisterSkip("mountain live state expired");
-            _entryState = null;
-            return;
-        }
-
-        if (HasStrongOppositeContext(state.Direction))
-        {
-            RegisterSkip("HTF veto");
-            Print("NAI ENTRY | VETO LIVE {0} | M15={1} M5={2}", state.Direction, _mountain.M15Score, _mountain.M5Score);
-            _entryState = null;
-            return;
-        }
-
-        var price = state.Direction == DirectionChoice.Long ? Symbol.Ask : Symbol.Bid;
-        var atr = state.AtrAtDetection > 0 ? state.AtrAtDetection : Atr(_m1, _m1.Count - 2);
-
-        var beyondBreak = state.Direction == DirectionChoice.Long
-            ? (price - state.MicroBreak) / atr
-            : (state.MicroBreak - price) / atr;
-
-        if (beyondBreak > MaxChaseAtr)
-        {
-            _hourLateSkips++;
-            RegisterSkip("missed mountain/no chase");
-            Print("NAI ENTRY | MISSED MOUNTAIN {0} | already {1:F2}ATR beyond micro-break", state.Direction, beyondBreak);
-            _entryState = null;
+            ResetTickMountain("micro retest broke candidate turn", true);
             return;
         }
 
         var broke = state.Direction == DirectionChoice.Long
             ? price > state.MicroBreak + Symbol.TickSize
             : price < state.MicroBreak - Symbol.TickSize;
+        if (!broke)
+            return;
 
-        if (!state.BreakSeen)
+        var beyondBreak = state.Direction == DirectionChoice.Long
+            ? (price - state.MicroBreak) / atr
+            : (state.MicroBreak - price) / atr;
+        var fromTurn = state.Direction == DirectionChoice.Long
+            ? (price - state.CandidateTurn) / atr
+            : (state.CandidateTurn - price) / atr;
+
+        if (beyondBreak > MaxChaseAtr || fromTurn > 0.50)
         {
-            if (!broke)
-            {
-                _lastObservedTick = price;
-                return;
-            }
-
-            state.BreakSeen = true;
-            state.ConfirmTicks = 0;
-            state.LastConfirmPrice = price;
-            _lastObservedTick = price;
-            Print("NAI ENTRY | MICRO BREAK {0} | turn={1:F2} break={2:F2} first={3:F2}", state.Direction, state.CandidateTurn, state.MicroBreak, price);
+            _hourLateSkips++;
+            ResetTickMountain("missed mountain/no chase", false);
             return;
         }
 
-        var failedBreak = state.Direction == DirectionChoice.Long
-            ? price < state.MicroBreak - Symbol.TickSize * 2
-            : price > state.MicroBreak + Symbol.TickSize * 2;
-
-        if (failedBreak)
-        {
-            state.BreakSeen = false;
-            state.ConfirmTicks = 0;
-            state.LastConfirmPrice = price;
-            _lastObservedTick = price;
-            Print("NAI ENTRY | BREAK FAILED | {0} back through micro level", state.Direction);
-            return;
-        }
-
-        var advances = state.Direction == DirectionChoice.Long
-            ? price > state.LastConfirmPrice
-            : price < state.LastConfirmPrice;
-
-        if (advances)
-        {
-            state.ConfirmTicks++;
-            state.LastConfirmPrice = price;
-        }
-
-        _lastObservedTick = price;
-
-        if (state.ConfirmTicks < 3)
+        if (!AccelerationConfirmed(state.Direction, state.PullbackVelocity, atr, out var tickRatio, out var velocityRatio, out var netAtr))
             return;
 
         var risk = state.Direction == DirectionChoice.Long
@@ -661,43 +590,93 @@ public class NaiMountainDecisionV1 : Robot
 
         if (risk > atr * 1.25)
         {
-            RegisterSkip("mountain stop too wide");
-            Print("NAI ENTRY | SKIP {0} | stop distance={1:F2}ATR too wide", state.Direction, risk / atr);
-            _entryState = null;
+            ResetTickMountain("stop too wide", false);
             return;
         }
 
-        var stage = state.Stage == MountainStage.Base ? MountainStage.Forming : state.Stage;
-        var early = !state.Direct && stage != MountainStage.Climbing;
-        var bucket = string.IsNullOrWhiteSpace(state.Bucket) ? BucketKey(state.Direction, stage, state.Kind) : state.Bucket;
+        var bucket = state.Bucket;
+        if (_blockedEarlyBuckets.Contains(bucket))
+        {
+            ResetTickMountain("session memory blocked bucket", false);
+            return;
+        }
 
         _armedPlan = new SetupPlan(
             state.Direction,
-            state.Kind,
+            "TICK_MOUNTAIN",
             price,
             risk,
-            stage,
-            early,
+            MountainStage.Forming,
+            true,
             bucket,
-            $"impulse={state.ImpulseAtr:F2}ATR retrace={state.RetraceFraction:P0} turn={state.CandidateTurn:F2} break={state.MicroBreak:F2} confirmTicks={state.ConfirmTicks}");
+            $"impulse={state.ImpulseAtr:F2}ATR retrace={state.RetraceFraction:P0} turn={state.CandidateTurn:F2} microBreak={state.MicroBreak:F2} tickRatio={tickRatio:P0} velocityRatio={velocityRatio:F2} net8={netAtr:F2}ATR");
 
         _armedAt = Server.Time;
         if (state.Direction == DirectionChoice.Long) _hourLongDecisions++; else _hourShortDecisions++;
+        _hourForecastConfirmed++;
+        _hourEarlyConfirmed++;
 
-        Print("NAI DECISION | READY {0} | {1} | micro-break held + {2} confirming ticks | entryRef={3:F2}",
-            state.Direction, state.Kind, state.ConfirmTicks, price);
+        Print("NAI DECISION | TICK MOUNTAIN READY {0} | turn={1:F2} break={2:F2} ratio={3:P0} speedX={4:F2} | entryRef={5:F2}", state.Direction, state.CandidateTurn, state.MicroBreak, tickRatio, velocityRatio, price);
+        _tickMountain = null;
+    }
 
-        _entryState = null;
+    private bool AccelerationConfirmed(DirectionChoice direction, double pullbackVelocity, double atr, out double ratio, out double velocityRatio, out double netAtr)
+    {
+        ratio = 0;
+        velocityRatio = 0;
+        netAtr = 0;
+        if (_ticks.Count < 9)
+            return false;
+
+        var to = _ticks.Count - 1;
+        var from = to - 8;
+        var net = _ticks[to].Price - _ticks[from].Price;
+        var directionalNet = direction == DirectionChoice.Long ? net : -net;
+        ratio = DirectionalTickRatio(from, to, direction);
+        var velocity = Math.Abs(net) / 8.0;
+        var baseline = Math.Max(Symbol.TickSize, pullbackVelocity);
+        velocityRatio = velocity / baseline;
+        netAtr = directionalNet / atr;
+
+        return ratio >= 0.625 && directionalNet >= atr * 0.04 && velocityRatio >= 0.85;
+    }
+
+    private double PullbackVelocity(int from, int to)
+    {
+        if (from < 0 || to <= from || to >= _ticks.Count)
+            return Symbol.TickSize;
+
+        double sum = 0;
+        var count = 0;
+        for (var i = from + 1; i <= to; i++)
+        {
+            sum += Math.Abs(_ticks[i].Price - _ticks[i - 1].Price);
+            count++;
+        }
+        return count == 0 ? Symbol.TickSize : sum / count;
+    }
+
+    private void ResetTickMountain(string reason, bool failedForecast)
+    {
+        if (_tickMountain == null)
+            return;
+
+        if (failedForecast)
+        {
+            _hourForecastFailed++;
+            _hourEarlyFailed++;
+        }
+        RegisterSkip(reason);
+        Print("NAI TICK MOUNTAIN | RESET {0} | {1}", _tickMountain.Direction, reason);
+        _tickMountain = null;
     }
 
     private bool HasStrongOppositeContext(DirectionChoice direction)
     {
         if (direction == DirectionChoice.Long)
             return _mountain.M5Score <= -2 || _mountain.M15Score <= -3;
-
         if (direction == DirectionChoice.Short)
             return _mountain.M5Score >= 2 || _mountain.M15Score >= 3;
-
         return true;
     }
 
@@ -707,9 +686,9 @@ public class NaiMountainDecisionV1 : Robot
         if (plan == null)
             return;
 
-        if ((Server.Time - _armedAt).TotalMinutes > 1.2)
+        if ((Server.Time - _armedAt).TotalSeconds > 12)
         {
-            RegisterSkip("armed setup expired");
+            RegisterSkip("armed tick entry expired");
             _armedPlan = null;
             return;
         }
@@ -717,92 +696,25 @@ public class NaiMountainDecisionV1 : Robot
         if (HasStrongOppositeContext(plan.Direction))
         {
             RegisterSkip("HTF veto before execution");
-            Print("NAI DECISION | CANCEL {0} | strong opposite HTF veto before execution", plan.Direction);
             _armedPlan = null;
             return;
         }
 
-        var i = _m1.Count - 2;
-        var atr = Atr(_m1, i);
-        if (atr <= 0)
-            return;
-
+        var atr = Atr(_m1, _m1.Count - 2);
         var marketPrice = plan.Direction == DirectionChoice.Long ? Symbol.Ask : Symbol.Bid;
-        var chase = plan.Direction == DirectionChoice.Long ? (marketPrice - plan.EntryReference) / atr : (plan.EntryReference - marketPrice) / atr;
+        var chase = plan.Direction == DirectionChoice.Long
+            ? (marketPrice - plan.EntryReference) / atr
+            : (plan.EntryReference - marketPrice) / atr;
 
         if (chase > MaxChaseAtr)
         {
-            RegisterSkip("chased away");
             _hourLateSkips++;
-            Print("NAI DECISION | SKIP CHASE | {0} moved {1:F2}ATR beyond confirmed entry", plan.Direction, chase);
+            RegisterSkip("chased away after confirmation");
             _armedPlan = null;
             return;
         }
 
-        if (chase < -0.35)
-            return;
-
-        ExecutePlan(plan, i, marketPrice);
-    }
-
-    private SetupPlan? FindPullbackEntry(int i, int dir, double atr)
-    {
-        var fast = AverageClose(_m1, i - 5, i);
-        var slow = AverageClose(_m1, i - 17, i);
-        var open = _m1.OpenPrices[i];
-        var close = _m1.ClosePrices[i];
-        var high = _m1.HighPrices[i];
-        var low = _m1.LowPrices[i];
-        var range = Math.Max(Symbol.TickSize, high - low);
-        var body = Math.Abs(close - open);
-
-        var trendSeparated = dir > 0 ? fast > slow + atr * 0.04 : fast < slow - atr * 0.04;
-        var touchedValue = dir > 0 ? low <= fast + atr * 0.22 : high >= fast - atr * 0.22;
-        var closedBack = dir > 0 ? close > fast : close < fast;
-        var candleAligned = dir > 0 ? close > open : close < open;
-        var closeStrong = dir > 0 ? close >= low + range * 0.56 : close <= high - range * 0.56;
-
-        if (!trendSeparated || !touchedValue || !closedBack || !candleAligned || !closeStrong || body < atr * 0.10)
-            return null;
-
-        var entry = dir > 0 ? Symbol.Ask : Symbol.Bid;
-        var swing = dir > 0 ? LowestLow(_m1, i - 4, i) : HighestHigh(_m1, i - 4, i);
-        var stop = dir > 0 ? swing - atr * 0.10 : swing + atr * 0.10;
-        var risk = Math.Abs(entry - stop);
-        if (risk < atr * 0.42) risk = atr * 0.52;
-        if (risk > atr * 1.45) return null;
-
-        return new SetupPlan(dir > 0 ? DirectionChoice.Long : DirectionChoice.Short, "PULLBACK", entry, risk, MountainStage.Base, false, "", $"valueTouch body={body / atr:F2}ATR risk={risk / atr:F2}ATR");
-    }
-
-    private SetupPlan? FindMomentumEntry(int i, int dir, double atr)
-    {
-        var open = _m1.OpenPrices[i];
-        var close = _m1.ClosePrices[i];
-        var high = _m1.HighPrices[i];
-        var low = _m1.LowPrices[i];
-        var range = Math.Max(Symbol.TickSize, high - low);
-        var body = Math.Abs(close - open);
-        var fast = AverageClose(_m1, i - 5, i);
-        var priorHigh = HighestHigh(_m1, i - 4, i - 1);
-        var priorLow = LowestLow(_m1, i - 4, i - 1);
-        var broke = dir > 0 ? close > priorHigh : close < priorLow;
-        var aligned = dir > 0 ? close > open : close < open;
-        var closeStrong = dir > 0 ? close >= low + range * 0.68 : close <= high - range * 0.68;
-        var distanceFromFast = Math.Abs(close - fast) / atr;
-        var efficiency = Efficiency(_m1, i - 4, i);
-
-        if (!broke || !aligned || !closeStrong || body < atr * 0.24 || efficiency < 0.46 || distanceFromFast > 1.05)
-            return null;
-
-        var entry = dir > 0 ? Symbol.Ask : Symbol.Bid;
-        var swing = dir > 0 ? LowestLow(_m1, i - 3, i) : HighestHigh(_m1, i - 3, i);
-        var stop = dir > 0 ? swing - atr * 0.08 : swing + atr * 0.08;
-        var risk = Math.Abs(entry - stop);
-        if (risk < atr * 0.46) risk = atr * 0.56;
-        if (risk > atr * 1.30) return null;
-
-        return new SetupPlan(dir > 0 ? DirectionChoice.Long : DirectionChoice.Short, "MOMENTUM", entry, risk, MountainStage.Base, false, "", $"break4 eff={efficiency:F2} body={body / atr:F2}ATR fastDist={distanceFromFast:F2}ATR");
+        ExecutePlan(plan, _m1.Count - 2, marketPrice);
     }
 
     private void ExecutePlan(SetupPlan plan, int i, double marketPrice)
@@ -829,57 +741,21 @@ public class NaiMountainDecisionV1 : Robot
         if (!result.IsSuccessful)
         {
             RegisterSkip("entry rejected");
-            Print("NAI EXECUTION | REJECTED | {0} {1} error={2}", plan.Direction, plan.Name, result.Error);
+            Print("NAI EXECUTION | REJECTED | {0} error={1}", plan.Direction, result.Error);
             _armedPlan = null;
             return;
         }
 
         _hourEntries++;
+        _hourEarlyEntries++;
         if (type == TradeType.Buy) _hourLongTrades++; else _hourShortTrades++;
-        if (plan.EarlyForecast) _hourEarlyEntries++;
         _lastEntryM1Index = i;
-        _entryM1Index = i;
         _lastStopRequestPrice = null;
-        _activeMeta = new TradeMeta(plan.Direction, plan.Stage, plan.Name, plan.EarlyForecast, false, i, plan.Bucket, risk, Account.Balance * RiskPercent / 100.0);
+        _activeMeta = new TradeMeta(plan.Direction, plan.Stage, plan.Name, true, true, i, plan.Bucket, risk, Account.Balance * RiskPercent / 100.0);
         _armedPlan = null;
-        _entryState = null;
+        _tickMountain = null;
 
-        Print("NAI EXECUTION | ENTER {0} | mountain={1} setup={2} EARLY={3} entry={4:F2} SL={5:F2} TP={6:F2} | validateBars={7}", type, plan.Stage, plan.Name, plan.EarlyForecast, result.Position.EntryPrice, stop, target, EarlyValidationBars);
-    }
-
-    private void ValidateActiveForecastOnNewBar(int i)
-    {
-        var p = FindPosition();
-        var meta = _activeMeta;
-        if (p == null || meta == null || !meta.EarlyForecast || meta.Confirmed)
-            return;
-
-        var age = i - meta.EntryBarIndex;
-        if (age < 1)
-            return;
-
-        var directionStill = _mountain.Direction == meta.Direction;
-        var confirms = directionStill && (_mountain.Stage == MountainStage.Climbing || (_mountain.Stage == MountainStage.Forming && _mountain.Strength >= 7));
-
-        if (confirms)
-        {
-            _activeMeta = meta with { Confirmed = true };
-            _hourForecastConfirmed++;
-            _hourEarlyConfirmed++;
-            Print("NAI FORECAST | CONFIRMED | {0} mountain after {1} bars | stage={2} strength={3}", meta.Direction, age, _mountain.Stage, _mountain.Strength);
-            return;
-        }
-
-        if (age >= EarlyValidationBars || _mountain.Stage == MountainStage.Failing || (_mountain.Direction != DirectionChoice.None && _mountain.Direction != meta.Direction))
-        {
-            var result = ClosePosition(p);
-            if (result.IsSuccessful)
-            {
-                _hourForecastFailed++;
-                _hourEarlyFailed++;
-                Print("NAI FORECAST | FAILED EARLY EXIT | {0} age={1} stageNow={2} directionNow={3}", meta.Direction, age, _mountain.Stage, _mountain.Direction);
-            }
-        }
+        Print("NAI EXECUTION | ENTER {0} | TRUE TICK MOUNTAIN | entry={1:F2} SL={2:F2} TP={3:F2} | {4}", type, result.Position.EntryPrice, stop, target, plan.Reason);
     }
 
     private void ManageOpenPositionFast()
@@ -895,40 +771,22 @@ public class NaiMountainDecisionV1 : Robot
         var marketPrice = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
         var favorable = p.TradeType == TradeType.Buy ? marketPrice - p.EntryPrice : p.EntryPrice - marketPrice;
         var r = favorable / originalRisk;
-        var meta = _activeMeta;
 
-        if (meta != null && meta.EarlyForecast && !meta.Confirmed && r <= -EarlyEmergencyR)
-        {
-            var result = ClosePosition(p);
-            if (result.IsSuccessful)
-            {
-                _hourForecastFailed++;
-                _hourEarlyFailed++;
-                Print("NAI FORECAST | EMERGENCY ABORT | {0} reached {1:F2}R before confirmation", meta.Direction, r);
-            }
-            return;
-        }
-
-        var oppositeStrong = _mountain.Direction != DirectionChoice.None && meta != null && _mountain.Direction != meta.Direction && _mountain.Strength >= 7;
-        if (oppositeStrong && r < 0.40)
-        {
-            var result = ClosePosition(p);
-            if (result.IsSuccessful)
-                Print("NAI POSITION | THESIS BROKEN EXIT | {0} R={1:F2} oppositeMountain={2}/{3}", p.TradeType, r, _mountain.Direction, _mountain.Stage);
-            return;
-        }
-
+        // Entry is already confirmed by live tick geometry. HTF score changes are not allowed to close it.
         if (r >= BreakEvenAtR)
         {
             var improve = p.TradeType == TradeType.Buy ? p.StopLoss.Value < p.EntryPrice : p.StopLoss.Value > p.EntryPrice;
-            if (improve) TryMoveStop(p, p.EntryPrice, "BREAK-EVEN", r);
+            if (improve)
+                TryMoveStop(p, p.EntryPrice, "BREAK-EVEN", r);
         }
 
         if (r >= TrailAtR && _m1.Count > 5)
         {
             var i = _m1.Count - 2;
             var atr = Atr(_m1, i);
-            var raw = p.TradeType == TradeType.Buy ? LowestLow(_m1, i - 2, i) - atr * 0.08 : HighestHigh(_m1, i - 2, i) + atr * 0.08;
+            var raw = p.TradeType == TradeType.Buy
+                ? LowestLow(_m1, i - 2, i) - atr * 0.08
+                : HighestHigh(_m1, i - 2, i) + atr * 0.08;
             TryMoveStop(p, raw, "TRAIL", r);
         }
     }
@@ -973,7 +831,6 @@ public class NaiMountainDecisionV1 : Robot
 
         var meta = _activeMeta;
         _lastStopRequestPrice = null;
-        _entryM1Index = -1;
         _hourNet += p.NetProfit;
 
         var intendedRiskCash = meta?.RiskCash > 0 ? meta.RiskCash : Math.Max(0.01, Account.Balance * RiskPercent / 100.0);
@@ -984,18 +841,11 @@ public class NaiMountainDecisionV1 : Robot
         else _hourScratch++;
 
         if (meta != null)
-        {
             UpdateSessionMemory(meta, resultR);
-            if (meta.EarlyForecast && !meta.Confirmed && p.NetProfit > intendedRiskCash * 0.15)
-            {
-                _hourForecastConfirmed++;
-                _hourEarlyConfirmed++;
-            }
-        }
 
         Print("NAI RESULT | {0} | net={1:F2} approxR={2:F2} reason={3} | mountainMeta={4}", p.TradeType, p.NetProfit, resultR, args.Reason, meta == null ? "none" : meta.Bucket);
         _activeMeta = null;
-        _entryState = null;
+        _tickMountain = null;
     }
 
     private void UpdateSessionMemory(TradeMeta meta, double resultR)
@@ -1041,7 +891,7 @@ public class NaiMountainDecisionV1 : Robot
         Print("EARLY | entries={0} confirmed={1} failed={2}", _hourEarlyEntries, _hourEarlyConfirmed, _hourEarlyFailed);
         Print("P/L | hourNet={0:F2} | equity={1:F2} balance={2:F2} | dayFromStart={3:F2}", _hourNet, Account.Equity, Account.Balance, Account.Equity - _dayStartEquity);
         Print("MEMORY | buckets={0} blockedEarly={1} | bestSample={2}", _sessionMemory.Count, _blockedEarlyBuckets.Count, topMemory);
-        Print("STATE | armed={0} open={1} halted={2}", _armedPlan == null ? "NO" : _armedPlan.Direction + ":" + _armedPlan.Stage + ":" + _armedPlan.Name, FindPosition() == null ? "NO" : FindPosition()!.TradeType.ToString(), _halted);
+        Print("STATE | tickMountain={0} armed={1} open={2} halted={3}", _tickMountain == null ? "NO" : _tickMountain.Direction + ":" + _tickMountain.Phase, _armedPlan == null ? "NO" : _armedPlan.Direction + ":" + _armedPlan.Name, FindPosition() == null ? "NO" : FindPosition()!.TradeType.ToString(), _halted);
         Print("=== END NAI MOUNTAIN HOURLY ===");
     }
 
@@ -1111,33 +961,6 @@ public class NaiMountainDecisionV1 : Robot
         return score;
     }
 
-    private void M1TrendVotes(int i, out int bull, out int bear)
-    {
-        bull = bear = 0;
-        var atr = Atr(_m1, i);
-        if (atr <= Symbol.TickSize) return;
-
-        var fast = AverageClose(_m1, i - 5, i);
-        var slow = AverageClose(_m1, i - 17, i);
-        if (fast > slow + atr * 0.04) bull++; else if (fast < slow - atr * 0.04) bear++;
-
-        var fastPast = AverageClose(_m1, i - 9, i - 4);
-        if (fast > fastPast + atr * 0.05) bull++; else if (fast < fastPast - atr * 0.05) bear++;
-
-        var move3 = _m1.ClosePrices[i] - _m1.ClosePrices[i - 3];
-        if (move3 > atr * 0.12) bull++; else if (move3 < -atr * 0.12) bear++;
-
-        var recentHigh = HighestHigh(_m1, i - 5, i);
-        var recentLow = LowestLow(_m1, i - 5, i);
-        var priorHigh = HighestHigh(_m1, i - 11, i - 6);
-        var priorLow = LowestLow(_m1, i - 11, i - 6);
-        if (recentHigh > priorHigh + atr * 0.05 && recentLow >= priorLow - atr * 0.05) bull++;
-        else if (recentLow < priorLow - atr * 0.05 && recentHigh <= priorHigh + atr * 0.05) bear++;
-
-        var body = _m1.ClosePrices[i] - _m1.OpenPrices[i];
-        if (body > atr * 0.10) bull++; else if (body < -atr * 0.10) bear++;
-    }
-
     private void ResetDailyAnchorIfNeeded()
     {
         if (Server.Time.Date == _equityDay) return;
@@ -1155,7 +978,7 @@ public class NaiMountainDecisionV1 : Robot
 
         _halted = true;
         _armedPlan = null;
-        _entryState = null;
+        _tickMountain = null;
         var p = FindPosition();
         if (p != null) ClosePosition(p);
         Print("NAI HALTED | daily equity drawdown={0:F2}% limit={1:F2}%", dd, DailyEquityStopPercent);
@@ -1163,6 +986,49 @@ public class NaiMountainDecisionV1 : Robot
     }
 
     private Position? FindPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label);
+
+    private int IndexOfMinTick(int from, int to)
+    {
+        var idx = from;
+        var value = _ticks[from].Price;
+        for (var i = from + 1; i <= to; i++)
+            if (_ticks[i].Price < value) { value = _ticks[i].Price; idx = i; }
+        return idx;
+    }
+
+    private int IndexOfMaxTick(int from, int to)
+    {
+        var idx = from;
+        var value = _ticks[from].Price;
+        for (var i = from + 1; i <= to; i++)
+            if (_ticks[i].Price > value) { value = _ticks[i].Price; idx = i; }
+        return idx;
+    }
+
+    private double TickEfficiency(int from, int to)
+    {
+        if (to <= from) return 0;
+        var net = Math.Abs(_ticks[to].Price - _ticks[from].Price);
+        double path = 0;
+        for (var i = from + 1; i <= to; i++) path += Math.Abs(_ticks[i].Price - _ticks[i - 1].Price);
+        return path <= Symbol.TickSize ? 0 : net / path;
+    }
+
+    private double DirectionalTickRatio(int from, int to, DirectionChoice direction)
+    {
+        if (to <= from) return 0;
+        var good = 0;
+        var total = 0;
+        for (var i = from + 1; i <= to; i++)
+        {
+            var delta = _ticks[i].Price - _ticks[i - 1].Price;
+            if (Math.Abs(delta) < Symbol.TickSize * 0.25) continue;
+            total++;
+            if (direction == DirectionChoice.Long && delta > 0) good++;
+            if (direction == DirectionChoice.Short && delta < 0) good++;
+        }
+        return total == 0 ? 0 : (double)good / total;
+    }
 
     private double MinimumStopDistancePrice(double referencePrice)
     {
@@ -1240,6 +1106,10 @@ public class NaiMountainDecisionV1 : Robot
 
     private enum DirectionChoice { None, Long, Short }
     private enum MountainStage { Base, Forming, Climbing, Mature, Failing }
+    private enum TickPhase { Pullback, Rebound, AwaitBreak }
+
+    private sealed record TickPoint(DateTime Time, double Price);
+    private sealed record TickImpulse(DirectionChoice Direction, double Base, double Extreme, double ImpulseAtr, double Efficiency, double DirectionalRatio);
 
     private sealed record MountainSnapshot(DirectionChoice Direction, MountainStage Stage, int Strength, int M15Score, int M5Score, int M1Score, int M15Delta, int M5Delta, double ExtensionAtr, double Efficiency, string Reason)
     {
@@ -1249,26 +1119,26 @@ public class NaiMountainDecisionV1 : Robot
     private sealed record SetupPlan(DirectionChoice Direction, string Name, double EntryReference, double RiskDistance, MountainStage Stage, bool EarlyForecast, string Bucket, string Reason);
     private sealed record TradeMeta(DirectionChoice Direction, MountainStage Stage, string Setup, bool EarlyForecast, bool Confirmed, int EntryBarIndex, string Bucket, double RiskDistance, double RiskCash);
 
-    private sealed class MountainEntryState
+    private sealed class TickMountainState
     {
         public DirectionChoice Direction { get; set; }
-        public string Kind { get; set; } = "";
-        public MountainStage Stage { get; set; }
-        public string Bucket { get; set; } = "";
+        public TickPhase Phase { get; set; }
         public DateTime CreatedAt { get; set; }
-        public int ImpulseStartIndex { get; set; }
-        public int ImpulseEndIndex { get; set; }
-        public double CandidateTurn { get; set; }
-        public double MicroBreak { get; set; }
-        public double ImpulseBase { get; set; }
-        public double ImpulseExtreme { get; set; }
+        public double Base { get; set; }
+        public double Extreme { get; set; }
+        public double ImpulseDistance { get; set; }
         public double ImpulseAtr { get; set; }
+        public double Atr { get; set; }
+        public double CandidateTurn { get; set; }
+        public int CandidateTurnIndex { get; set; }
+        public int PullbackStartIndex { get; set; }
         public double RetraceFraction { get; set; }
-        public double AtrAtDetection { get; set; }
-        public bool Direct { get; set; }
-        public bool BreakSeen { get; set; }
-        public int ConfirmTicks { get; set; }
-        public double LastConfirmPrice { get; set; }
+        public double PullbackVelocity { get; set; }
+        public double ReboundVelocity { get; set; }
+        public double ReboundPivot { get; set; }
+        public double MicroBreak { get; set; }
+        public int BreakArmedIndex { get; set; }
+        public string Bucket { get; set; } = "";
     }
 
     private sealed class BucketStats
