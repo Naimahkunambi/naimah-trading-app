@@ -5,9 +5,9 @@ using cAlgo.API;
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiRunnerV1LightConfirmBiasLock : Robot
+public class NaiRunnerV1LightConfirmSoftBias : Robot
 {
-    private const string Label = "NAI-RUNNER-V1-LIGHT-BIAS";
+    private const string Label = "NAI-RUNNER-V1-LIGHT-SOFT-BIAS";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
     private const double ArmLifetimeSeconds = 20.0;
 
@@ -81,14 +81,14 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
     {
         if (Account.IsLive)
         {
-            Print("NAI RUNNER V1 LIGHT BIAS BLOCKED | DEMO accounts only.");
+            Print("NAI RUNNER V1 LIGHT SOFT BIAS BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI RUNNER V1 LIGHT BIAS BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
+            Print("NAI RUNNER V1 LIGHT SOFT BIAS BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
@@ -103,11 +103,11 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
         RefreshHtfScores();
         UpdateDirectionalBias("START");
 
-        Print("NAI RUNNER V1 LIGHT CONFIRM + BIAS LOCK STARTED | {0} | DEMO | LONG+SHORT", SymbolName);
+        Print("NAI RUNNER V1 LIGHT CONFIRM + SOFT BIAS STARTED | {0} | DEMO | LONG+SHORT", SymbolName);
         Print("SETUP OWNER | ORIGINAL RUNNER V1 M1 | Pullback Runner + Momentum Runner | thresholds unchanged");
         Print("LIGHT CONFIRM | setup is already the evidence; live check only asks whether it immediately failed");
-        Print("BIAS LOCK | BULL blocks SHORT | BEAR blocks LONG | NEUTRAL allows BOTH");
-        Print("BIAS HYSTERESIS | repeated evidence required; BULL/BEAR cannot flip directly through one candle");
+        Print("SOFT BIAS | same-direction trades normal | NEUTRAL trades both | counter-bias trades blocked only when bias is persistent AND HTF strongly aligned");
+        Print("SOFT BIAS THRESHOLD | 3 persistent bias observations + at least 2/1 HTF alignment; ordinary counter-bias setups remain tradable");
         Print("PULLBACK | hold value/structure + first live push in setup direction -> ENTER");
         Print("MOMENTUM | breakout still holds + first live push in setup direction -> ENTER");
         Print("ARM LIFE | max {0:F0}s | stale or failed setup is cancelled | no late chase", ArmLifetimeSeconds);
@@ -201,7 +201,6 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
             return;
         }
 
-        // Original V1 detector and order are unchanged: Pullback first, then Momentum.
         var setup = FindPullbackEntry(i, trend, atr) ?? FindMomentumEntry(i, trend, atr);
         if (setup == null)
         {
@@ -220,10 +219,10 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
             return;
         }
 
-        if (BiasBlocks(setup.Direction))
+        if (SoftBiasBlocks(setup.Direction))
         {
             if (setup.Direction > 0) _biasLongBlocks++; else _biasShortBlocks++;
-            Print("NAI BIAS LOCK | BLOCK {0} {1} | bias={2} | M15={3} M5={4} | bullEvidence={5} bearEvidence={6}",
+            Print("NAI SOFT BIAS | BLOCK {0} {1} | persistent bias={2} | M15={3} M5={4} | bullEvidence={5} bearEvidence={6}",
                 setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, _bias, _m15Score, _m5Score, _bullBiasEvidence, _bearBiasEvidence);
             return;
         }
@@ -267,9 +266,9 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
             return;
         }
 
-        if (BiasBlocks(arm.Setup.Direction))
+        if (SoftBiasBlocks(arm.Setup.Direction))
         {
-            CancelArmed($"direction blocked by persistent {_bias} bias", ArmCancelKind.Failed);
+            CancelArmed($"direction blocked by persistent strong {_bias} bias", ArmCancelKind.Failed);
             return;
         }
 
@@ -352,7 +351,6 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
             return true;
         }
 
-        // Momentum signal already broke structure. The live check only makes sure that breakout is not immediately reclaimed.
         var reclaimBuffer = atr * 0.03;
         if (setup.Direction > 0 && price < setup.InvalidationLevel - reclaimBuffer)
         {
@@ -420,7 +418,6 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
         _armed = null;
     }
 
-    // Exact original Runner V1 Pullback setup thresholds.
     private Setup? FindPullbackEntry(int i, int trend, double atr)
     {
         var fast = AverageClose(_m1, i - 5, i);
@@ -461,7 +458,6 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
             $"valueTouch fast={fast:F2} body={body / atr:F2}ATR signalRisk={risk / atr:F2}ATR swing={swing:F2}");
     }
 
-    // Exact original Runner V1 Momentum setup thresholds.
     private Setup? FindMomentumEntry(int i, int trend, double atr)
     {
         var open = _m1.OpenPrices[i];
@@ -508,12 +504,20 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
         return _m15Score >= 2 && _m5Score >= 2;
     }
 
-    private bool BiasBlocks(int direction)
+    private bool SoftBiasBlocks(int direction)
     {
         if (_bias == BiasState.Bull && direction < 0)
-            return true;
+        {
+            var strongBull = (_m15Score >= 2 && _m5Score >= 1) || (_m15Score >= 1 && _m5Score >= 2);
+            return _bullBiasEvidence >= 3 && strongBull;
+        }
+
         if (_bias == BiasState.Bear && direction > 0)
-            return true;
+        {
+            var strongBear = (_m15Score <= -2 && _m5Score <= -1) || (_m15Score <= -1 && _m5Score <= -2);
+            return _bearBiasEvidence >= 3 && strongBear;
+        }
+
         return false;
     }
 
@@ -816,14 +820,14 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
 
     private void PrintStats(string trigger)
     {
-        Print("=== NAI V1 LIGHT CONFIRM + BIAS STATS | {0} ===", trigger);
-        Print("LONG | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5} biasBlocked={6}", _longTrades, _longWins, _longLosses, _longScratch, _longNet, _longHtfVetoes, _biasLongBlocks);
-        Print("SHORT | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5} biasBlocked={6}", _shortTrades, _shortWins, _shortLosses, _shortScratch, _shortNet, _shortHtfVetoes, _biasShortBlocks);
+        Print("=== NAI V1 LIGHT CONFIRM + SOFT BIAS STATS | {0} ===", trigger);
+        Print("LONG | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5} softBiasBlocked={6}", _longTrades, _longWins, _longLosses, _longScratch, _longNet, _longHtfVetoes, _biasLongBlocks);
+        Print("SHORT | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5} softBiasBlocked={6}", _shortTrades, _shortWins, _shortLosses, _shortScratch, _shortNet, _shortHtfVetoes, _biasShortBlocks);
         Print("BIAS | now={0} changes={1} bullEv={2} bearEv={3} neutralEv={4}", _bias, _biasChanges, _bullBiasEvidence, _bearBiasEvidence, _neutralBiasEvidence);
         Print("LIGHT CONFIRM | armed={0} confirmed={1} expired={2} failedBeforeEntry={3} noChase={4}", _armedSetups, _armedConfirmed, _armedExpired, _armedFailed, _armedNoChase);
         Print("FILTERS | extremeMomentumBlocked={0} | pullbackInvalidationExits={1} momentumInvalidationExits={2}", _lateMomentumBlocks, _pullbackInvalidationExits, _momentumInvalidationExits);
         Print("TOTAL NET | {0:F2}", _longNet + _shortNet);
-        Print("=== END NAI V1 LIGHT CONFIRM + BIAS STATS ===");
+        Print("=== END NAI V1 LIGHT CONFIRM + SOFT BIAS STATS ===");
     }
 
     private void RefreshHtfScores()
@@ -871,7 +875,6 @@ public class NaiRunnerV1LightConfirmBiasLock : Robot
 
     private Position? FindRunnerPosition() => Positions.FirstOrDefault(p => p.SymbolName == SymbolName && p.Label == Label);
 
-    // Exact original V1 M1 trend votes.
     private void TrendVotes(int i, out int bull, out int bear)
     {
         bull = 0;
