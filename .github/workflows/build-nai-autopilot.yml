@@ -1,4 +1,4 @@
-name: Build NAI Runner V1 HTF Veto
+name: Build NAI Runner V1 Entry Confirm
 
 on:
   workflow_dispatch:
@@ -34,11 +34,11 @@ jobs:
           find ctrader/NaiAutopilot -type f -name '*.algo' -print
           ALGO="$(find ctrader/NaiAutopilot -type f -name '*.algo' | head -n 1)"
           test -n "$ALGO"
-          cp "$ALGO" NAI-Runner-V1-HTF-Veto.algo
+          cp "$ALGO" NAI-Runner-V1-Entry-Confirm.algo
 
       - name: Upload installable cBot
         uses: actions/upload-artifact@v4
         with:
-          name: NAI-Runner-V1-HTF-Veto
-          path: NAI-Runner-V1-HTF-Veto.algo
+          name: NAI-Runner-V1-Entry-Confirm
+          path: NAI-Runner-V1-Entry-Confirm.algo
           if-no-files-found: error
