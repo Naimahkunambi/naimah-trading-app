@@ -5,9 +5,9 @@ using cAlgo.API;
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiRunnerV1LightConfirmSoftBias : Robot
+public class NaiRunnerV1Live : Robot
 {
-    private const string Label = "NAI-RUNNER-V1-LIGHT-SOFT-BIAS";
+    private const string Label = "NAI-RUNNER-V1-LIVE";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
     private const double ArmLifetimeSeconds = 20.0;
 
@@ -20,7 +20,7 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
     [Parameter("Daily Equity Stop %", DefaultValue = 2.00, MinValue = 1.00, MaxValue = 5.00, Step = 0.50)]
     public double DailyEquityStopPercent { get; set; }
 
-    [Parameter("Cooldown M1 Bars", DefaultValue = 2, MinValue = 1, MaxValue = 10)]
+    [Parameter("Cooldown M1 Bars", DefaultValue = 1, MinValue = 1, MaxValue = 10)]
     public int CooldownBars { get; set; }
 
     [Parameter("ATR Period", DefaultValue = 14, MinValue = 8, MaxValue = 40)]
@@ -41,12 +41,16 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
     private DateTime _equityDay;
     private int _lastEntryIndex = -10000;
     private bool _halted;
-    private int _scanCount;
     private double? _lastStopRequestPrice;
     private int _m15Score;
     private int _m5Score;
     private TradeMeta? _activeMeta;
     private ArmedSetup? _armed;
+
+    // Prevent the same live candle/setup from re-arming repeatedly after one decision.
+    private int _lastSignalBarIndex = -1;
+    private int _lastSignalDirection;
+    private string _lastSignalName = "";
 
     private BiasState _bias = BiasState.Neutral;
     private int _bullBiasEvidence;
@@ -56,6 +60,8 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
     private int _biasShortBlocks;
     private int _biasChanges;
 
+    private long _liveScans;
+    private int _liveSetupsFound;
     private int _longTrades;
     private int _shortTrades;
     private int _longWins;
@@ -81,14 +87,14 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
     {
         if (Account.IsLive)
         {
-            Print("NAI RUNNER V1 LIGHT SOFT BIAS BLOCKED | DEMO accounts only.");
+            Print("NAI RUNNER V1 LIVE BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI RUNNER V1 LIGHT SOFT BIAS BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
+            Print("NAI RUNNER V1 LIVE BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
@@ -103,14 +109,12 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         RefreshHtfScores();
         UpdateDirectionalBias("START");
 
-        Print("NAI RUNNER V1 LIGHT CONFIRM + SOFT BIAS STARTED | {0} | DEMO | LONG+SHORT", SymbolName);
-        Print("SETUP OWNER | ORIGINAL RUNNER V1 M1 | Pullback Runner + Momentum Runner | thresholds unchanged");
-        Print("LIGHT CONFIRM | setup is already the evidence; live check only asks whether it immediately failed");
-        Print("SOFT BIAS | same-direction trades normal | NEUTRAL trades both | counter-bias trades blocked only when bias is persistent AND HTF strongly aligned");
-        Print("SOFT BIAS THRESHOLD | 3 persistent bias observations + at least 2/1 HTF alignment; ordinary counter-bias setups remain tradable");
-        Print("PULLBACK | hold value/structure + first live push in setup direction -> ENTER");
-        Print("MOMENTUM | breakout still holds + first live push in setup direction -> ENTER");
-        Print("ARM LIFE | max {0:F0}s | stale or failed setup is cancelled | no late chase", ArmLifetimeSeconds);
+        Print("NAI RUNNER V1 LIVE STARTED | {0} | DEMO | LONG+SHORT", SymbolName);
+        Print("LIVE ENGINE | scans the FORMING M1 candle on every tick; no longer waits for M1 close to discover an entry");
+        Print("SETUP OWNER | original Runner V1 Pullback + Momentum thresholds, evaluated live");
+        Print("LIVE TRIGGER | V1 setup forms -> ARM -> first continuing tick while setup remains healthy -> ENTER");
+        Print("COOLDOWN | {0} M1 bar | one position at a time", CooldownBars);
+        Print("SOFT BIAS | emergency-only extra brake; ordinary counter-bias setups remain tradable");
         Print("HTF ROLE | VETO ONLY | LONG blocked only M15<=-2 AND M5<=-2 | SHORT blocked only M15>=2 AND M5>=2");
         Print("EXIT OWNER | PULLBACK structure failure / MOMENTUM breakout failure | no generic opposite-vote exit");
         Print("RISK | {0:F2}% | TP={1:F2}R | BE={2:F2}R | TRAIL={3:F2}R", RiskPercent, TargetR, BreakEvenAtR, TrailAtR);
@@ -136,101 +140,100 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         if (_m1 == null || _m1.Count < 45 || _m5.Count < 30 || _m15.Count < 30)
             return;
 
-        var openPosition = FindRunnerPosition();
-        var liveOpen = _m1.OpenTimes[_m1.Count - 1];
+        var liveIndex = _m1.Count - 1;
+        var liveOpen = _m1.OpenTimes[liveIndex];
         var newMinute = liveOpen != _lastLiveM1Open;
 
-        if (openPosition == null && _armed != null)
+        if (newMinute)
+        {
+            _lastLiveM1Open = liveOpen;
+            RefreshHtfScores();
+            UpdateDirectionalBias("M1");
+
+            // Any unconfirmed setup belongs to the M1 candle on which it formed.
+            if (_armed != null && _armed.SignalIndex < liveIndex)
+                CancelArmed("signal M1 rolled over before confirmation", ArmCancelKind.Expired);
+
+            // Position invalidation remains closed-bar based. Entry discovery is now live.
+            var open = FindRunnerPosition();
+            if (open != null)
+            {
+                var closedIndex = _m1.Count - 2;
+                EvaluateSetupInvalidation(open, closedIndex);
+                var stillOpen = FindRunnerPosition();
+                if (stillOpen != null)
+                    PrintPositionStatus(stillOpen, closedIndex);
+            }
+        }
+
+        if (FindRunnerPosition() != null)
+            return;
+
+        if (_armed != null)
         {
             TryConfirmArmedSetup();
-            if (FindRunnerPosition() != null)
+            if (_armed != null || FindRunnerPosition() != null)
                 return;
         }
 
-        if (!newMinute)
-            return;
+        ProcessLiveSetup(liveIndex);
 
-        _lastLiveM1Open = liveOpen;
-        RefreshHtfScores();
-        UpdateDirectionalBias("M1");
-        var closedIndex = _m1.Count - 2;
-        ProcessClosedMinute(closedIndex);
-
-        if (FindRunnerPosition() == null && _armed != null)
+        if (_armed != null)
             TryConfirmArmedSetup();
     }
 
-    private void ProcessClosedMinute(int i)
+    private void ProcessLiveSetup(int i)
     {
-        _scanCount++;
+        _liveScans++;
         if (i < 35)
             return;
 
-        var open = FindRunnerPosition();
-        if (open != null)
-        {
-            EvaluateSetupInvalidation(open, i);
-            var stillOpen = FindRunnerPosition();
-            if (stillOpen != null)
-                PrintPositionStatus(stillOpen, i);
-            return;
-        }
-
-        if (_armed != null)
-            CancelArmed("new M1 closed before quick confirmation", ArmCancelKind.Expired);
-
         var barsSinceEntry = i - _lastEntryIndex;
         if (barsSinceEntry < CooldownBars)
-        {
-            Print("NAI RUNNER | WAIT | scan={0} cooldown={1}/{2}", _scanCount, barsSinceEntry, CooldownBars);
             return;
-        }
 
         var atr = Atr(_m1, i);
         if (atr <= Symbol.TickSize * 5)
-        {
-            Print("NAI RUNNER | WAIT | scan={0} ATR={1:F2} too small", _scanCount, atr);
             return;
-        }
 
         TrendVotes(i, out var bull, out var bear);
         var trend = bull >= 3 && bull > bear ? 1 : bear >= 3 && bear > bull ? -1 : 0;
         if (trend == 0)
-        {
-            Print("NAI RUNNER | WAIT | no V1 M1 direction | votes={0}/{1} | HTF M15={2} M5={3} | bias={4}", bull, bear, _m15Score, _m5Score, _bias);
             return;
-        }
 
+        // The V1 setup formulas and ordering are unchanged. The only difference is i is the live/forming M1 bar.
         var setup = FindPullbackEntry(i, trend, atr) ?? FindMomentumEntry(i, trend, atr);
         if (setup == null)
-        {
-            var fast = AverageClose(_m1, i - 5, i);
-            var slow = AverageClose(_m1, i - 17, i);
-            var distance = Math.Abs(_m1.ClosePrices[i] - fast) / atr;
-            Print("NAI RUNNER | WAIT | V1 direction={0} votes={1}/{2} but no setup | fastSlow={3:F2}ATR priceFast={4:F2}ATR | HTF {5}/{6} | bias={7}",
-                trend > 0 ? "LONG" : "SHORT", bull, bear, Math.Abs(fast - slow) / atr, distance, _m15Score, _m5Score, _bias);
             return;
-        }
+
+        // One decision per setup type/direction per live M1 bar. This prevents tick spam, not genuine new setups.
+        if (_lastSignalBarIndex == i && _lastSignalDirection == setup.Direction && _lastSignalName == setup.Name)
+            return;
+
+        _lastSignalBarIndex = i;
+        _lastSignalDirection = setup.Direction;
+        _lastSignalName = setup.Name;
+        _liveSetupsFound++;
 
         if (HtfClearlyOpposes(setup.Direction))
         {
             if (setup.Direction > 0) _longHtfVetoes++; else _shortHtfVetoes++;
-            Print("NAI HTF VETO | BLOCK {0} {1} | M15={2} M5={3} clearly opposite", setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, _m15Score, _m5Score);
+            Print("NAI LIVE HTF VETO | BLOCK {0} {1} | M15={2} M5={3}", setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, _m15Score, _m5Score);
             return;
         }
 
         if (SoftBiasBlocks(setup.Direction))
         {
             if (setup.Direction > 0) _biasLongBlocks++; else _biasShortBlocks++;
-            Print("NAI SOFT BIAS | BLOCK {0} {1} | persistent bias={2} | M15={3} M5={4} | bullEvidence={5} bearEvidence={6}",
-                setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, _bias, _m15Score, _m5Score, _bullBiasEvidence, _bearBiasEvidence);
+            Print("NAI LIVE SOFT BIAS | EMERGENCY BLOCK {0} {1} | bias={2} M15={3} M5={4}",
+                setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, _bias, _m15Score, _m5Score);
             return;
         }
 
         if (IsExtremeLateMomentum(setup, i, atr, out var lateReason))
         {
             _lateMomentumBlocks++;
-            Print("NAI LATE MOMENTUM BLOCK | {0} | {1}", setup.Direction > 0 ? "LONG" : "SHORT", lateReason);
+            Print("NAI LIVE LATE MOMENTUM BLOCK | {0} | {1}", setup.Direction > 0 ? "LONG" : "SHORT", lateReason);
             return;
         }
 
@@ -243,7 +246,7 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         _armed = new ArmedSetup(setup, signalIndex, Server.Time, watchPrice);
         _armedSetups++;
 
-        Print("NAI ARM | {0} {1} | start={2:F2} stop={3:F2} invalidation={4:F2} | bias={5} | quick live confirmation",
+        Print("NAI LIVE ARM | {0} {1} | M1 still forming | start={2:F2} stop={3:F2} invalidation={4:F2} | bias={5}",
             setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, watchPrice, setup.Stop, setup.InvalidationLevel, _bias);
     }
 
@@ -256,19 +259,25 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         var ageSeconds = (Server.Time - arm.ArmedAt).TotalSeconds;
         if (ageSeconds > ArmLifetimeSeconds)
         {
-            CancelArmed($"quick confirmation expired age={ageSeconds:F0}s", ArmCancelKind.Expired);
+            CancelArmed($"live confirmation expired age={ageSeconds:F0}s", ArmCancelKind.Expired);
+            return;
+        }
+
+        if (arm.SignalIndex != _m1.Count - 1)
+        {
+            CancelArmed("signal candle is no longer live", ArmCancelKind.Expired);
             return;
         }
 
         if (HtfClearlyOpposes(arm.Setup.Direction))
         {
-            CancelArmed($"HTF turned clearly opposite M15={_m15Score} M5={_m5Score}", ArmCancelKind.Failed);
+            CancelArmed($"HTF clearly opposite M15={_m15Score} M5={_m5Score}", ArmCancelKind.Failed);
             return;
         }
 
         if (SoftBiasBlocks(arm.Setup.Direction))
         {
-            CancelArmed($"direction blocked by persistent strong {_bias} bias", ArmCancelKind.Failed);
+            CancelArmed($"extreme counter-bias condition appeared ({_bias})", ArmCancelKind.Failed);
             return;
         }
 
@@ -284,6 +293,7 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
             return;
         }
 
+        // Light Confirm is now the live entry trigger, not a second setup system.
         var directionalPush = direction > 0
             ? confirmPrice >= arm.StartPrice + Symbol.TickSize
             : confirmPrice <= arm.StartPrice - Symbol.TickSize;
@@ -297,7 +307,7 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         var maxChaseAtr = setup.Name == "PULLBACK RUNNER" ? 0.35 : 0.30;
         if (moveFromArmAtr > maxChaseAtr)
         {
-            CancelArmed($"move already ran {moveFromArmAtr:F2}ATR from arm price", ArmCancelKind.NoChase);
+            CancelArmed($"live move already ran {moveFromArmAtr:F2}ATR from arm price", ArmCancelKind.NoChase);
             return;
         }
 
@@ -306,7 +316,7 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         var maxRiskAtr = setup.Name == "PULLBACK RUNNER" ? 1.75 : 1.60;
         if (actualRisk <= Symbol.TickSize || riskAtr > maxRiskAtr)
         {
-            CancelArmed($"confirmed entry risk too wide {riskAtr:F2}ATR", ArmCancelKind.NoChase);
+            CancelArmed($"live entry risk too wide {riskAtr:F2}ATR", ArmCancelKind.NoChase);
             return;
         }
 
@@ -388,17 +398,17 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         if (!result.IsSuccessful)
         {
             Print("NAI RUNNER | ENTRY REJECTED | {0} | {1}", setup.Name, result.Error);
-            CancelArmed("broker rejected confirmed entry", ArmCancelKind.Failed);
+            CancelArmed("broker rejected live-confirmed entry", ArmCancelKind.Failed);
             return;
         }
 
         _armedConfirmed++;
-        _lastEntryIndex = _m1.Count - 2;
+        _lastEntryIndex = arm.SignalIndex;
         _lastStopRequestPrice = null;
-        _activeMeta = new TradeMeta(setup.Direction, setup.Name, _m1.Count - 2, setup.InvalidationLevel);
+        _activeMeta = new TradeMeta(setup.Direction, setup.Name, arm.SignalIndex, setup.InvalidationLevel);
         if (tradeType == TradeType.Buy) _longTrades++; else _shortTrades++;
 
-        Print("NAI RUNNER | ENTER {0} | {1} LIGHT-CONFIRMED | entry={2:F2} stopRef={3:F2} risk={4:F2}ATR volume={5} target={6:F2}R | age={7:F1}s | HTF {8}/{9} | bias={10} | {11}",
+        Print("NAI RUNNER | ENTER {0} | {1} LIVE | entry={2:F2} stopRef={3:F2} risk={4:F2}ATR volume={5} target={6:F2}R | age={7:F1}s | HTF {8}/{9} bias={10} | {11}",
             tradeType, setup.Name, result.Position.EntryPrice, setup.Stop, riskAtr, volume, TargetR,
             (Server.Time - arm.ArmedAt).TotalSeconds, _m15Score, _m5Score, _bias, setup.Reason);
 
@@ -414,10 +424,11 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         else if (kind == ArmCancelKind.NoChase) _armedNoChase++;
         else _armedFailed++;
 
-        Print("NAI ARM | CANCEL {0} {1} | {2}", _armed.Setup.Direction > 0 ? "LONG" : "SHORT", _armed.Setup.Name, reason);
+        Print("NAI LIVE ARM | CANCEL {0} {1} | {2}", _armed.Setup.Direction > 0 ? "LONG" : "SHORT", _armed.Setup.Name, reason);
         _armed = null;
     }
 
+    // Original Runner V1 Pullback thresholds. Now evaluated against the forming M1 bar.
     private Setup? FindPullbackEntry(int i, int trend, double atr)
     {
         var fast = AverageClose(_m1, i - 5, i);
@@ -455,9 +466,10 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
             return null;
 
         return new Setup(trend, "PULLBACK RUNNER", referenceEntry, stop, risk, swing, high, low, atr,
-            $"valueTouch fast={fast:F2} body={body / atr:F2}ATR signalRisk={risk / atr:F2}ATR swing={swing:F2}");
+            $"LIVE valueTouch fast={fast:F2} body={body / atr:F2}ATR signalRisk={risk / atr:F2}ATR swing={swing:F2}");
     }
 
+    // Original Runner V1 Momentum thresholds. Now evaluated against the forming M1 bar.
     private Setup? FindMomentumEntry(int i, int trend, double atr)
     {
         var open = _m1.OpenPrices[i];
@@ -494,7 +506,7 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
 
         var breakoutLevel = trend > 0 ? priorHigh : priorLow;
         return new Setup(trend, "MOMENTUM RUNNER", referenceEntry, stop, risk, breakoutLevel, high, low, atr,
-            $"break4={breakoutLevel:F2} eff={efficiency:F2} body={body / atr:F2}ATR fastDist={distanceFromFast:F2}ATR");
+            $"LIVE break4={breakoutLevel:F2} eff={efficiency:F2} body={body / atr:F2}ATR fastDist={distanceFromFast:F2}ATR");
     }
 
     private bool HtfClearlyOpposes(int direction)
@@ -504,19 +516,14 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         return _m15Score >= 2 && _m5Score >= 2;
     }
 
+    // Soft bias is deliberately an emergency-only layer. The normal directional gate is still the V1 setup itself.
     private bool SoftBiasBlocks(int direction)
     {
         if (_bias == BiasState.Bull && direction < 0)
-        {
-            var strongBull = (_m15Score >= 2 && _m5Score >= 1) || (_m15Score >= 1 && _m5Score >= 2);
-            return _bullBiasEvidence >= 3 && strongBull;
-        }
+            return _bullBiasEvidence >= 4 && _m15Score >= 3 && _m5Score >= 3;
 
         if (_bias == BiasState.Bear && direction > 0)
-        {
-            var strongBear = (_m15Score <= -2 && _m5Score <= -1) || (_m15Score <= -1 && _m5Score <= -2);
-            return _bearBiasEvidence >= 3 && strongBear;
-        }
+            return _bearBiasEvidence >= 4 && _m15Score <= -3 && _m5Score <= -3;
 
         return false;
     }
@@ -605,11 +612,6 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
             Print("NAI BIAS | CHANGE {0} -> {1} | source={2} M15={3} M5={4} bullEv={5} bearEv={6}",
                 before, _bias, source, _m15Score, _m5Score, _bullBiasEvidence, _bearBiasEvidence);
         }
-        else
-        {
-            Print("NAI BIAS | HOLD {0} | M15={1} M5={2} bullEv={3} bearEv={4} neutralEv={5}",
-                _bias, _m15Score, _m5Score, _bullBiasEvidence, _bearBiasEvidence, _neutralBiasEvidence);
-        }
     }
 
     private bool IsExtremeLateMomentum(Setup setup, int i, double atr, out string reason)
@@ -634,6 +636,7 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         return false;
     }
 
+    // Position management is unchanged. Entry is live, but invalidation remains based on closed M1 evidence.
     private void EvaluateSetupInvalidation(Position p, int i)
     {
         var meta = _activeMeta;
@@ -820,14 +823,15 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
 
     private void PrintStats(string trigger)
     {
-        Print("=== NAI V1 LIGHT CONFIRM + SOFT BIAS STATS | {0} ===", trigger);
+        Print("=== NAI V1 LIVE STATS | {0} ===", trigger);
+        Print("LIVE ENGINE | tickScans={0} setupsFound={1} armed={2} confirmed={3} expired={4} failedBeforeEntry={5} noChase={6}",
+            _liveScans, _liveSetupsFound, _armedSetups, _armedConfirmed, _armedExpired, _armedFailed, _armedNoChase);
         Print("LONG | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5} softBiasBlocked={6}", _longTrades, _longWins, _longLosses, _longScratch, _longNet, _longHtfVetoes, _biasLongBlocks);
         Print("SHORT | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5} softBiasBlocked={6}", _shortTrades, _shortWins, _shortLosses, _shortScratch, _shortNet, _shortHtfVetoes, _biasShortBlocks);
         Print("BIAS | now={0} changes={1} bullEv={2} bearEv={3} neutralEv={4}", _bias, _biasChanges, _bullBiasEvidence, _bearBiasEvidence, _neutralBiasEvidence);
-        Print("LIGHT CONFIRM | armed={0} confirmed={1} expired={2} failedBeforeEntry={3} noChase={4}", _armedSetups, _armedConfirmed, _armedExpired, _armedFailed, _armedNoChase);
         Print("FILTERS | extremeMomentumBlocked={0} | pullbackInvalidationExits={1} momentumInvalidationExits={2}", _lateMomentumBlocks, _pullbackInvalidationExits, _momentumInvalidationExits);
         Print("TOTAL NET | {0:F2}", _longNet + _shortNet);
-        Print("=== END NAI V1 LIGHT CONFIRM + SOFT BIAS STATS ===");
+        Print("=== END NAI V1 LIVE STATS ===");
     }
 
     private void RefreshHtfScores()
@@ -923,6 +927,7 @@ public class NaiRunnerV1LightConfirmSoftBias : Robot
         _dayStartEquity = Account.Equity;
         _halted = false;
         _armed = null;
+        _lastSignalBarIndex = -1;
         Print("NAI RUNNER | NEW DAY | equity anchor={0:F2}", _dayStartEquity);
     }
 
