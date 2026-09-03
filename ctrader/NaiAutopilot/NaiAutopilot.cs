@@ -5,10 +5,11 @@ using cAlgo.API;
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiRunnerV1HtfVeto : Robot
+public class NaiRunnerV1EntryConfirm : Robot
 {
-    private const string Label = "NAI-RUNNER-V1-HTF-VETO";
+    private const string Label = "NAI-RUNNER-V1-ENTRY-CONFIRM";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
+    private const double ArmLifetimeSeconds = 55.0;
 
     [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 1.00, Step = 0.10)]
     public double RiskPercent { get; set; }
@@ -45,6 +46,7 @@ public class NaiRunnerV1HtfVeto : Robot
     private int _m15Score;
     private int _m5Score;
     private TradeMeta? _activeMeta;
+    private ArmedSetup? _armed;
 
     private int _longTrades;
     private int _shortTrades;
@@ -59,6 +61,11 @@ public class NaiRunnerV1HtfVeto : Robot
     private int _lateMomentumBlocks;
     private int _pullbackInvalidationExits;
     private int _momentumInvalidationExits;
+    private int _armedSetups;
+    private int _armedConfirmed;
+    private int _armedExpired;
+    private int _armedFailed;
+    private int _armedNoChase;
     private double _longNet;
     private double _shortNet;
 
@@ -66,14 +73,14 @@ public class NaiRunnerV1HtfVeto : Robot
     {
         if (Account.IsLive)
         {
-            Print("NAI RUNNER V1 HTF VETO BLOCKED | DEMO accounts only.");
+            Print("NAI RUNNER V1 ENTRY CONFIRM BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI RUNNER V1 HTF VETO BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
+            Print("NAI RUNNER V1 ENTRY CONFIRM BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
@@ -87,13 +94,15 @@ public class NaiRunnerV1HtfVeto : Robot
         Positions.Closed += OnPositionClosed;
         RefreshHtfScores();
 
-        Print("NAI RUNNER V1 HTF VETO STARTED | {0} | DEMO | LONG+SHORT", SymbolName);
-        Print("ENTRY OWNER | ORIGINAL RUNNER V1 M1 | Pullback Runner + Momentum Runner | mirrored both directions");
-        Print("HTF ROLE | VETO ONLY | M15/M5 never need to grant permission; they only block a setup when BOTH are clearly opposite");
-        Print("LONG blocked only when M15<=-2 AND M5<=-2 | SHORT blocked only when M15>=2 AND M5>=2");
-        Print("EXIT OWNER | PULLBACK structure failure / MOMENTUM breakout failure | no generic opposite-vote panic exit");
+        Print("NAI RUNNER V1 ENTRY CONFIRM STARTED | {0} | DEMO | LONG+SHORT", SymbolName);
+        Print("SETUP OWNER | ORIGINAL RUNNER V1 M1 | Pullback Runner + Momentum Runner | thresholds unchanged");
+        Print("ENTRY FIX | setup -> ARM -> signal high/low break -> live hold/continuation -> ENTER");
+        Print("PULLBACK CONFIRM | break signal candle high/low + 1 additional advancing tick");
+        Print("MOMENTUM CONFIRM | break signal candle high/low + 2 additional advancing ticks");
+        Print("ARM LIFE | max {0:F0}s | stale setup expires; missed move is not chased", ArmLifetimeSeconds);
+        Print("HTF ROLE | VETO ONLY | LONG blocked only M15<=-2 AND M5<=-2 | SHORT blocked only M15>=2 AND M5>=2");
+        Print("EXIT OWNER | PULLBACK structure failure / MOMENTUM breakout failure | no generic opposite-vote exit");
         Print("RISK | {0:F2}% | TP={1:F2}R | BE={2:F2}R | TRAIL={3:F2}R", RiskPercent, TargetR, BreakEvenAtR, TrailAtR);
-        Print("HTF NOW | M15={0} M5={1}", _m15Score, _m5Score);
     }
 
     protected override void OnStop()
@@ -116,14 +125,27 @@ public class NaiRunnerV1HtfVeto : Robot
         if (_m1 == null || _m1.Count < 45 || _m5.Count < 30 || _m15.Count < 30)
             return;
 
+        var openPosition = FindRunnerPosition();
         var liveOpen = _m1.OpenTimes[_m1.Count - 1];
-        if (liveOpen == _lastLiveM1Open)
+        var newMinute = liveOpen != _lastLiveM1Open;
+
+        if (openPosition == null && _armed != null)
+        {
+            TryConfirmArmedSetup();
+            if (FindRunnerPosition() != null)
+                return;
+        }
+
+        if (!newMinute)
             return;
 
         _lastLiveM1Open = liveOpen;
-        var closedIndex = _m1.Count - 2;
         RefreshHtfScores();
+        var closedIndex = _m1.Count - 2;
         ProcessClosedMinute(closedIndex);
+
+        if (FindRunnerPosition() == null && _armed != null)
+            TryConfirmArmedSetup();
     }
 
     private void ProcessClosedMinute(int i)
@@ -141,6 +163,10 @@ public class NaiRunnerV1HtfVeto : Robot
                 PrintPositionStatus(stillOpen, i);
             return;
         }
+
+        // A setup belongs to the candle that created it. Do not carry it into a new closed M1 candle.
+        if (_armed != null)
+            CancelArmed("new M1 closed before confirmation", ArmCancelKind.Expired);
 
         var barsSinceEntry = i - _lastEntryIndex;
         if (barsSinceEntry < CooldownBars)
@@ -164,7 +190,7 @@ public class NaiRunnerV1HtfVeto : Robot
             return;
         }
 
-        // Exact original V1 order: Pullback first, then Momentum.
+        // Original V1 detector and order are unchanged: Pullback first, then Momentum.
         var setup = FindPullbackEntry(i, trend, atr) ?? FindMomentumEntry(i, trend, atr);
         if (setup == null)
         {
@@ -190,10 +216,178 @@ public class NaiRunnerV1HtfVeto : Robot
             return;
         }
 
-        ExecuteSetup(setup, i);
+        ArmSetup(setup, i);
     }
 
-    // Exact original Runner V1 Pullback entry thresholds.
+    private void ArmSetup(Setup setup, int signalIndex)
+    {
+        var trigger = setup.Direction > 0
+            ? setup.SignalHigh + Symbol.TickSize
+            : setup.SignalLow - Symbol.TickSize;
+
+        _armed = new ArmedSetup(setup, signalIndex, Server.Time, trigger);
+        _armedSetups++;
+
+        Print("NAI ARM | {0} {1} | trigger={2:F2} stop={3:F2} invalidation={4:F2} | signalH={5:F2} signalL={6:F2} | waiting live resumption",
+            setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, trigger, setup.Stop, setup.InvalidationLevel, setup.SignalHigh, setup.SignalLow);
+    }
+
+    private void TryConfirmArmedSetup()
+    {
+        var arm = _armed;
+        if (arm == null || FindRunnerPosition() != null)
+            return;
+
+        var ageSeconds = (Server.Time - arm.ArmedAt).TotalSeconds;
+        if (ageSeconds > ArmLifetimeSeconds)
+        {
+            CancelArmed($"confirmation expired age={ageSeconds:F0}s", ArmCancelKind.Expired);
+            return;
+        }
+
+        if (HtfClearlyOpposes(arm.Setup.Direction))
+        {
+            CancelArmed($"HTF turned clearly opposite M15={_m15Score} M5={_m5Score}", ArmCancelKind.Failed);
+            return;
+        }
+
+        var direction = arm.Setup.Direction;
+        var confirmPrice = direction > 0 ? Symbol.Bid : Symbol.Ask;
+        var entryPrice = direction > 0 ? Symbol.Ask : Symbol.Bid;
+        var atr = arm.Setup.SignalAtr;
+
+        if (ArmStructureFailed(arm, confirmPrice))
+        {
+            CancelArmed("setup structure failed before confirmation", ArmCancelKind.Failed);
+            return;
+        }
+
+        var crossed = direction > 0 ? confirmPrice >= arm.Trigger : confirmPrice <= arm.Trigger;
+        if (!arm.BreakSeen)
+        {
+            if (!crossed)
+                return;
+
+            arm.BreakSeen = true;
+            arm.ConfirmTicks = 1;
+            arm.LastConfirmPrice = confirmPrice;
+            Print("NAI CONFIRM | BREAK SEEN {0} {1} | price={2:F2} trigger={3:F2}", direction > 0 ? "LONG" : "SHORT", arm.Setup.Name, confirmPrice, arm.Trigger);
+            return;
+        }
+
+        var failedBreak = direction > 0
+            ? confirmPrice < arm.Trigger - Symbol.TickSize
+            : confirmPrice > arm.Trigger + Symbol.TickSize;
+        if (failedBreak)
+        {
+            arm.BreakSeen = false;
+            arm.ConfirmTicks = 0;
+            arm.LastConfirmPrice = 0;
+            Print("NAI CONFIRM | BREAK DID NOT HOLD | {0} {1} | back behind trigger", direction > 0 ? "LONG" : "SHORT", arm.Setup.Name);
+            return;
+        }
+
+        var advanced = direction > 0
+            ? confirmPrice > arm.LastConfirmPrice + Symbol.TickSize * 0.25
+            : confirmPrice < arm.LastConfirmPrice - Symbol.TickSize * 0.25;
+        if (advanced)
+        {
+            arm.ConfirmTicks++;
+            arm.LastConfirmPrice = confirmPrice;
+        }
+
+        var requiredTicks = arm.Setup.Name == "PULLBACK RUNNER" ? 2 : 3;
+        if (arm.ConfirmTicks < requiredTicks)
+            return;
+
+        var beyondTriggerAtr = direction > 0
+            ? (entryPrice - arm.Trigger) / atr
+            : (arm.Trigger - entryPrice) / atr;
+        var maxChaseAtr = arm.Setup.Name == "PULLBACK RUNNER" ? 0.18 : 0.20;
+        if (beyondTriggerAtr > maxChaseAtr)
+        {
+            CancelArmed($"confirmation came too late/chased {beyondTriggerAtr:F2}ATR beyond trigger", ArmCancelKind.NoChase);
+            return;
+        }
+
+        var actualRisk = Math.Abs(entryPrice - arm.Setup.Stop);
+        var riskAtr = actualRisk / atr;
+        var maxRiskAtr = arm.Setup.Name == "PULLBACK RUNNER" ? 1.75 : 1.60;
+        if (actualRisk <= Symbol.TickSize || riskAtr > maxRiskAtr)
+        {
+            CancelArmed($"confirmed entry risk too wide {riskAtr:F2}ATR", ArmCancelKind.NoChase);
+            return;
+        }
+
+        ExecuteConfirmedSetup(arm, entryPrice, actualRisk, riskAtr);
+    }
+
+    private bool ArmStructureFailed(ArmedSetup arm, double price)
+    {
+        var s = arm.Setup;
+        if (s.Name == "PULLBACK RUNNER")
+            return s.Direction > 0 ? price <= s.Stop : price >= s.Stop;
+
+        var buffer = s.SignalAtr * 0.08;
+        return s.Direction > 0
+            ? price < s.InvalidationLevel - buffer
+            : price > s.InvalidationLevel + buffer;
+    }
+
+    private void ExecuteConfirmedSetup(ArmedSetup arm, double referenceEntry, double actualRisk, double riskAtr)
+    {
+        var setup = arm.Setup;
+        var stopPips = actualRisk / Symbol.PipSize;
+        var tpPips = stopPips * TargetR;
+        if (stopPips <= 0 || tpPips <= 0)
+            return;
+
+        var volume = Symbol.VolumeForProportionalRisk(ProportionalAmountType.Equity, RiskPercent, stopPips, RoundingMode.Down);
+        volume = Symbol.NormalizeVolumeInUnits(volume, RoundingMode.Down);
+        if (volume < Symbol.VolumeInUnitsMin)
+        {
+            CancelArmed($"risk-size {volume} below broker minimum", ArmCancelKind.Failed);
+            return;
+        }
+
+        volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
+        var tradeType = setup.Direction > 0 ? TradeType.Buy : TradeType.Sell;
+        var result = ExecuteMarketOrder(tradeType, SymbolName, volume, Label, stopPips, tpPips, setup.Name);
+
+        if (!result.IsSuccessful)
+        {
+            Print("NAI RUNNER | ENTRY REJECTED | {0} | {1}", setup.Name, result.Error);
+            CancelArmed("broker rejected confirmed entry", ArmCancelKind.Failed);
+            return;
+        }
+
+        _armedConfirmed++;
+        _lastEntryIndex = _m1.Count - 1;
+        _lastStopRequestPrice = null;
+        _activeMeta = new TradeMeta(setup.Direction, setup.Name, _m1.Count - 1, setup.InvalidationLevel);
+        if (tradeType == TradeType.Buy) _longTrades++; else _shortTrades++;
+
+        Print("NAI RUNNER | ENTER {0} | {1} CONFIRMED | entry={2:F2} stopRef={3:F2} risk={4:F2}ATR volume={5} target={6:F2}R | confirmTicks={7} age={8:F1}s | HTF {9}/{10} | {11}",
+            tradeType, setup.Name, result.Position.EntryPrice, setup.Stop, riskAtr, volume, TargetR,
+            arm.ConfirmTicks, (Server.Time - arm.ArmedAt).TotalSeconds, _m15Score, _m5Score, setup.Reason);
+
+        _armed = null;
+    }
+
+    private void CancelArmed(string reason, ArmCancelKind kind)
+    {
+        if (_armed == null)
+            return;
+
+        if (kind == ArmCancelKind.Expired) _armedExpired++;
+        else if (kind == ArmCancelKind.NoChase) _armedNoChase++;
+        else _armedFailed++;
+
+        Print("NAI ARM | CANCEL {0} {1} | {2}", _armed.Setup.Direction > 0 ? "LONG" : "SHORT", _armed.Setup.Name, reason);
+        _armed = null;
+    }
+
+    // Exact original Runner V1 Pullback setup thresholds.
     private Setup? FindPullbackEntry(int i, int trend, double atr)
     {
         var fast = AverageClose(_m1, i - 5, i);
@@ -217,25 +411,24 @@ public class NaiRunnerV1HtfVeto : Robot
         if (!touchedValue || !closedBack || !candleAligned || !closeStrong || body < atr * 0.12)
             return null;
 
-        var entry = trend > 0 ? Symbol.Ask : Symbol.Bid;
+        var referenceEntry = trend > 0 ? Symbol.Ask : Symbol.Bid;
         var swing = trend > 0 ? LowestLow(_m1, i - 4, i) : HighestHigh(_m1, i - 4, i);
         var stop = trend > 0 ? swing - atr * 0.10 : swing + atr * 0.10;
-        var risk = Math.Abs(entry - stop);
+        var risk = Math.Abs(referenceEntry - stop);
 
         if (risk < atr * 0.45)
         {
             risk = atr * 0.55;
-            stop = trend > 0 ? entry - risk : entry + risk;
+            stop = trend > 0 ? referenceEntry - risk : referenceEntry + risk;
         }
         if (risk > atr * 1.55)
             return null;
 
-        var target = trend > 0 ? entry + risk * TargetR : entry - risk * TargetR;
-        return new Setup(trend, "PULLBACK RUNNER", entry, stop, target, risk, swing,
-            $"valueTouch fast={fast:F2} body={body / atr:F2}ATR risk={risk / atr:F2}ATR swing={swing:F2}");
+        return new Setup(trend, "PULLBACK RUNNER", referenceEntry, stop, risk, swing, high, low, atr,
+            $"valueTouch fast={fast:F2} body={body / atr:F2}ATR signalRisk={risk / atr:F2}ATR swing={swing:F2}");
     }
 
-    // Exact original Runner V1 Momentum entry thresholds.
+    // Exact original Runner V1 Momentum setup thresholds.
     private Setup? FindMomentumEntry(int i, int trend, double atr)
     {
         var open = _m1.OpenPrices[i];
@@ -257,22 +450,21 @@ public class NaiRunnerV1HtfVeto : Robot
         if (!broke || !aligned || !closeStrong || body < atr * 0.28 || efficiency < 0.48 || distanceFromFast > 1.25)
             return null;
 
-        var entry = trend > 0 ? Symbol.Ask : Symbol.Bid;
+        var referenceEntry = trend > 0 ? Symbol.Ask : Symbol.Bid;
         var swing = trend > 0 ? LowestLow(_m1, i - 3, i) : HighestHigh(_m1, i - 3, i);
         var stop = trend > 0 ? swing - atr * 0.08 : swing + atr * 0.08;
-        var risk = Math.Abs(entry - stop);
+        var risk = Math.Abs(referenceEntry - stop);
 
         if (risk < atr * 0.50)
         {
             risk = atr * 0.60;
-            stop = trend > 0 ? entry - risk : entry + risk;
+            stop = trend > 0 ? referenceEntry - risk : referenceEntry + risk;
         }
         if (risk > atr * 1.40)
             return null;
 
-        var target = trend > 0 ? entry + risk * TargetR : entry - risk * TargetR;
         var breakoutLevel = trend > 0 ? priorHigh : priorLow;
-        return new Setup(trend, "MOMENTUM RUNNER", entry, stop, target, risk, breakoutLevel,
+        return new Setup(trend, "MOMENTUM RUNNER", referenceEntry, stop, risk, breakoutLevel, high, low, atr,
             $"break4={breakoutLevel:F2} eff={efficiency:F2} body={body / atr:F2}ATR fastDist={distanceFromFast:F2}ATR");
     }
 
@@ -305,42 +497,6 @@ public class NaiRunnerV1HtfVeto : Robot
         return false;
     }
 
-    private void ExecuteSetup(Setup setup, int i)
-    {
-        var stopPips = Math.Abs(setup.Entry - setup.Stop) / Symbol.PipSize;
-        var tpPips = Math.Abs(setup.Target - setup.Entry) / Symbol.PipSize;
-        if (stopPips <= 0 || tpPips <= 0)
-            return;
-
-        var volume = Symbol.VolumeForProportionalRisk(ProportionalAmountType.Equity, RiskPercent, stopPips, RoundingMode.Down);
-        volume = Symbol.NormalizeVolumeInUnits(volume, RoundingMode.Down);
-
-        if (volume < Symbol.VolumeInUnitsMin)
-        {
-            Print("NAI RUNNER | SKIP | risk-size {0} below broker min {1} | stop={2:F0} pips", volume, Symbol.VolumeInUnitsMin, stopPips);
-            return;
-        }
-
-        volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
-        var tradeType = setup.Direction > 0 ? TradeType.Buy : TradeType.Sell;
-        var result = ExecuteMarketOrder(tradeType, SymbolName, volume, Label, stopPips, tpPips, setup.Name);
-
-        if (!result.IsSuccessful)
-        {
-            Print("NAI RUNNER | ENTRY REJECTED | {0} | {1}", setup.Name, result.Error);
-            return;
-        }
-
-        _lastEntryIndex = i;
-        _lastStopRequestPrice = null;
-        _activeMeta = new TradeMeta(setup.Direction, setup.Name, i, setup.InvalidationLevel);
-        if (tradeType == TradeType.Buy) _longTrades++; else _shortTrades++;
-
-        Print("NAI RUNNER | ENTER {0} | {1} | entry={2} SL={3} TP={4} volume={5} target={6:F2}R | HTF M15={7} M5={8} | invalidation={9:F2} | {10}",
-            tradeType, setup.Name, result.Position.EntryPrice, setup.Stop, setup.Target, volume, TargetR,
-            _m15Score, _m5Score, setup.InvalidationLevel, setup.Reason);
-    }
-
     private void EvaluateSetupInvalidation(Position p, int i)
     {
         var meta = _activeMeta;
@@ -359,7 +515,6 @@ public class NaiRunnerV1HtfVeto : Robot
         var price = p.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
         var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
         var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
-
         if (r >= BreakEvenAtR)
             return;
 
@@ -528,12 +683,13 @@ public class NaiRunnerV1HtfVeto : Robot
 
     private void PrintStats(string trigger)
     {
-        Print("=== NAI V1 HTF VETO STATS | {0} ===", trigger);
+        Print("=== NAI V1 ENTRY CONFIRM STATS | {0} ===", trigger);
         Print("LONG | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5}", _longTrades, _longWins, _longLosses, _longScratch, _longNet, _longHtfVetoes);
         Print("SHORT | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5}", _shortTrades, _shortWins, _shortLosses, _shortScratch, _shortNet, _shortHtfVetoes);
+        Print("ENTRY CONFIRM | armed={0} confirmed={1} expired={2} failedBeforeEntry={3} noChase={4}", _armedSetups, _armedConfirmed, _armedExpired, _armedFailed, _armedNoChase);
         Print("FILTERS | extremeMomentumBlocked={0} | pullbackInvalidationExits={1} momentumInvalidationExits={2}", _lateMomentumBlocks, _pullbackInvalidationExits, _momentumInvalidationExits);
         Print("TOTAL NET | {0:F2}", _longNet + _shortNet);
-        Print("=== END NAI V1 HTF VETO STATS ===");
+        Print("=== END NAI V1 ENTRY CONFIRM STATS ===");
     }
 
     private void RefreshHtfScores()
@@ -629,6 +785,7 @@ public class NaiRunnerV1HtfVeto : Robot
         _equityDay = Server.Time.Date;
         _dayStartEquity = Account.Equity;
         _halted = false;
+        _armed = null;
         Print("NAI RUNNER | NEW DAY | equity anchor={0:F2}", _dayStartEquity);
     }
 
@@ -641,6 +798,7 @@ public class NaiRunnerV1HtfVeto : Robot
             return false;
 
         _halted = true;
+        _armed = null;
         var p = FindRunnerPosition();
         if (p != null)
             ClosePosition(p);
@@ -722,6 +880,43 @@ public class NaiRunnerV1HtfVeto : Robot
         return v;
     }
 
-    private sealed record Setup(int Direction, string Name, double Entry, double Stop, double Target, double Risk, double InvalidationLevel, string Reason);
+    private enum ArmCancelKind
+    {
+        Expired,
+        Failed,
+        NoChase
+    }
+
+    private sealed record Setup(
+        int Direction,
+        string Name,
+        double ReferenceEntry,
+        double Stop,
+        double SignalRisk,
+        double InvalidationLevel,
+        double SignalHigh,
+        double SignalLow,
+        double SignalAtr,
+        string Reason);
+
+    private sealed class ArmedSetup
+    {
+        public ArmedSetup(Setup setup, int signalIndex, DateTime armedAt, double trigger)
+        {
+            Setup = setup;
+            SignalIndex = signalIndex;
+            ArmedAt = armedAt;
+            Trigger = trigger;
+        }
+
+        public Setup Setup { get; }
+        public int SignalIndex { get; }
+        public DateTime ArmedAt { get; }
+        public double Trigger { get; }
+        public bool BreakSeen { get; set; }
+        public int ConfirmTicks { get; set; }
+        public double LastConfirmPrice { get; set; }
+    }
+
     private sealed record TradeMeta(int Direction, string SetupName, int EntryBarIndex, double InvalidationLevel);
 }
