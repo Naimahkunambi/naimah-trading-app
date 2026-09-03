@@ -5,9 +5,9 @@ using cAlgo.API;
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiRunnerV1LightConfirm : Robot
+public class NaiRunnerV1LightConfirmBiasLock : Robot
 {
-    private const string Label = "NAI-RUNNER-V1-LIGHT-CONFIRM";
+    private const string Label = "NAI-RUNNER-V1-LIGHT-BIAS";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
     private const double ArmLifetimeSeconds = 20.0;
 
@@ -48,6 +48,14 @@ public class NaiRunnerV1LightConfirm : Robot
     private TradeMeta? _activeMeta;
     private ArmedSetup? _armed;
 
+    private BiasState _bias = BiasState.Neutral;
+    private int _bullBiasEvidence;
+    private int _bearBiasEvidence;
+    private int _neutralBiasEvidence;
+    private int _biasLongBlocks;
+    private int _biasShortBlocks;
+    private int _biasChanges;
+
     private int _longTrades;
     private int _shortTrades;
     private int _longWins;
@@ -73,14 +81,14 @@ public class NaiRunnerV1LightConfirm : Robot
     {
         if (Account.IsLive)
         {
-            Print("NAI RUNNER V1 LIGHT CONFIRM BLOCKED | DEMO accounts only.");
+            Print("NAI RUNNER V1 LIGHT BIAS BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI RUNNER V1 LIGHT CONFIRM BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
+            Print("NAI RUNNER V1 LIGHT BIAS BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
@@ -93,10 +101,13 @@ public class NaiRunnerV1LightConfirm : Robot
 
         Positions.Closed += OnPositionClosed;
         RefreshHtfScores();
+        UpdateDirectionalBias("START");
 
-        Print("NAI RUNNER V1 LIGHT CONFIRM STARTED | {0} | DEMO | LONG+SHORT", SymbolName);
+        Print("NAI RUNNER V1 LIGHT CONFIRM + BIAS LOCK STARTED | {0} | DEMO | LONG+SHORT", SymbolName);
         Print("SETUP OWNER | ORIGINAL RUNNER V1 M1 | Pullback Runner + Momentum Runner | thresholds unchanged");
         Print("LIGHT CONFIRM | setup is already the evidence; live check only asks whether it immediately failed");
+        Print("BIAS LOCK | BULL blocks SHORT | BEAR blocks LONG | NEUTRAL allows BOTH");
+        Print("BIAS HYSTERESIS | repeated evidence required; BULL/BEAR cannot flip directly through one candle");
         Print("PULLBACK | hold value/structure + first live push in setup direction -> ENTER");
         Print("MOMENTUM | breakout still holds + first live push in setup direction -> ENTER");
         Print("ARM LIFE | max {0:F0}s | stale or failed setup is cancelled | no late chase", ArmLifetimeSeconds);
@@ -141,6 +152,7 @@ public class NaiRunnerV1LightConfirm : Robot
 
         _lastLiveM1Open = liveOpen;
         RefreshHtfScores();
+        UpdateDirectionalBias("M1");
         var closedIndex = _m1.Count - 2;
         ProcessClosedMinute(closedIndex);
 
@@ -185,7 +197,7 @@ public class NaiRunnerV1LightConfirm : Robot
         var trend = bull >= 3 && bull > bear ? 1 : bear >= 3 && bear > bull ? -1 : 0;
         if (trend == 0)
         {
-            Print("NAI RUNNER | WAIT | no V1 M1 direction | votes={0}/{1} | HTF M15={2} M5={3}", bull, bear, _m15Score, _m5Score);
+            Print("NAI RUNNER | WAIT | no V1 M1 direction | votes={0}/{1} | HTF M15={2} M5={3} | bias={4}", bull, bear, _m15Score, _m5Score, _bias);
             return;
         }
 
@@ -196,8 +208,8 @@ public class NaiRunnerV1LightConfirm : Robot
             var fast = AverageClose(_m1, i - 5, i);
             var slow = AverageClose(_m1, i - 17, i);
             var distance = Math.Abs(_m1.ClosePrices[i] - fast) / atr;
-            Print("NAI RUNNER | WAIT | V1 direction={0} votes={1}/{2} but no setup | fastSlow={3:F2}ATR priceFast={4:F2}ATR | HTF {5}/{6}",
-                trend > 0 ? "LONG" : "SHORT", bull, bear, Math.Abs(fast - slow) / atr, distance, _m15Score, _m5Score);
+            Print("NAI RUNNER | WAIT | V1 direction={0} votes={1}/{2} but no setup | fastSlow={3:F2}ATR priceFast={4:F2}ATR | HTF {5}/{6} | bias={7}",
+                trend > 0 ? "LONG" : "SHORT", bull, bear, Math.Abs(fast - slow) / atr, distance, _m15Score, _m5Score, _bias);
             return;
         }
 
@@ -205,6 +217,14 @@ public class NaiRunnerV1LightConfirm : Robot
         {
             if (setup.Direction > 0) _longHtfVetoes++; else _shortHtfVetoes++;
             Print("NAI HTF VETO | BLOCK {0} {1} | M15={2} M5={3} clearly opposite", setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, _m15Score, _m5Score);
+            return;
+        }
+
+        if (BiasBlocks(setup.Direction))
+        {
+            if (setup.Direction > 0) _biasLongBlocks++; else _biasShortBlocks++;
+            Print("NAI BIAS LOCK | BLOCK {0} {1} | bias={2} | M15={3} M5={4} | bullEvidence={5} bearEvidence={6}",
+                setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, _bias, _m15Score, _m5Score, _bullBiasEvidence, _bearBiasEvidence);
             return;
         }
 
@@ -224,8 +244,8 @@ public class NaiRunnerV1LightConfirm : Robot
         _armed = new ArmedSetup(setup, signalIndex, Server.Time, watchPrice);
         _armedSetups++;
 
-        Print("NAI ARM | {0} {1} | start={2:F2} stop={3:F2} invalidation={4:F2} | quick live confirmation",
-            setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, watchPrice, setup.Stop, setup.InvalidationLevel);
+        Print("NAI ARM | {0} {1} | start={2:F2} stop={3:F2} invalidation={4:F2} | bias={5} | quick live confirmation",
+            setup.Direction > 0 ? "LONG" : "SHORT", setup.Name, watchPrice, setup.Stop, setup.InvalidationLevel, _bias);
     }
 
     private void TryConfirmArmedSetup()
@@ -244,6 +264,12 @@ public class NaiRunnerV1LightConfirm : Robot
         if (HtfClearlyOpposes(arm.Setup.Direction))
         {
             CancelArmed($"HTF turned clearly opposite M15={_m15Score} M5={_m5Score}", ArmCancelKind.Failed);
+            return;
+        }
+
+        if (BiasBlocks(arm.Setup.Direction))
+        {
+            CancelArmed($"direction blocked by persistent {_bias} bias", ArmCancelKind.Failed);
             return;
         }
 
@@ -374,9 +400,9 @@ public class NaiRunnerV1LightConfirm : Robot
         _activeMeta = new TradeMeta(setup.Direction, setup.Name, _m1.Count - 2, setup.InvalidationLevel);
         if (tradeType == TradeType.Buy) _longTrades++; else _shortTrades++;
 
-        Print("NAI RUNNER | ENTER {0} | {1} LIGHT-CONFIRMED | entry={2:F2} stopRef={3:F2} risk={4:F2}ATR volume={5} target={6:F2}R | age={7:F1}s | HTF {8}/{9} | {10}",
+        Print("NAI RUNNER | ENTER {0} | {1} LIGHT-CONFIRMED | entry={2:F2} stopRef={3:F2} risk={4:F2}ATR volume={5} target={6:F2}R | age={7:F1}s | HTF {8}/{9} | bias={10} | {11}",
             tradeType, setup.Name, result.Position.EntryPrice, setup.Stop, riskAtr, volume, TargetR,
-            (Server.Time - arm.ArmedAt).TotalSeconds, _m15Score, _m5Score, setup.Reason);
+            (Server.Time - arm.ArmedAt).TotalSeconds, _m15Score, _m5Score, _bias, setup.Reason);
 
         _armed = null;
     }
@@ -480,6 +506,106 @@ public class NaiRunnerV1LightConfirm : Robot
         if (direction > 0)
             return _m15Score <= -2 && _m5Score <= -2;
         return _m15Score >= 2 && _m5Score >= 2;
+    }
+
+    private bool BiasBlocks(int direction)
+    {
+        if (_bias == BiasState.Bull && direction < 0)
+            return true;
+        if (_bias == BiasState.Bear && direction > 0)
+            return true;
+        return false;
+    }
+
+    private void UpdateDirectionalBias(string source)
+    {
+        var bullSignal = (_m15Score >= 1 && _m5Score >= 1)
+            || (_m15Score >= 2 && _m5Score >= 0)
+            || (_m5Score >= 3 && _m15Score >= 0);
+        var bearSignal = (_m15Score <= -1 && _m5Score <= -1)
+            || (_m15Score <= -2 && _m5Score <= 0)
+            || (_m5Score <= -3 && _m15Score <= 0);
+
+        if (bullSignal && !bearSignal)
+        {
+            _bullBiasEvidence = Math.Min(5, _bullBiasEvidence + 1);
+            _bearBiasEvidence = 0;
+            _neutralBiasEvidence = 0;
+        }
+        else if (bearSignal && !bullSignal)
+        {
+            _bearBiasEvidence = Math.Min(5, _bearBiasEvidence + 1);
+            _bullBiasEvidence = 0;
+            _neutralBiasEvidence = 0;
+        }
+        else
+        {
+            _neutralBiasEvidence = Math.Min(5, _neutralBiasEvidence + 1);
+            _bullBiasEvidence = Math.Max(0, _bullBiasEvidence - 1);
+            _bearBiasEvidence = Math.Max(0, _bearBiasEvidence - 1);
+        }
+
+        var before = _bias;
+
+        if (_bias == BiasState.Neutral)
+        {
+            if (_bullBiasEvidence >= 2)
+            {
+                _bias = BiasState.Bull;
+                _neutralBiasEvidence = 0;
+            }
+            else if (_bearBiasEvidence >= 2)
+            {
+                _bias = BiasState.Bear;
+                _neutralBiasEvidence = 0;
+            }
+        }
+        else if (_bias == BiasState.Bull)
+        {
+            if (_bearBiasEvidence >= 2)
+            {
+                _bias = BiasState.Neutral;
+                _bullBiasEvidence = 0;
+                _bearBiasEvidence = 1;
+                _neutralBiasEvidence = 0;
+            }
+            else if (_neutralBiasEvidence >= 3)
+            {
+                _bias = BiasState.Neutral;
+                _bullBiasEvidence = 0;
+                _bearBiasEvidence = 0;
+                _neutralBiasEvidence = 0;
+            }
+        }
+        else if (_bias == BiasState.Bear)
+        {
+            if (_bullBiasEvidence >= 2)
+            {
+                _bias = BiasState.Neutral;
+                _bearBiasEvidence = 0;
+                _bullBiasEvidence = 1;
+                _neutralBiasEvidence = 0;
+            }
+            else if (_neutralBiasEvidence >= 3)
+            {
+                _bias = BiasState.Neutral;
+                _bullBiasEvidence = 0;
+                _bearBiasEvidence = 0;
+                _neutralBiasEvidence = 0;
+            }
+        }
+
+        if (_bias != before)
+        {
+            _biasChanges++;
+            Print("NAI BIAS | CHANGE {0} -> {1} | source={2} M15={3} M5={4} bullEv={5} bearEv={6}",
+                before, _bias, source, _m15Score, _m5Score, _bullBiasEvidence, _bearBiasEvidence);
+        }
+        else
+        {
+            Print("NAI BIAS | HOLD {0} | M15={1} M5={2} bullEv={3} bearEv={4} neutralEv={5}",
+                _bias, _m15Score, _m5Score, _bullBiasEvidence, _bearBiasEvidence, _neutralBiasEvidence);
+        }
     }
 
     private bool IsExtremeLateMomentum(Setup setup, int i, double atr, out string reason)
@@ -649,11 +775,11 @@ public class NaiRunnerV1LightConfirm : Robot
         var favorable = p.TradeType == TradeType.Buy ? price - p.EntryPrice : p.EntryPrice - price;
         var r = originalRisk > Symbol.TickSize ? favorable / originalRisk : 0;
         var setup = _activeMeta?.SetupName ?? "unknown/restart";
-        Print("NAI RUNNER | HOLD | {0} {1} P/L={2:F2} R={3:F2} SL={4} TP={5} | HTF M15={6} M5={7}",
+        Print("NAI RUNNER | HOLD | {0} {1} P/L={2:F2} R={3:F2} SL={4} TP={5} | HTF M15={6} M5={7} | bias={8}",
             p.TradeType, setup, p.NetProfit, r,
             p.StopLoss.HasValue ? p.StopLoss.Value.ToString("F2") : "--",
             p.TakeProfit.HasValue ? p.TakeProfit.Value.ToString("F2") : "--",
-            _m15Score, _m5Score);
+            _m15Score, _m5Score, _bias);
     }
 
     private void OnPositionClosed(PositionClosedEventArgs args)
@@ -684,19 +810,20 @@ public class NaiRunnerV1LightConfirm : Robot
         var setupName = _activeMeta?.SetupName ?? "unknown/restart";
         _lastStopRequestPrice = null;
         _activeMeta = null;
-        Print("NAI RESULT | {0} {1} | net={2:F2} reason={3}", p.TradeType, setupName, p.NetProfit, args.Reason);
+        Print("NAI RESULT | {0} {1} | net={2:F2} reason={3} | bias={4}", p.TradeType, setupName, p.NetProfit, args.Reason, _bias);
         PrintStats("TRADE CLOSED");
     }
 
     private void PrintStats(string trigger)
     {
-        Print("=== NAI V1 LIGHT CONFIRM STATS | {0} ===", trigger);
-        Print("LONG | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5}", _longTrades, _longWins, _longLosses, _longScratch, _longNet, _longHtfVetoes);
-        Print("SHORT | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5}", _shortTrades, _shortWins, _shortLosses, _shortScratch, _shortNet, _shortHtfVetoes);
+        Print("=== NAI V1 LIGHT CONFIRM + BIAS STATS | {0} ===", trigger);
+        Print("LONG | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5} biasBlocked={6}", _longTrades, _longWins, _longLosses, _longScratch, _longNet, _longHtfVetoes, _biasLongBlocks);
+        Print("SHORT | trades={0} W={1} L={2} scratch={3} net={4:F2} | HTF veto={5} biasBlocked={6}", _shortTrades, _shortWins, _shortLosses, _shortScratch, _shortNet, _shortHtfVetoes, _biasShortBlocks);
+        Print("BIAS | now={0} changes={1} bullEv={2} bearEv={3} neutralEv={4}", _bias, _biasChanges, _bullBiasEvidence, _bearBiasEvidence, _neutralBiasEvidence);
         Print("LIGHT CONFIRM | armed={0} confirmed={1} expired={2} failedBeforeEntry={3} noChase={4}", _armedSetups, _armedConfirmed, _armedExpired, _armedFailed, _armedNoChase);
         Print("FILTERS | extremeMomentumBlocked={0} | pullbackInvalidationExits={1} momentumInvalidationExits={2}", _lateMomentumBlocks, _pullbackInvalidationExits, _momentumInvalidationExits);
         Print("TOTAL NET | {0:F2}", _longNet + _shortNet);
-        Print("=== END NAI V1 LIGHT CONFIRM STATS ===");
+        Print("=== END NAI V1 LIGHT CONFIRM + BIAS STATS ===");
     }
 
     private void RefreshHtfScores()
@@ -885,6 +1012,13 @@ public class NaiRunnerV1LightConfirm : Robot
         var v = double.MaxValue;
         for (var k = from; k <= to; k++) v = Math.Min(v, bars.LowPrices[k]);
         return v;
+    }
+
+    private enum BiasState
+    {
+        Bull,
+        Neutral,
+        Bear
     }
 
     private enum ArmCancelKind
