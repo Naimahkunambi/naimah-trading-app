@@ -6,11 +6,12 @@ using cAlgo.API;
 namespace cAlgo.Robots;
 
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-public class NaiTickSniperV1 : Robot
+public class NaiTickSniperV2 : Robot
 {
-    private const string Label = "NAI-TICK-SNIPER-V1";
+    private const string Label = "NAI-TICK-SNIPER-V2";
     private const string RequiredSymbolText = "Volatility 25 (1s)";
-    private const int MaxTickHistory = 160;
+    private const int MaxTickHistory = 220;
+    private const double SetupLifetimeSeconds = 45.0;
 
     [Parameter("Risk % / Trade", DefaultValue = 0.50, MinValue = 0.10, MaxValue = 1.00, Step = 0.10)]
     public double RiskPercent { get; set; }
@@ -33,26 +34,35 @@ public class NaiTickSniperV1 : Robot
     [Parameter("Cooldown Seconds", DefaultValue = 10, MinValue = 0, MaxValue = 120)]
     public int CooldownSeconds { get; set; }
 
-    [Parameter("Impulse Window Ticks", DefaultValue = 30, MinValue = 15, MaxValue = 80)]
+    [Parameter("Local Direction Ticks", DefaultValue = 60, MinValue = 30, MaxValue = 120)]
+    public int LocalDirectionTicks { get; set; }
+
+    [Parameter("Impulse Window Ticks", DefaultValue = 24, MinValue = 12, MaxValue = 50)]
     public int ImpulseWindowTicks { get; set; }
 
-    [Parameter("Impulse Min ATR", DefaultValue = 0.22, MinValue = 0.10, MaxValue = 0.80, Step = 0.01)]
-    public double ImpulseMinAtr { get; set; }
+    [Parameter("Impulse Min TickVol", DefaultValue = 3.5, MinValue = 1.5, MaxValue = 10.0, Step = 0.25)]
+    public double ImpulseMinTickVol { get; set; }
 
-    [Parameter("Impulse Min Efficiency", DefaultValue = 0.58, MinValue = 0.30, MaxValue = 0.90, Step = 0.01)]
+    [Parameter("Impulse Min Efficiency", DefaultValue = 0.42, MinValue = 0.20, MaxValue = 0.90, Step = 0.01)]
     public double ImpulseMinEfficiency { get; set; }
 
-    [Parameter("Pullback Min %", DefaultValue = 0.14, MinValue = 0.05, MaxValue = 0.40, Step = 0.01)]
+    [Parameter("Pullback Min %", DefaultValue = 0.10, MinValue = 0.03, MaxValue = 0.35, Step = 0.01)]
     public double PullbackMinFraction { get; set; }
 
-    [Parameter("Pullback Max %", DefaultValue = 0.58, MinValue = 0.30, MaxValue = 0.85, Step = 0.01)]
+    [Parameter("Pullback Max %", DefaultValue = 0.65, MinValue = 0.35, MaxValue = 0.85, Step = 0.01)]
     public double PullbackMaxFraction { get; set; }
 
-    [Parameter("Confirm Advancing Ticks", DefaultValue = 3, MinValue = 1, MaxValue = 6)]
+    [Parameter("Turn Window Ticks", DefaultValue = 6, MinValue = 3, MaxValue = 12)]
+    public int TurnWindowTicks { get; set; }
+
+    [Parameter("Confirm Advancing Ticks", DefaultValue = 2, MinValue = 1, MaxValue = 4)]
     public int ConfirmAdvancingTicks { get; set; }
 
-    [Parameter("Max Chase ATR", DefaultValue = 0.16, MinValue = 0.05, MaxValue = 0.50, Step = 0.01)]
-    public double MaxChaseAtr { get; set; }
+    [Parameter("Direct Confirm Ticks", DefaultValue = 2, MinValue = 1, MaxValue = 4)]
+    public int DirectConfirmTicks { get; set; }
+
+    [Parameter("Max Chase TickVol", DefaultValue = 8.0, MinValue = 3.0, MaxValue = 20.0, Step = 0.5)]
+    public double MaxChaseTickVol { get; set; }
 
     private Bars _m1 = null!;
     private readonly List<TickPoint> _ticks = new();
@@ -68,6 +78,8 @@ public class NaiTickSniperV1 : Robot
     private int _pullbacks;
     private int _turns;
     private int _entries;
+    private int _directEntries;
+    private int _pullbackEntries;
     private int _longTrades;
     private int _shortTrades;
     private int _wins;
@@ -81,14 +93,14 @@ public class NaiTickSniperV1 : Robot
     {
         if (Account.IsLive)
         {
-            Print("NAI TICK SNIPER V1 BLOCKED | DEMO accounts only.");
+            Print("NAI TICK SNIPER V2 BLOCKED | DEMO accounts only.");
             Stop();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(SymbolName) || SymbolName.IndexOf(RequiredSymbolText, StringComparison.OrdinalIgnoreCase) < 0)
         {
-            Print("NAI TICK SNIPER V1 BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
+            Print("NAI TICK SNIPER V2 BLOCKED | attach to Volatility 25 (1s) Index | current={0}", SymbolName);
             Stop();
             return;
         }
@@ -98,12 +110,14 @@ public class NaiTickSniperV1 : Robot
         _dayStartEquity = Account.Equity;
         Positions.Closed += OnPositionClosed;
 
-        Print("NAI TICK SNIPER V1 STARTED | {0} | DEMO", SymbolName);
-        Print("ENTRY BRAIN | TICK-NATIVE | impulse -> pullback -> turn -> micro-break -> {0} advancing ticks -> entry", ConfirmAdvancingTicks);
-        Print("M1 ROLE | ATR scale + logging only | M1 does NOT choose direction or grant permission");
+        Print("NAI TICK SNIPER V2 STARTED | {0} | DEMO", SymbolName);
+        Print("ENTRY BRAIN | TICKS ONLY FOR RECOGNITION | 60-tick local direction | ~24-tick impulse | 6-tick turn | 2 advancing ticks");
+        Print("ENTRY PATH A | IMPULSE -> PULLBACK -> TURN -> {0} advancing ticks -> ENTRY", ConfirmAdvancingTicks);
+        Print("ENTRY PATH B | STRONG DIRECT IMPULSE -> {0} continuation ticks -> ENTRY", DirectConfirmTicks);
+        Print("M1 ROLE | safety/risk scale only | M1 does NOT detect fast movement, choose direction, or grant permission");
         Print("RISK | {0:F2}% | TP={1:F2}R | BE={2:F2}R | TRAIL={3:F2}R | cooldown={4}s", RiskPercent, TargetR, BreakEvenAtR, TrailAtR, CooldownSeconds);
-        Print("TICK PARAMETERS | impulse={0} ticks minMove={1:F2}ATR eff>={2:F2} pullback={3:P0}-{4:P0} maxChase={5:F2}ATR",
-            ImpulseWindowTicks, ImpulseMinAtr, ImpulseMinEfficiency, PullbackMinFraction, PullbackMaxFraction, MaxChaseAtr);
+        Print("FAST SETTINGS | local={0} impulse={1} minMove={2:F1} tickVol eff>={3:F2} pullback={4:P0}-{5:P0} maxChase={6:F1} tickVol",
+            LocalDirectionTicks, ImpulseWindowTicks, ImpulseMinTickVol, ImpulseMinEfficiency, PullbackMinFraction, PullbackMaxFraction, MaxChaseTickVol);
     }
 
     protected override void OnStop()
@@ -134,14 +148,21 @@ public class NaiTickSniperV1 : Robot
         if (_lastCloseTime != DateTime.MinValue && (Server.Time - _lastCloseTime).TotalSeconds < CooldownSeconds)
             return;
 
-        if (_m1 == null || _m1.Count < Math.Max(20, AtrPeriod + 3) || _ticks.Count < Math.Max(ImpulseWindowTicks + 5, 40))
+        var minimumTicks = Math.Max(LocalDirectionTicks + 2, Math.Max(ImpulseWindowTicks + 2, 70));
+        if (_ticks.Count < minimumTicks)
             return;
 
-        var atr = Atr(_m1.Count - 2);
-        if (atr <= Symbol.TickSize * 5)
+        var tickVol = TickVolatility(LocalDirectionTicks);
+        if (tickVol <= 0)
             return;
 
-        AdvanceStateMachine(mid, atr);
+        if (_setup != null && (Server.Time - _setup.CreatedAt).TotalSeconds > SetupLifetimeSeconds)
+        {
+            _failedSetups++;
+            ResetSetup("setup expired");
+        }
+
+        AdvanceStateMachine(mid, tickVol);
     }
 
     private void AddTick(double price)
@@ -151,30 +172,32 @@ public class NaiTickSniperV1 : Robot
             _ticks.RemoveAt(0);
     }
 
-    private void AdvanceStateMachine(double price, double atr)
+    private void AdvanceStateMachine(double price, double tickVol)
     {
         switch (_state)
         {
             case TickState.Searching:
-                TryFindImpulse(atr);
+                TryFindImpulse(tickVol);
                 break;
             case TickState.ImpulseFound:
-                TrackImpulseOrPullback(price, atr);
+                TrackImpulsePullbackOrDirect(price, tickVol);
                 break;
             case TickState.Pullback:
-                TrackPullbackAndTurn(price, atr);
+                TrackPullbackAndTurn(price, tickVol);
                 break;
-            case TickState.TurnDetected:
-            case TickState.Confirming:
-                TrackBreakAndConfirmation(price, atr);
+            case TickState.ConfirmingTurn:
+                TrackTurnConfirmation(price, tickVol);
+                break;
+            case TickState.ConfirmingDirect:
+                TrackDirectConfirmation(price, tickVol);
                 break;
         }
     }
 
-    private void TryFindImpulse(double atr)
+    private void TryFindImpulse(double tickVol)
     {
         var n = Math.Min(ImpulseWindowTicks, _ticks.Count - 1);
-        if (n < 10)
+        if (n < 8)
             return;
 
         var from = _ticks.Count - 1 - n;
@@ -183,60 +206,68 @@ public class NaiTickSniperV1 : Robot
         var end = _ticks[to].Price;
         var net = end - start;
         var absNet = Math.Abs(net);
-        var path = 0.0;
-        for (var i = from + 1; i <= to; i++)
-            path += Math.Abs(_ticks[i].Price - _ticks[i - 1].Price);
-
+        var path = PathDistance(from, to);
         if (path <= Symbol.TickSize)
             return;
 
         var efficiency = absNet / path;
-        var moveAtr = absNet / atr;
-        if (moveAtr < ImpulseMinAtr || efficiency < ImpulseMinEfficiency)
+        var moveTickVol = absNet / tickVol;
+        if (moveTickVol < ImpulseMinTickVol || efficiency < ImpulseMinEfficiency)
             return;
 
         var direction = net > 0 ? 1 : -1;
-        var windowMin = _ticks.Skip(from).Take(n + 1).Min(t => t.Price);
-        var windowMax = _ticks.Skip(from).Take(n + 1).Max(t => t.Price);
-        var nearExtreme = direction > 0
-            ? (windowMax - end) <= atr * 0.05
-            : (end - windowMin) <= atr * 0.05;
-        if (!nearExtreme)
+        var localDirection = LocalDirection(tickVol);
+
+        // Local direction is informational unless it is very strongly opposite.
+        var localNet = PriceFromBack(0) - PriceFromBack(Math.Min(LocalDirectionTicks, _ticks.Count - 1));
+        var strongOpposite = localDirection != 0 && localDirection != direction && Math.Abs(localNet) >= tickVol * 8.0;
+        if (strongOpposite)
             return;
 
+        var windowMin = MinPriceRange(from, to);
+        var windowMax = MaxPriceRange(from, to);
         var basePrice = direction > 0 ? windowMin : windowMax;
         var extreme = direction > 0 ? windowMax : windowMin;
         var impulseSize = Math.Abs(extreme - basePrice);
-        if (impulseSize < atr * ImpulseMinAtr)
-            return;
 
-        _setup = new TickSetup(direction, basePrice, extreme, impulseSize, atr, Server.Time);
+        _setup = new TickSetup(direction, basePrice, extreme, impulseSize, tickVol, Server.Time, localDirection);
+        _setup.LastDirectPrice = end;
         _state = TickState.ImpulseFound;
         _impulses++;
 
-        Print("NAI TICK | IMPULSE {0} | size={1:F2}ATR eff={2:F2} base={3:F2} extreme={4:F2}",
-            direction > 0 ? "UP" : "DOWN", impulseSize / atr, efficiency, basePrice, extreme);
+        Print("NAI TICK | IMPULSE {0} | size={1:F1} tickVol eff={2:F2} local={3} base={4:F2} extreme={5:F2}",
+            direction > 0 ? "UP" : "DOWN", impulseSize / tickVol, efficiency, LocalText(localDirection), basePrice, extreme);
     }
 
-    private void TrackImpulseOrPullback(double price, double atr)
+    private void TrackImpulsePullbackOrDirect(double price, double tickVol)
     {
         var s = _setup;
         if (s == null)
         {
-            ResetSetup("missing setup");
+            ResetSetup("missing impulse setup");
             return;
         }
 
-        if (s.Direction > 0 && price > s.Extreme)
+        var madeNewExtreme = s.Direction > 0 ? price > s.Extreme : price < s.Extreme;
+        if (madeNewExtreme)
         {
             s.Extreme = price;
             s.ImpulseSize = Math.Abs(s.Extreme - s.Base);
-            return;
-        }
-        if (s.Direction < 0 && price < s.Extreme)
-        {
-            s.Extreme = price;
-            s.ImpulseSize = Math.Abs(s.Extreme - s.Base);
+
+            var advanced = s.Direction > 0
+                ? price > s.LastDirectPrice + Symbol.TickSize * 0.25
+                : price < s.LastDirectPrice - Symbol.TickSize * 0.25;
+            if (advanced)
+            {
+                s.DirectConfirmTicks++;
+                s.LastDirectPrice = price;
+            }
+
+            if (s.DirectConfirmTicks >= DirectConfirmTicks)
+            {
+                _state = TickState.ConfirmingDirect;
+                TrackDirectConfirmation(price, tickVol);
+            }
             return;
         }
 
@@ -248,24 +279,21 @@ public class NaiTickSniperV1 : Robot
             return;
         }
 
-        if (retrace < PullbackMinFraction)
-            return;
+        if (retrace >= PullbackMinFraction && retrace <= PullbackMaxFraction)
+        {
+            s.CandidateTurn = price;
+            s.PullbackStartedAt = Server.Time;
+            s.TurnConfirmTicks = 0;
+            s.LastTurnConfirmPrice = 0;
+            _state = TickState.Pullback;
+            _pullbacks++;
 
-        if (retrace > PullbackMaxFraction)
-            return;
-
-        s.CandidateTurn = price;
-        s.PullbackStartedAt = Server.Time;
-        s.BreakSeen = false;
-        s.ConfirmTicks = 0;
-        _state = TickState.Pullback;
-        _pullbacks++;
-
-        Print("NAI TICK | PULLBACK {0} | retrace={1:P0} candidate={2:F2}",
-            s.Direction > 0 ? "LONG" : "SHORT", retrace, price);
+            Print("NAI TICK | PULLBACK {0} | retrace={1:P0} candidate={2:F2}",
+                s.Direction > 0 ? "LONG" : "SHORT", retrace, price);
+        }
     }
 
-    private void TrackPullbackAndTurn(double price, double atr)
+    private void TrackPullbackAndTurn(double price, double tickVol)
     {
         var s = _setup;
         if (s == null)
@@ -280,136 +308,144 @@ public class NaiTickSniperV1 : Robot
             s.CandidateTurn = Math.Max(s.CandidateTurn, price);
 
         var retrace = RetraceFraction(s, price);
-        if (retrace > PullbackMaxFraction + 0.12 || BrokeImpulseBase(s, price, atr))
+        if (retrace > PullbackMaxFraction + 0.12)
         {
             _failedSetups++;
             ResetSetup($"pullback failed retrace={retrace:P0}");
             return;
         }
 
-        if (_ticks.Count < 10)
+        if (_ticks.Count < TurnWindowTicks * 2 + 2)
             return;
 
-        var recentNet = PriceFromBack(0) - PriceFromBack(4);
-        var previousNet = PriceFromBack(4) - PriceFromBack(8);
-        var minTurnMove = Math.Max(Symbol.TickSize * 2.0, atr * 0.02);
+        var recentNet = PriceFromBack(0) - PriceFromBack(TurnWindowTicks);
+        var previousNet = PriceFromBack(TurnWindowTicks) - PriceFromBack(TurnWindowTicks * 2);
+        var minTurn = tickVol * 1.5;
 
         var turned = s.Direction > 0
-            ? recentNet >= minTurnMove && recentNet > previousNet
-            : recentNet <= -minTurnMove && recentNet < previousNet;
+            ? recentNet >= minTurn && recentNet > previousNet + tickVol * 0.5
+            : recentNet <= -minTurn && recentNet < previousNet - tickVol * 0.5;
         if (!turned)
             return;
 
-        s.MicroBreak = s.Direction > 0
-            ? MaxPriceBack(6, 1)
-            : MinPriceBack(6, 1);
-        s.BreakSeen = false;
-        s.ConfirmTicks = 0;
-        s.LastConfirmPrice = 0;
-        _state = TickState.TurnDetected;
+        s.LastTurnConfirmPrice = price;
+        s.TurnConfirmTicks = 0;
+        _state = TickState.ConfirmingTurn;
         _turns++;
 
-        Print("NAI TICK | TURN {0} | candidate={1:F2} microBreak={2:F2} recent4={3:F2}ATR prev4={4:F2}ATR",
-            s.Direction > 0 ? "UP" : "DOWN", s.CandidateTurn, s.MicroBreak, recentNet / atr, previousNet / atr);
+        Print("NAI TICK | TURN {0} | candidate={1:F2} recent={2:F1} tickVol previous={3:F1} tickVol",
+            s.Direction > 0 ? "UP" : "DOWN", s.CandidateTurn, recentNet / tickVol, previousNet / tickVol);
     }
 
-    private void TrackBreakAndConfirmation(double price, double atr)
+    private void TrackTurnConfirmation(double price, double tickVol)
     {
         var s = _setup;
         if (s == null)
         {
-            ResetSetup("missing confirmation setup");
+            ResetSetup("missing turn setup");
             return;
         }
 
-        var retrace = RetraceFraction(s, price);
-        if (retrace > PullbackMaxFraction + 0.12 || BrokeImpulseBase(s, price, atr))
+        var failedTurn = s.Direction > 0
+            ? price < s.CandidateTurn - tickVol * 2.0
+            : price > s.CandidateTurn + tickVol * 2.0;
+        if (failedTurn)
         {
-            _failedSetups++;
-            ResetSetup("structure failed before entry");
-            return;
-        }
-
-        var crossed = s.Direction > 0
-            ? price >= s.MicroBreak + Symbol.TickSize
-            : price <= s.MicroBreak - Symbol.TickSize;
-
-        if (!s.BreakSeen)
-        {
-            if (!crossed)
-            {
-                if (s.Direction > 0)
-                    s.CandidateTurn = Math.Min(s.CandidateTurn, price);
-                else
-                    s.CandidateTurn = Math.Max(s.CandidateTurn, price);
-                return;
-            }
-
-            s.BreakSeen = true;
-            s.ConfirmTicks = 1;
-            s.LastConfirmPrice = price;
-            _state = TickState.Confirming;
-            Print("NAI TICK | MICRO BREAK {0} | price={1:F2} level={2:F2} | confirm=1/{3}",
-                s.Direction > 0 ? "LONG" : "SHORT", price, s.MicroBreak, ConfirmAdvancingTicks);
-            return;
-        }
-
-        var failedBreak = s.Direction > 0
-            ? price < s.MicroBreak - Symbol.TickSize
-            : price > s.MicroBreak + Symbol.TickSize;
-        if (failedBreak)
-        {
-            s.BreakSeen = false;
-            s.ConfirmTicks = 0;
-            s.LastConfirmPrice = 0;
+            s.TurnConfirmTicks = 0;
+            s.LastTurnConfirmPrice = 0;
             _state = TickState.Pullback;
-            Print("NAI TICK | BREAK FAILED | back into pullback");
+            Print("NAI TICK | TURN FAILED | back into pullback");
             return;
         }
 
         var advanced = s.Direction > 0
-            ? price > s.LastConfirmPrice + Symbol.TickSize * 0.25
-            : price < s.LastConfirmPrice - Symbol.TickSize * 0.25;
+            ? price > s.LastTurnConfirmPrice + Symbol.TickSize * 0.25
+            : price < s.LastTurnConfirmPrice - Symbol.TickSize * 0.25;
         if (advanced)
         {
-            s.ConfirmTicks++;
-            s.LastConfirmPrice = price;
+            s.TurnConfirmTicks++;
+            s.LastTurnConfirmPrice = price;
         }
 
-        if (s.ConfirmTicks < ConfirmAdvancingTicks)
+        if (s.TurnConfirmTicks < ConfirmAdvancingTicks)
             return;
 
-        var beyondBreakAtr = s.Direction > 0
-            ? (price - s.MicroBreak) / atr
-            : (s.MicroBreak - price) / atr;
-        if (beyondBreakAtr > MaxChaseAtr)
+        var moveFromTurn = s.Direction > 0
+            ? price - s.CandidateTurn
+            : s.CandidateTurn - price;
+        if (moveFromTurn > tickVol * MaxChaseTickVol)
         {
             _missedNoChase++;
-            ResetSetup($"missed/no-chase {beyondBreakAtr:F2}ATR beyond micro-break");
+            ResetSetup($"turn already ran {moveFromTurn / tickVol:F1} tickVol");
             return;
         }
 
-        ExecuteTickEntry(s, atr);
+        ExecuteTickEntry(s, tickVol, EntryPath.PullbackTurn);
     }
 
-    private void ExecuteTickEntry(TickSetup s, double atr)
+    private void TrackDirectConfirmation(double price, double tickVol)
+    {
+        var s = _setup;
+        if (s == null)
+        {
+            ResetSetup("missing direct setup");
+            return;
+        }
+
+        var recentNet = PriceFromBack(0) - PriceFromBack(Math.Min(6, _ticks.Count - 1));
+        var continuationAlive = s.Direction > 0 ? recentNet > 0 : recentNet < 0;
+        if (!continuationAlive)
+        {
+            s.DirectConfirmTicks = 0;
+            _state = TickState.ImpulseFound;
+            return;
+        }
+
+        var extensionFromDetection = s.Direction > 0
+            ? price - s.DetectionExtreme
+            : s.DetectionExtreme - price;
+        if (extensionFromDetection > tickVol * MaxChaseTickVol)
+        {
+            _missedNoChase++;
+            ResetSetup($"direct move already ran {extensionFromDetection / tickVol:F1} tickVol");
+            return;
+        }
+
+        ExecuteTickEntry(s, tickVol, EntryPath.DirectContinuation);
+    }
+
+    private void ExecuteTickEntry(TickSetup s, double tickVol, EntryPath path)
     {
         var tradeType = s.Direction > 0 ? TradeType.Buy : TradeType.Sell;
         var entry = s.Direction > 0 ? Symbol.Ask : Symbol.Bid;
-        var buffer = Math.Max(Symbol.TickSize * 2.0, atr * 0.08);
-        var stop = s.Direction > 0 ? s.CandidateTurn - buffer : s.CandidateTurn + buffer;
-        var risk = Math.Abs(entry - stop);
+        var m1Atr = _m1 != null && _m1.Count > AtrPeriod + 3 ? Atr(_m1.Count - 2) : 0;
 
-        if (risk < atr * 0.30)
+        double stop;
+        if (path == EntryPath.PullbackTurn)
         {
-            risk = atr * 0.35;
+            var buffer = Math.Max(Symbol.TickSize * 2.0, tickVol * 1.5);
+            stop = s.Direction > 0 ? s.CandidateTurn - buffer : s.CandidateTurn + buffer;
+        }
+        else
+        {
+            var recentOpposite = s.Direction > 0 ? MinPriceBack(12, 1) : MaxPriceBack(12, 1);
+            var buffer = Math.Max(Symbol.TickSize * 2.0, tickVol * 1.5);
+            stop = s.Direction > 0 ? recentOpposite - buffer : recentOpposite + buffer;
+        }
+
+        var risk = Math.Abs(entry - stop);
+        var minimumRisk = Math.Max(Symbol.TickSize * 6.0, tickVol * 3.0);
+        if (risk < minimumRisk)
+        {
+            risk = minimumRisk;
             stop = s.Direction > 0 ? entry - risk : entry + risk;
         }
 
-        if (risk > atr * 1.20)
+        // M1 ATR is safety only. It does not decide whether the fast tick setup exists.
+        if (m1Atr > Symbol.TickSize && risk > m1Atr * 1.80)
         {
             _missedNoChase++;
-            ResetSetup($"risk too wide {risk / atr:F2}ATR");
+            ResetSetup($"safety stop too wide {risk / m1Atr:F2} M1ATR");
             return;
         }
 
@@ -426,7 +462,8 @@ public class NaiTickSniperV1 : Robot
         }
 
         volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
-        var result = ExecuteMarketOrder(tradeType, SymbolName, volume, Label, stopPips, tpPips, "TICK PULLBACK SNIPER");
+        var comment = path == EntryPath.PullbackTurn ? "TICK PULLBACK TURN" : "TICK DIRECT CONTINUATION";
+        var result = ExecuteMarketOrder(tradeType, SymbolName, volume, Label, stopPips, tpPips, comment);
         if (!result.IsSuccessful)
         {
             _failedSetups++;
@@ -436,14 +473,14 @@ public class NaiTickSniperV1 : Robot
         }
 
         _entries++;
+        if (path == EntryPath.PullbackTurn) _pullbackEntries++; else _directEntries++;
         if (tradeType == TradeType.Buy) _longTrades++; else _shortTrades++;
         _lastStopRequestPrice = null;
 
-        var m1i = _m1.Count - 2;
-        var m1Move3 = m1i >= 3 ? (_m1.ClosePrices[m1i] - _m1.ClosePrices[m1i - 3]) / atr : 0;
-        Print("NAI TICK | ENTER {0} | entry={1:F2} candidateTurn={2:F2} SLref={3:F2} risk={4:F2}ATR TP={5:F2}R | impulse={6:F2}ATR retrace={7:P0} microBreak={8:F2} confirms={9} | M1move3={10:F2}ATR",
-            tradeType, result.Position.EntryPrice, s.CandidateTurn, stop, risk / atr, TargetR,
-            s.ImpulseSize / atr, RetraceFraction(s, entry), s.MicroBreak, s.ConfirmTicks, m1Move3);
+        var localDirection = LocalDirection(tickVol);
+        Print("NAI TICK | ENTER {0} | path={1} entry={2:F2} SLref={3:F2} risk={4:F1} tickVol TP={5:F2}R | impulse={6:F1} tickVol retrace={7:P0} local={8}",
+            tradeType, path, result.Position.EntryPrice, stop, risk / tickVol, TargetR,
+            s.ImpulseSize / tickVol, RetraceFraction(s, entry), LocalText(localDirection));
 
         _setup = null;
         _state = TickState.Searching;
@@ -473,10 +510,10 @@ public class NaiTickSniperV1 : Robot
 
         if (r >= TrailAtR && _ticks.Count >= 16)
         {
-            var atr = _m1.Count > AtrPeriod + 3 ? Atr(_m1.Count - 2) : originalRisk;
+            var tickVol = TickVolatility(Math.Min(LocalDirectionTicks, _ticks.Count - 1));
             var raw = p.TradeType == TradeType.Buy
-                ? MinPriceBack(12, 1) - atr * 0.04
-                : MaxPriceBack(12, 1) + atr * 0.04;
+                ? MinPriceBack(12, 1) - tickVol
+                : MaxPriceBack(12, 1) + tickVol;
             TryMoveStop(p, raw, "TICK TRAIL", r);
         }
     }
@@ -542,10 +579,43 @@ public class NaiTickSniperV1 : Robot
         _state = TickState.Searching;
     }
 
-    private bool BrokeImpulseBase(TickSetup s, double price, double atr)
+    private int LocalDirection(double tickVol)
     {
-        var buffer = atr * 0.04;
-        return s.Direction > 0 ? price < s.Base - buffer : price > s.Base + buffer;
+        var back = Math.Min(LocalDirectionTicks, _ticks.Count - 1);
+        if (back < 10 || tickVol <= 0)
+            return 0;
+
+        var net = PriceFromBack(0) - PriceFromBack(back);
+        if (net >= tickVol * 3.0) return 1;
+        if (net <= -tickVol * 3.0) return -1;
+        return 0;
+    }
+
+    private double TickVolatility(int window)
+    {
+        var n = Math.Min(window, _ticks.Count - 1);
+        if (n <= 0)
+            return Math.Max(Symbol.TickSize, 0.0000001);
+
+        var from = _ticks.Count - 1 - n;
+        var to = _ticks.Count - 1;
+        var sum = 0.0;
+        var count = 0;
+        for (var i = from + 1; i <= to; i++)
+        {
+            sum += Math.Abs(_ticks[i].Price - _ticks[i - 1].Price);
+            count++;
+        }
+
+        return Math.Max(Symbol.TickSize, count == 0 ? Symbol.TickSize : sum / count);
+    }
+
+    private double PathDistance(int from, int to)
+    {
+        var path = 0.0;
+        for (var i = from + 1; i <= to; i++)
+            path += Math.Abs(_ticks[i].Price - _ticks[i - 1].Price);
+        return path;
     }
 
     private double RetraceFraction(TickSetup s, double price)
@@ -582,6 +652,20 @@ public class NaiTickSniperV1 : Robot
             (oldest, newest) = (newest, oldest);
         var min = double.MaxValue;
         for (var i = oldest; i <= newest; i++) min = Math.Min(min, _ticks[i].Price);
+        return min;
+    }
+
+    private double MaxPriceRange(int from, int to)
+    {
+        var max = double.MinValue;
+        for (var i = from; i <= to; i++) max = Math.Max(max, _ticks[i].Price);
+        return max;
+    }
+
+    private double MinPriceRange(int from, int to)
+    {
+        var min = double.MaxValue;
+        for (var i = from; i <= to; i++) min = Math.Min(min, _ticks[i].Price);
         return min;
     }
 
@@ -649,12 +733,15 @@ public class NaiTickSniperV1 : Robot
         return Math.Round(ticks * Symbol.TickSize, Symbol.Digits);
     }
 
+    private string LocalText(int direction) => direction > 0 ? "UP" : direction < 0 ? "DOWN" : "NEUTRAL";
+
     private void PrintStats(string trigger)
     {
-        Print("=== NAI TICK SNIPER V1 STATS | {0} ===", trigger);
+        Print("=== NAI TICK SNIPER V2 STATS | {0} ===", trigger);
         Print("STATES | impulses={0} pullbacks={1} turns={2} entries={3} failed={4} noChase={5}", _impulses, _pullbacks, _turns, _entries, _failedSetups, _missedNoChase);
+        Print("ENTRY PATHS | direct={0} pullbackTurn={1}", _directEntries, _pullbackEntries);
         Print("TRADES | long={0} short={1} | W={2} L={3} scratch={4} | net={5:F2}", _longTrades, _shortTrades, _wins, _losses, _scratches, _net);
-        Print("=== END NAI TICK SNIPER V1 STATS ===");
+        Print("=== END NAI TICK SNIPER V2 STATS ===");
     }
 
     private enum TickState
@@ -662,36 +749,47 @@ public class NaiTickSniperV1 : Robot
         Searching,
         ImpulseFound,
         Pullback,
-        TurnDetected,
-        Confirming
+        ConfirmingTurn,
+        ConfirmingDirect
+    }
+
+    private enum EntryPath
+    {
+        PullbackTurn,
+        DirectContinuation
     }
 
     private sealed record TickPoint(DateTime Time, double Price);
 
     private sealed class TickSetup
     {
-        public TickSetup(int direction, double basePrice, double extreme, double impulseSize, double atr, DateTime createdAt)
+        public TickSetup(int direction, double basePrice, double extreme, double impulseSize, double tickVol, DateTime createdAt, int localDirection)
         {
             Direction = direction;
             Base = basePrice;
             Extreme = extreme;
+            DetectionExtreme = extreme;
             ImpulseSize = impulseSize;
-            AtrAtImpulse = atr;
+            TickVolAtImpulse = tickVol;
             CreatedAt = createdAt;
+            LocalDirectionAtImpulse = localDirection;
             CandidateTurn = extreme;
+            LastDirectPrice = extreme;
         }
 
         public int Direction { get; }
         public double Base { get; }
         public double Extreme { get; set; }
+        public double DetectionExtreme { get; }
         public double ImpulseSize { get; set; }
-        public double AtrAtImpulse { get; }
+        public double TickVolAtImpulse { get; }
         public DateTime CreatedAt { get; }
+        public int LocalDirectionAtImpulse { get; }
         public DateTime PullbackStartedAt { get; set; }
         public double CandidateTurn { get; set; }
-        public double MicroBreak { get; set; }
-        public bool BreakSeen { get; set; }
-        public int ConfirmTicks { get; set; }
-        public double LastConfirmPrice { get; set; }
+        public int TurnConfirmTicks { get; set; }
+        public double LastTurnConfirmPrice { get; set; }
+        public int DirectConfirmTicks { get; set; }
+        public double LastDirectPrice { get; set; }
     }
 }
