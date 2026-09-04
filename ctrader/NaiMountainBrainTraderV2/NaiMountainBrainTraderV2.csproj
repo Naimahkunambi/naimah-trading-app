@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AlgoName>NAI-MOUNTAIN-BRAIN-TRADER-V2</AlgoName>
+    <AlgoBuild>true</AlgoBuild>
+    <AlgoPublish>false</AlgoPublish>
+    <IncludeSource>true</IncludeSource>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\NaiMountainBrainV1\Models.cs" Link="Models.cs" />
+    <Compile Include="..\NaiMountainBrainV1\MarketAnalysis.cs" Link="MarketAnalysis.cs" />
+    <PackageReference Include="cTrader.Automate" Version="1.*-*" />
+  </ItemGroup>
+</Project>
