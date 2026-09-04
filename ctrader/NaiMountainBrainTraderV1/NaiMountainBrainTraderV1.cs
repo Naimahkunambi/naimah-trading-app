@@ -353,3 +353,5 @@ public class NaiMountainBrainTraderV1 : Robot
         Print("=== END STATS ===");
     }
 }
+
+// build trigger only; strategy unchanged
