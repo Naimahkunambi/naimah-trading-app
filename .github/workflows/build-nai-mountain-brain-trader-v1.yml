@@ -1,0 +1,40 @@
+name: Build NAI Mountain Brain Trader V1
+
+on:
+  push:
+    branches:
+      - codex/nana-from-scratch
+    paths:
+      - 'ctrader/NaiMountainBrainTraderV1/**'
+      - 'ctrader/NaiMountainBrainV1/Models.cs'
+      - 'ctrader/NaiMountainBrainV1/MarketAnalysis.cs'
+      - '.github/workflows/build-nai-mountain-brain-trader-v1.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Restore
+        run: dotnet restore ctrader/NaiMountainBrainTraderV1/NaiMountainBrainTraderV1.csproj
+
+      - name: Build cTrader algo
+        run: dotnet build ctrader/NaiMountainBrainTraderV1/NaiMountainBrainTraderV1.csproj -c Release --no-restore
+
+      - name: Locate algo package
+        run: find ctrader/NaiMountainBrainTraderV1 -type f -name '*.algo' -print
+
+      - name: Upload installable cBot
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAI-MOUNTAIN-BRAIN-TRADER-V1
+          path: ctrader/NaiMountainBrainTraderV1/bin/Release/net6.0/*.algo
+          if-no-files-found: error
