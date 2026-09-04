@@ -365,3 +365,5 @@ public class NaiCometLastMan3T : Robot
         double TickVol,
         string Pattern);
 }
+
+// Build trigger only. Strategy logic unchanged.
