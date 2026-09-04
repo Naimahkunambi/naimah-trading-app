@@ -6,6 +6,7 @@ using cAlgo.Robots.MountainBrain;
 
 namespace cAlgo.Robots;
 
+// Build trigger only. Strategy logic unchanged.
 [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
 public class NaiMountainBrainV1 : Robot
 {
