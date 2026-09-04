@@ -1,0 +1,44 @@
+name: Build NAI Tick Sniper V1
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/nana-from-scratch
+    paths:
+      - 'ctrader/NaiTickSniperV1/**'
+      - '.github/workflows/build-nai-tick-sniper-v1.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Restore
+        run: dotnet restore ctrader/NaiTickSniperV1/NaiTickSniperV1.csproj
+
+      - name: Build cTrader algo
+        run: dotnet build ctrader/NaiTickSniperV1/NaiTickSniperV1.csproj --configuration Release -p:IncludeSource=True
+
+      - name: Locate algo package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find ctrader/NaiTickSniperV1 -type f -name '*.algo' -print
+          ALGO="$(find ctrader/NaiTickSniperV1 -type f -name '*.algo' | head -n 1)"
+          test -n "$ALGO"
+          cp "$ALGO" NAI-Tick-Sniper-V1.algo
+
+      - name: Upload installable cBot
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAI-Tick-Sniper-V1
+          path: NAI-Tick-Sniper-V1.algo
+          if-no-files-found: error
