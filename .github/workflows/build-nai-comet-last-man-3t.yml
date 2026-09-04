@@ -1,0 +1,38 @@
+name: Build NAI COMET Last Man 3T
+
+on:
+  push:
+    branches:
+      - codex/nana-from-scratch
+    paths:
+      - 'ctrader/NaiCometLastMan3T/**'
+      - '.github/workflows/build-nai-comet-last-man-3t.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Restore
+        run: dotnet restore ctrader/NaiCometLastMan3T/NaiCometLastMan3T.csproj
+
+      - name: Build cTrader algo
+        run: dotnet build ctrader/NaiCometLastMan3T/NaiCometLastMan3T.csproj -c Release --no-restore
+
+      - name: Locate algo package
+        run: find ctrader/NaiCometLastMan3T -type f -name '*.algo' -print
+
+      - name: Upload installable cBot
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAI-COMET-LAST-MAN-3T
+          path: ctrader/NaiCometLastMan3T/bin/Release/net6.0/*.algo
+          if-no-files-found: error
