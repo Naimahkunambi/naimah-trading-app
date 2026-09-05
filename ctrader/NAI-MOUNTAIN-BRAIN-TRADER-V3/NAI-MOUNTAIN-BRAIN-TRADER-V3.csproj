@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>NAI-MOUNTAIN-BRAIN-TRADER-V3</AssemblyName>
+    <RootNamespace>cAlgo.Robots</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="cTrader.Automate" Version="1.*-*" />
+  </ItemGroup>
+</Project>
