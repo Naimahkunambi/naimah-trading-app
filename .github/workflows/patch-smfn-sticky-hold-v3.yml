@@ -1,0 +1,531 @@
+name: Patch SMFN Sticky Hold V3
+
+on:
+  push:
+    branches:
+      - codex/smfn-sticky-hold-v3
+    paths:
+      - .github/workflows/patch-smfn-sticky-hold-v3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/smfn-sticky-hold-v3
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Apply sticky HOLD patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('ctrader/NAI-MOUNTAIN-STORY-ENGINE-V2/NAI-MOUNTAIN-STORY-ENGINE-V2.cs')
+          s = p.read_text()
+
+          def once(old, new, label):
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly 1 match, got {count}')
+              s = s.replace(old, new, 1)
+
+          # 1) Persistent HOLD state. Live state may change, but journal history is append-only/non-repainting.
+          once(
+          '        private string _requestedCloseReason = string.Empty;\n',
+          '''        private string _requestedCloseReason = string.Empty;
+
+        // STICKY HOLD V3: separate the live decision from frozen history.
+        // We never rewrite old decisions. State changes are emitted as append-only journal events.
+        private const int WeaknessConfirmTicks = 3;
+        private const int ExitConfirmTicks = 5;
+        private HoldState _holdState = HoldState.Searching;
+        private int _weaknessTicks;
+        private int _exitConfirmTicks;
+        private DateTime _holdStateSince = DateTime.MinValue;
+        private bool _virtualTrailTouched;
+''', 'hold fields')
+
+          once(
+          '''        private enum SwingKind
+        {
+            High,
+            Low
+        }
+''',
+          '''        private enum HoldState
+        {
+            Searching,
+            Holding,
+            Weakening,
+            ExitConfirmed
+        }
+
+        private enum SwingKind
+        {
+            High,
+            Low
+        }
+''', 'hold enum')
+
+          # 2) Mountain transition needs a meaningful structure break, not a tiny tick poke.
+          once('                double breakBuffer = Threshold * 0.15;\n',
+               '                double breakBuffer = Threshold * 0.28;\n',
+               'transition buffer')
+
+          # 3) Detect mountains/resumptions sooner without turning every tick into a mountain.
+          once(
+          '''            _microThreshold = Math.Max(spread * 0.90, noise * 4.0);
+            _activeThreshold = Math.Max(spread * 2.00, noise * 9.0);
+            _majorThreshold = Math.Max(spread * 5.00, noise * 22.0);
+''',
+          '''            _microThreshold = Math.Max(spread * 0.82, noise * 3.4);
+            _activeThreshold = Math.Max(spread * 1.70, noise * 7.2);
+            _majorThreshold = Math.Max(spread * 4.50, noise * 19.0);
+''', 'faster thresholds')
+
+          # 4) Critical fix: do NOT close from yesterday's virtual trail before the current tick updates structure.
+          once(
+          '''            Position position = GetPosition();
+            if (position != null)
+            {
+                _hadPosition = true;
+                if (CheckVirtualStopFirst(position, bid, ask))
+                {
+                    _lastMid = mid;
+                    return;
+                }
+            }
+
+            bool microChanged = _micro.Update(mid, Server.Time, _microThreshold);
+''',
+          '''            Position position = GetPosition();
+            if (position != null)
+                _hadPosition = true;
+
+            // Structure is updated BEFORE any exit decision. A pullback gets to be seen as a pullback.
+            bool microChanged = _micro.Update(mid, Server.Time, _microThreshold);
+''', 'pre-structure virtual exit')
+
+          # 5) Faster COME/resumption confirmation.
+          once('            double buffer = Math.Max(CurrentSpread() * 0.08, _noiseEma * 0.50);\n',
+               '            double buffer = Math.Max(CurrentSpread() * 0.05, _noiseEma * 0.30);\n',
+               'pullback break buffer')
+
+          once(
+          '''        private bool FastFollowThrough(Direction direction)
+        {
+            if (_ticks.Count < 13)
+                return false;
+
+            int aligned = _ticks.Aligned(direction, 3);
+            double fast = _ticks.Delta(4);
+            double medium = _ticks.Delta(12);
+            double accel = _ticks.Acceleration(3, 10);
+            double noise = Math.Max(_noiseEma, Symbol.TickSize * 5);
+
+            if (direction == Direction.Up)
+            {
+                return aligned >= 2 &&
+                       fast > noise * 0.45 &&
+                       medium > -_microThreshold * 0.35 &&
+                       accel > -noise * 0.15;
+            }
+
+            return aligned >= 2 &&
+                   fast < -noise * 0.45 &&
+                   medium < _microThreshold * 0.35 &&
+                   accel < noise * 0.15;
+        }
+''',
+          '''        private bool FastFollowThrough(Direction direction)
+        {
+            if (_ticks.Count < 9)
+                return false;
+
+            int aligned = _ticks.Aligned(direction, 3);
+            double fast = _ticks.Delta(3);
+            double medium = _ticks.Delta(8);
+            double accel = _ticks.Acceleration(2, 7);
+            double noise = Math.Max(_noiseEma, Symbol.TickSize * 5);
+
+            if (direction == Direction.Up)
+            {
+                return aligned >= 2 &&
+                       fast > noise * 0.32 &&
+                       medium > -_microThreshold * 0.45 &&
+                       accel > -noise * 0.25;
+            }
+
+            return aligned >= 2 &&
+                   fast < -noise * 0.32 &&
+                   medium < _microThreshold * 0.45 &&
+                   accel < noise * 0.25;
+        }
+''', 'fast follow-through')
+
+          # 6) Entry SL belongs behind ACTIVE structure where available, not just the tiny micro pullback.
+          once(
+          '''            double stopBuffer = Math.Max(spread * 0.30, _microThreshold * 0.25);
+            double plannedEntry = side == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
+            double stopPrice = side == TradeType.Buy
+                ? _pullbackExtreme - stopBuffer
+                : _pullbackExtreme + stopBuffer;
+''',
+          '''            double stopBuffer = Math.Max(spread * 0.35, _microThreshold * 0.35);
+            double plannedEntry = side == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
+            double structureAnchor = _pullbackExtreme;
+            if (_active.ProtectedPrice > 0)
+            {
+                structureAnchor = side == TradeType.Buy
+                    ? Math.Min(_pullbackExtreme, _active.ProtectedPrice)
+                    : Math.Max(_pullbackExtreme, _active.ProtectedPrice);
+            }
+            double stopPrice = side == TradeType.Buy
+                ? structureAnchor - stopBuffer
+                : structureAnchor + stopBuffer;
+''', 'active structure stop')
+
+          once(
+          '''            _lastTradedPullbackSerial = _pullbackSerial;
+            _hadPosition = true;
+            _requestedCloseReason = string.Empty;
+''',
+          '''            _lastTradedPullbackSerial = _pullbackSerial;
+            _hadPosition = true;
+            _requestedCloseReason = string.Empty;
+            ResetHoldState(true);
+            Print("COME + HOLD | id={0} active v{1} {2}/{3} | state={4} | history frozen from entry", position.Id, _active.Version, _active.Direction, _active.Phase, _holdState);
+''', 'entry hold reset')
+
+          # 7) Virtual trail touch is now information, not an instant panic-exit.
+          once(
+          '''        private bool CheckVirtualStopFirst(Position position, double bid, double ask)
+        {
+            if (double.IsNaN(_trade.VirtualStop))
+                return false;
+
+            bool hit = position.TradeType == TradeType.Buy
+                ? bid <= _trade.VirtualStop
+                : ask >= _trade.VirtualStop;
+
+            if (!hit)
+                return false;
+
+            _requestedCloseReason = "VIRTUAL_TRAIL";
+            _trade.LastExitReason = _requestedCloseReason;
+            Print("VIRTUAL STOP HIT | id={0} stop={1:F2} bid={2:F2} ask={3:F2} mfe={4:F1}", position.Id, _trade.VirtualStop, bid, ask, _trade.Mfe);
+            ClosePosition(position);
+            return true;
+        }
+''',
+          '''        private bool CheckVirtualStopFirst(Position position, double bid, double ask)
+        {
+            if (double.IsNaN(_trade.VirtualStop))
+                return false;
+
+            bool hit = position.TradeType == TradeType.Buy
+                ? bid <= _trade.VirtualStop
+                : ask >= _trade.VirtualStop;
+
+            if (!hit)
+            {
+                _virtualTrailTouched = false;
+                return false;
+            }
+
+            if (!_virtualTrailTouched && JournalDetail)
+                Print("TRAIL TOUCH -> HOLD | id={0} stop={1:F2} bid={2:F2} ask={3:F2} mfe={4:F1} | no exit without structural confirmation", position.Id, _trade.VirtualStop, bid, ask, _trade.Mfe);
+            _virtualTrailTouched = true;
+            return false;
+        }
+''', 'soft virtual trail')
+
+          # 8) HOLD state machine: weakness is fast, exit is deliberately slower and structural.
+          once(
+          '''        private void ManageOpenTrade(Position position, double bid, double ask, double mid)
+        {
+            EnsureTradeState(position);
+
+            double favorable = position.TradeType == TradeType.Buy
+                ? bid - position.EntryPrice
+                : position.EntryPrice - ask;
+            double adverse = position.TradeType == TradeType.Buy
+                ? position.EntryPrice - bid
+                : ask - position.EntryPrice;
+
+            if (favorable > _trade.Mfe)
+                _trade.Mfe = favorable;
+            if (adverse > _trade.Mae)
+                _trade.Mae = adverse;
+
+            bool trendlineBreached = _active.IsTrendlineBreached(mid, Server.Time, Math.Max(CurrentSpread() * 0.20, _noiseEma * 1.5));
+            double health = ComputeTradeHealth(position, trendlineBreached);
+            _trade.LastHealth = health;
+
+            if (ThesisBroken(position, mid, trendlineBreached))
+            {
+                _requestedCloseReason = "THESIS_BROKEN";
+                _trade.LastExitReason = _requestedCloseReason;
+                Print("THESIS EXIT | id={0} active={1}/{2} micro={3}/{4} trendlineBroken={5} health={6:F2}",
+                    position.Id, _active.Direction, _active.Phase, _micro.Direction, _micro.Phase, trendlineBreached, health);
+                ClosePosition(position);
+                return;
+            }
+
+            UpdateAdaptiveVirtualTrail(position, health, trendlineBreached);
+            SyncServerStop(position);
+        }
+''',
+          '''        private void ManageOpenTrade(Position position, double bid, double ask, double mid)
+        {
+            EnsureTradeState(position);
+
+            double favorable = position.TradeType == TradeType.Buy
+                ? bid - position.EntryPrice
+                : position.EntryPrice - ask;
+            double adverse = position.TradeType == TradeType.Buy
+                ? position.EntryPrice - bid
+                : ask - position.EntryPrice;
+
+            if (favorable > _trade.Mfe)
+                _trade.Mfe = favorable;
+            if (adverse > _trade.Mae)
+                _trade.Mae = adverse;
+
+            bool trendlineBreached = _active.IsTrendlineBreached(mid, Server.Time, Math.Max(CurrentSpread() * 0.24, _noiseEma * 1.8));
+            double health = ComputeTradeHealth(position, trendlineBreached);
+            _trade.LastHealth = health;
+
+            UpdateHoldState(position, mid, trendlineBreached);
+
+            if (_holdState == HoldState.ExitConfirmed)
+            {
+                _requestedCloseReason = "STRUCTURAL_EXIT_CONFIRMED";
+                _trade.LastExitReason = _requestedCloseReason;
+                Print("EXIT CONFIRMED | id={0} active={1}/{2} micro={3}/{4} trendlineBroken={5} health={6:F2} confirmTicks={7}",
+                    position.Id, _active.Direction, _active.Phase, _micro.Direction, _micro.Phase, trendlineBreached, health, _exitConfirmTicks);
+                ClosePosition(position);
+                return;
+            }
+
+            // Keep calculating a soft trail for diagnostics, but do not let it overrule an intact mountain.
+            UpdateAdaptiveVirtualTrail(position, health, trendlineBreached);
+            CheckVirtualStopFirst(position, bid, ask);
+        }
+
+        private void UpdateHoldState(Position position, double mid, bool trendlineBreached)
+        {
+            Direction tradeDirection = position.TradeType == TradeType.Buy ? Direction.Up : Direction.Down;
+            Direction opposite = Opposite(tradeDirection);
+            double buffer = Math.Max(CurrentSpread() * 0.22, _noiseEma * 1.8);
+
+            bool protectedBroken = tradeDirection == Direction.Up
+                ? _active.ProtectedPrice > 0 && mid < _active.ProtectedPrice - buffer
+                : _active.ProtectedPrice > 0 && mid > _active.ProtectedPrice + buffer;
+
+            bool oppositeMicroEstablished = _micro.Direction == opposite &&
+                                            (_micro.Phase == MountainPhase.Established ||
+                                             _micro.Phase == MountainPhase.Resumption ||
+                                             _micro.Phase == MountainPhase.Mature);
+
+            int oppositeAligned = _ticks.Aligned(opposite, 4);
+            double oppositeImpulse = _ticks.Delta(6);
+            double noise = Math.Max(_noiseEma, Symbol.TickSize * 5);
+            bool oppositeFastPressure = opposite == Direction.Up
+                ? oppositeAligned >= 3 && oppositeImpulse > noise * 0.80
+                : oppositeAligned >= 3 && oppositeImpulse < -noise * 0.80;
+
+            bool activeFlipped = _active.Direction == opposite;
+            bool structureBroken = activeFlipped || (protectedBroken && trendlineBreached);
+            bool exitEvidence = structureBroken && (oppositeMicroEstablished || oppositeFastPressure);
+
+            bool weaknessEvidence = trendlineBreached ||
+                                    protectedBroken ||
+                                    oppositeMicroEstablished ||
+                                    _active.Phase == MountainPhase.Exhaustion ||
+                                    _active.Phase == MountainPhase.Transition;
+
+            if (exitEvidence)
+            {
+                _exitConfirmTicks++;
+                _weaknessTicks++;
+            }
+            else
+            {
+                _exitConfirmTicks = 0;
+                if (weaknessEvidence)
+                    _weaknessTicks++;
+                else
+                    _weaknessTicks = Math.Max(0, _weaknessTicks - 2);
+            }
+
+            if (_exitConfirmTicks >= ExitConfirmTicks)
+                SetHoldState(HoldState.ExitConfirmed, "structure + opposite pressure confirmed");
+            else if (_weaknessTicks >= WeaknessConfirmTicks)
+                SetHoldState(HoldState.Weakening, "mountain weakening, still holding");
+            else
+                SetHoldState(HoldState.Holding, "active structure intact");
+        }
+
+        private void SetHoldState(HoldState next, string reason)
+        {
+            if (_holdState == next)
+                return;
+
+            HoldState previous = _holdState;
+            _holdState = next;
+            _holdStateSince = Server.Time;
+            Print("HOLD STATE | {0} -> {1} | {2} | weakTicks={3} exitTicks={4} | FROZEN HISTORY: previous state will not repaint",
+                previous, next, reason, _weaknessTicks, _exitConfirmTicks);
+        }
+
+        private void ResetHoldState(bool inTrade)
+        {
+            _weaknessTicks = 0;
+            _exitConfirmTicks = 0;
+            _virtualTrailTouched = false;
+            _holdState = inTrade ? HoldState.Holding : HoldState.Searching;
+            _holdStateSince = Server.Time;
+        }
+''', 'manage + hold machine')
+
+          # 9) Old one-tick thesis function becomes a state query only.
+          old_thesis = '''        private bool ThesisBroken(Position position, double mid, bool trendlineBreached)
+        {
+            Direction tradeDirection = position.TradeType == TradeType.Buy ? Direction.Up : Direction.Down;
+            Direction opposite = Opposite(tradeDirection);
+
+            if (_active.Direction == opposite)
+                return true;
+
+            bool protectedBroken;
+            double buffer = Math.Max(CurrentSpread() * 0.18, _noiseEma * 1.5);
+            if (tradeDirection == Direction.Up)
+                protectedBroken = _active.ProtectedPrice > 0 && mid < _active.ProtectedPrice - buffer;
+            else
+                protectedBroken = _active.ProtectedPrice > 0 && mid > _active.ProtectedPrice + buffer;
+
+            bool oppositeMicroEstablished = _micro.Direction == opposite &&
+                                            (_micro.Phase == MountainPhase.Established || _micro.Phase == MountainPhase.Resumption || _micro.Phase == MountainPhase.Mature);
+
+            return protectedBroken && trendlineBreached && oppositeMicroEstablished;
+        }
+'''
+          once(old_thesis,
+          '''        private bool ThesisBroken(Position position, double mid, bool trendlineBreached)
+        {
+            return _holdState == HoldState.ExitConfirmed;
+        }
+''', 'legacy thesis')
+
+          # 10) Trail is wider while mountain lives; micro protected prices never tighten it.
+          replacements = [
+              ('                healthFactor = 1.12;', '                healthFactor = 1.35;'),
+              ('                healthFactor = 1.00;', '                healthFactor = 1.20;'),
+              ('                healthFactor = 0.82;', '                healthFactor = 1.00;'),
+              ('                healthFactor = 0.62;', '                healthFactor = 0.85;'),
+              ('                    targetFactor = 0.58;', '                    targetFactor = 0.80;'),
+              ('                    targetFactor = 0.68;', '                    targetFactor = 0.88;'),
+              ('                    targetFactor = 0.84;', '                    targetFactor = 0.95;'),
+              ('                phaseFactor = 0.82;', '                phaseFactor = 0.95;'),
+              ('                phaseFactor = 0.62;', '                phaseFactor = 0.85;'),
+              ('                phaseFactor = 0.52;', '                phaseFactor = 0.78;'),
+              ('            double lineFactor = trendlineBreached ? 0.72 : 1.0;', '            double lineFactor = trendlineBreached ? 0.90 : 1.0;'),
+              ('            double tinyProfitActivation = Math.Max(spread * 1.35, _trade.TargetBenchmark * 0.35);', '            double tinyProfitActivation = Math.Max(spread * 1.60, _trade.TargetBenchmark * 0.60);'),
+          ]
+          for old, new in replacements:
+              once(old + '\n', new + '\n', 'trail tuning: ' + old.strip())
+
+          once(
+          '''        private double StructureTrailCandidate(Position position)
+        {
+            double buffer = Math.Max(CurrentSpread() * 0.18, _microThreshold * 0.20);
+
+            if (position.TradeType == TradeType.Buy)
+            {
+                if (_micro.Direction == Direction.Up && _micro.ProtectedPrice > 0)
+                    return _micro.ProtectedPrice - buffer;
+                if (_active.Direction == Direction.Up && _active.ProtectedPrice > 0)
+                    return _active.ProtectedPrice - buffer;
+            }
+            else
+            {
+                if (_micro.Direction == Direction.Down && _micro.ProtectedPrice > 0)
+                    return _micro.ProtectedPrice + buffer;
+                if (_active.Direction == Direction.Down && _active.ProtectedPrice > 0)
+                    return _active.ProtectedPrice + buffer;
+            }
+
+            return 0;
+        }
+''',
+          '''        private double StructureTrailCandidate(Position position)
+        {
+            // Micro structure is intentionally ignored here. Micro pullbacks are allowed to breathe.
+            double buffer = Math.Max(CurrentSpread() * 0.28, _activeThreshold * 0.12);
+
+            if (position.TradeType == TradeType.Buy && _active.Direction == Direction.Up && _active.ProtectedPrice > 0)
+                return _active.ProtectedPrice - buffer;
+
+            if (position.TradeType == TradeType.Sell && _active.Direction == Direction.Down && _active.ProtectedPrice > 0)
+                return _active.ProtectedPrice + buffer;
+
+            return 0;
+        }
+''', 'active-only structure trail')
+
+          # 11) When a position disappears, return state machine to SEARCHING.
+          once(
+          '''                    _hadPosition = false;
+                    _trade.Clear();
+''',
+          '''                    _hadPosition = false;
+                    _trade.Clear();
+                    ResetHoldState(false);
+''', 'clear hold state')
+
+          # Re-attached position starts in HOLD, not SEARCHING.
+          once(
+          '''            _trade.EntryProtectedPrice = _active.ProtectedPrice;
+            _trade.EntryTrailBenchmark = _trailBenchmark;
+        }
+
+        private double ComputeTradeHealth''',
+          '''            _trade.EntryProtectedPrice = _active.ProtectedPrice;
+            _trade.EntryTrailBenchmark = _trailBenchmark;
+            ResetHoldState(true);
+        }
+
+        private double ComputeTradeHealth''', 'reattach hold')
+
+          # Startup marker makes it unmistakable which behavior is running.
+          once('            Print("NAI MOUNTAIN STORY ENGINE V2 STARTED | DEMO ONLY");\n',
+               '            Print("NAI MOUNTAIN STORY ENGINE V2 + STICKY HOLD V3 PATCH STARTED | DEMO ONLY");\n            Print("LAW | COME EARLIER. HOLD THROUGH MICRO PULLBACKS. EXIT ONLY AFTER 5-TICK STRUCTURAL CONFIRMATION.");\n',
+               'startup marker')
+
+          p.write_text(s)
+          PY
+
+      - name: Build cTrader bot
+        run: dotnet build ctrader/NAI-MOUNTAIN-STORY-ENGINE-V2/NAI-MOUNTAIN-STORY-ENGINE-V2.csproj --configuration Release
+
+      - name: Remove one-shot patch workflow and commit code
+        shell: bash
+        run: |
+          rm .github/workflows/patch-smfn-sticky-hold-v3.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ctrader/NAI-MOUNTAIN-STORY-ENGINE-V2/NAI-MOUNTAIN-STORY-ENGINE-V2.cs .github/workflows/patch-smfn-sticky-hold-v3.yml
+          git commit -m "feat: SMFN sticky HOLD and structural exit V3"
+          git push origin HEAD:codex/smfn-sticky-hold-v3
