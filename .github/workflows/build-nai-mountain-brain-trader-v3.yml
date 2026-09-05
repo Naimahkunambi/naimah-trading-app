@@ -1,0 +1,47 @@
+name: Build NAI Mountain Brain Trader V3
+
+on:
+  push:
+    paths:
+      - 'ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V3/**'
+      - '.github/workflows/build-nai-mountain-brain-trader-v3.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Restore
+        run: dotnet restore ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V3/NAI-MOUNTAIN-BRAIN-TRADER-V3.csproj
+
+      - name: Build
+        run: dotnet build ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V3/NAI-MOUNTAIN-BRAIN-TRADER-V3.csproj -c Release --no-restore
+
+      - name: Locate algo
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Build outputs:'
+          find ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V3 -type f | sort
+          ALGO="$(find ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V3 -type f -name '*.algo' | head -n 1)"
+          if [ -z "$ALGO" ]; then
+            echo 'No .algo file produced by cTrader.Automate build.' >&2
+            exit 1
+          fi
+          cp "$ALGO" NAI-MOUNTAIN-BRAIN-TRADER-V3.algo
+          ls -lh NAI-MOUNTAIN-BRAIN-TRADER-V3.algo
+
+      - name: Upload V3 algo
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAI-MOUNTAIN-BRAIN-TRADER-V3
+          path: NAI-MOUNTAIN-BRAIN-TRADER-V3.algo
+          if-no-files-found: error
