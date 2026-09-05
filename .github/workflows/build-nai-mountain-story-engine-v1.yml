@@ -1,0 +1,45 @@
+name: Build NAI Mountain Story Engine V1
+
+on:
+  push:
+    paths:
+      - 'ctrader/NAI-MOUNTAIN-STORY-ENGINE-V1/**'
+      - '.github/workflows/build-nai-mountain-story-engine-v1.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Restore
+        run: dotnet restore ctrader/NAI-MOUNTAIN-STORY-ENGINE-V1/NAI-MOUNTAIN-STORY-ENGINE-V1.csproj
+
+      - name: Build
+        run: dotnet build ctrader/NAI-MOUNTAIN-STORY-ENGINE-V1/NAI-MOUNTAIN-STORY-ENGINE-V1.csproj -c Release --no-restore
+
+      - name: Locate algo
+        shell: bash
+        run: |
+          set -euo pipefail
+          ALGO="$(find ctrader/NAI-MOUNTAIN-STORY-ENGINE-V1 -type f -name '*.algo' | head -n 1)"
+          if [ -z "$ALGO" ]; then
+            echo 'No .algo file produced.' >&2
+            exit 1
+          fi
+          cp "$ALGO" NAI-MOUNTAIN-STORY-ENGINE-V1.algo
+          ls -lh NAI-MOUNTAIN-STORY-ENGINE-V1.algo
+
+      - name: Upload algo
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAI-MOUNTAIN-STORY-ENGINE-V1
+          path: NAI-MOUNTAIN-STORY-ENGINE-V1.algo
+          if-no-files-found: error
