@@ -1,0 +1,43 @@
+name: Build NAI Mountain Brain Trader V5
+
+on:
+  push:
+    paths:
+      - 'ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5/**'
+      - '.github/workflows/build-nai-mountain-brain-trader-v5.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Restore
+        run: dotnet restore ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5/NAI-MOUNTAIN-BRAIN-TRADER-V5.csproj
+
+      - name: Build
+        run: dotnet build ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5/NAI-MOUNTAIN-BRAIN-TRADER-V5.csproj -c Release --no-restore
+
+      - name: Locate algo
+        run: |
+          set -e
+          ALGO=$(find ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5 -type f -name '*.algo' | head -n 1)
+          if [ -z "$ALGO" ]; then
+            echo "No .algo artifact found"
+            exit 1
+          fi
+          cp "$ALGO" ./NAI-MOUNTAIN-BRAIN-TRADER-V5.algo
+          ls -lh ./NAI-MOUNTAIN-BRAIN-TRADER-V5.algo
+
+      - name: Upload V5 algo
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAI-MOUNTAIN-BRAIN-TRADER-V5
+          path: NAI-MOUNTAIN-BRAIN-TRADER-V5.algo
