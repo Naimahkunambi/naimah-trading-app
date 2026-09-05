@@ -62,6 +62,15 @@ namespace cAlgo.Robots
         private bool _hadPosition;
         private string _requestedCloseReason = string.Empty;
 
+        // STICKY HOLD V3: live state can change; prior journal states are append-only and never repainted.
+        private const int WeaknessConfirmTicks = 3;
+        private const int ExitConfirmTicks = 5;
+        private HoldState _holdState = HoldState.Searching;
+        private int _weaknessTicks;
+        private int _exitConfirmTicks;
+        private DateTime _holdStateSince = DateTime.MinValue;
+        private bool _virtualTrailTouched;
+
         private enum Direction
         {
             Unknown,
@@ -79,6 +88,14 @@ namespace cAlgo.Robots
             Mature,
             Exhaustion,
             Transition
+        }
+
+        private enum HoldState
+        {
+            Searching,
+            Holding,
+            Weakening,
+            ExitConfirmed
         }
 
         private enum SwingKind
@@ -308,7 +325,7 @@ namespace cAlgo.Robots
 
             private void UpdateLivePhase(double price, DateTime time)
             {
-                double breakBuffer = Threshold * 0.15;
+                double breakBuffer = Threshold * 0.28;
 
                 if (Direction == Direction.Up)
                 {
@@ -652,7 +669,8 @@ namespace cAlgo.Robots
             _lastActiveDirection = _active.Direction;
             _cycleFailures.Reset(_active.Version, _active.Direction);
 
-            Print("NAI MOUNTAIN STORY ENGINE V2 STARTED | DEMO ONLY");
+            Print("NAI MOUNTAIN STORY ENGINE V2 + STICKY HOLD V3 STARTED | DEMO ONLY");
+            Print("LAW | COME EARLIER. HOLD MICRO PULLBACKS. EXIT ONLY AFTER 5-TICK STRUCTURAL CONFIRMATION.");
             Print("LAW | TICKS BUILD MICRO / ACTIVE / MAJOR MOUNTAINS. TIMEFRAMES ARE LANDSCAPE ONLY.");
             Print("LAW | H1/M15/M5 NEVER AUTHORIZE OR VETO AN ENTRY.");
             Print("LAW | EACH DISTINCT MICRO PULLBACK CAN CREATE A NEW ENTRY INSIDE ONE ACTIVE MOUNTAIN.");
@@ -681,15 +699,9 @@ namespace cAlgo.Robots
 
             Position position = GetPosition();
             if (position != null)
-            {
                 _hadPosition = true;
-                if (CheckVirtualStopFirst(position, bid, ask))
-                {
-                    _lastMid = mid;
-                    return;
-                }
-            }
 
+            // Update the current mountain before deciding whether the trade should exit.
             bool microChanged = _micro.Update(mid, Server.Time, _microThreshold);
             bool activeChanged = _active.Update(mid, Server.Time, _activeThreshold);
             bool majorChanged = _major.Update(mid, Server.Time, _majorThreshold);
@@ -719,6 +731,7 @@ namespace cAlgo.Robots
                 {
                     _hadPosition = false;
                     _trade.Clear();
+                    ResetHoldState(false);
                 }
 
                 UpdatePullbackAndMaybeTrade(mid);
@@ -770,9 +783,9 @@ namespace cAlgo.Robots
             double spread = CurrentSpread();
             double noise = Math.Max(_noiseEma, Symbol.TickSize * 5);
 
-            _microThreshold = Math.Max(spread * 0.90, noise * 4.0);
-            _activeThreshold = Math.Max(spread * 2.00, noise * 9.0);
-            _majorThreshold = Math.Max(spread * 5.00, noise * 22.0);
+            _microThreshold = Math.Max(spread * 0.82, noise * 3.4);
+            _activeThreshold = Math.Max(spread * 1.70, noise * 7.2);
+            _majorThreshold = Math.Max(spread * 4.50, noise * 19.0);
         }
 
         private void UpdateLandscape()
@@ -878,7 +891,7 @@ namespace cAlgo.Robots
 
         private bool PullbackBrokenInActiveDirection(Direction activeDirection, double mid)
         {
-            double buffer = Math.Max(CurrentSpread() * 0.08, _noiseEma * 0.50);
+            double buffer = Math.Max(CurrentSpread() * 0.05, _noiseEma * 0.30);
 
             if (_micro.Direction == activeDirection)
                 return true;
@@ -897,27 +910,19 @@ namespace cAlgo.Robots
 
         private bool FastFollowThrough(Direction direction)
         {
-            if (_ticks.Count < 13)
+            if (_ticks.Count < 9)
                 return false;
 
             int aligned = _ticks.Aligned(direction, 3);
-            double fast = _ticks.Delta(4);
-            double medium = _ticks.Delta(12);
-            double accel = _ticks.Acceleration(3, 10);
+            double fast = _ticks.Delta(3);
+            double medium = _ticks.Delta(8);
+            double accel = _ticks.Acceleration(2, 7);
             double noise = Math.Max(_noiseEma, Symbol.TickSize * 5);
 
             if (direction == Direction.Up)
-            {
-                return aligned >= 2 &&
-                       fast > noise * 0.45 &&
-                       medium > -_microThreshold * 0.35 &&
-                       accel > -noise * 0.15;
-            }
+                return aligned >= 2 && fast > noise * 0.32 && medium > -_microThreshold * 0.45 && accel > -noise * 0.25;
 
-            return aligned >= 2 &&
-                   fast < -noise * 0.45 &&
-                   medium < _microThreshold * 0.35 &&
-                   accel < noise * 0.15;
+            return aligned >= 2 && fast < -noise * 0.32 && medium < _microThreshold * 0.45 && accel < noise * 0.25;
         }
 
         private void LearnTrailBenchmark(double observedRetracement)
@@ -942,11 +947,12 @@ namespace cAlgo.Robots
 
             TradeType side = direction == Direction.Up ? TradeType.Buy : TradeType.Sell;
             double spread = CurrentSpread();
-            double stopBuffer = Math.Max(spread * 0.30, _microThreshold * 0.25);
+            double stopBuffer = Math.Max(spread * 0.35, _microThreshold * 0.35);
             double plannedEntry = side == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
-            double stopPrice = side == TradeType.Buy
-                ? _pullbackExtreme - stopBuffer
-                : _pullbackExtreme + stopBuffer;
+            double structureAnchor = _pullbackExtreme;
+            if (_active.ProtectedPrice > 0)
+                structureAnchor = side == TradeType.Buy ? Math.Min(_pullbackExtreme, _active.ProtectedPrice) : Math.Max(_pullbackExtreme, _active.ProtectedPrice);
+            double stopPrice = side == TradeType.Buy ? structureAnchor - stopBuffer : structureAnchor + stopBuffer;
 
             double riskDistance = Math.Abs(plannedEntry - stopPrice);
             double minRisk = Math.Max(spread * 1.10, _microThreshold * 1.10);
@@ -1013,6 +1019,8 @@ namespace cAlgo.Robots
             _lastTradedPullbackSerial = _pullbackSerial;
             _hadPosition = true;
             _requestedCloseReason = string.Empty;
+            ResetHoldState(true);
+            Print("COME + HOLD | id={0} active v{1} {2}/{3} | state={4} | frozen history begins", position.Id, _active.Version, _active.Direction, _active.Phase, _holdState);
 
             Print("ENTERED | id={0} {1} entry={2:F2} SL={3} volume={4} riskDistance={5:F1} targetBenchmark={6:F1}",
                 position.Id,
@@ -1029,52 +1037,108 @@ namespace cAlgo.Robots
             if (double.IsNaN(_trade.VirtualStop))
                 return false;
 
-            bool hit = position.TradeType == TradeType.Buy
-                ? bid <= _trade.VirtualStop
-                : ask >= _trade.VirtualStop;
-
+            bool hit = position.TradeType == TradeType.Buy ? bid <= _trade.VirtualStop : ask >= _trade.VirtualStop;
             if (!hit)
+            {
+                _virtualTrailTouched = false;
                 return false;
+            }
 
-            _requestedCloseReason = "VIRTUAL_TRAIL";
-            _trade.LastExitReason = _requestedCloseReason;
-            Print("VIRTUAL STOP HIT | id={0} stop={1:F2} bid={2:F2} ask={3:F2} mfe={4:F1}", position.Id, _trade.VirtualStop, bid, ask, _trade.Mfe);
-            ClosePosition(position);
-            return true;
+            if (!_virtualTrailTouched && JournalDetail)
+                Print("TRAIL TOUCH -> HOLD | id={0} stop={1:F2} bid={2:F2} ask={3:F2} mfe={4:F1} | wait for structure", position.Id, _trade.VirtualStop, bid, ask, _trade.Mfe);
+            _virtualTrailTouched = true;
+            return false;
         }
 
         private void ManageOpenTrade(Position position, double bid, double ask, double mid)
         {
             EnsureTradeState(position);
 
-            double favorable = position.TradeType == TradeType.Buy
-                ? bid - position.EntryPrice
-                : position.EntryPrice - ask;
-            double adverse = position.TradeType == TradeType.Buy
-                ? position.EntryPrice - bid
-                : ask - position.EntryPrice;
+            double favorable = position.TradeType == TradeType.Buy ? bid - position.EntryPrice : position.EntryPrice - ask;
+            double adverse = position.TradeType == TradeType.Buy ? position.EntryPrice - bid : ask - position.EntryPrice;
+            if (favorable > _trade.Mfe) _trade.Mfe = favorable;
+            if (adverse > _trade.Mae) _trade.Mae = adverse;
 
-            if (favorable > _trade.Mfe)
-                _trade.Mfe = favorable;
-            if (adverse > _trade.Mae)
-                _trade.Mae = adverse;
-
-            bool trendlineBreached = _active.IsTrendlineBreached(mid, Server.Time, Math.Max(CurrentSpread() * 0.20, _noiseEma * 1.5));
+            bool trendlineBreached = _active.IsTrendlineBreached(mid, Server.Time, Math.Max(CurrentSpread() * 0.24, _noiseEma * 1.8));
             double health = ComputeTradeHealth(position, trendlineBreached);
             _trade.LastHealth = health;
+            UpdateHoldState(position, mid, trendlineBreached);
 
-            if (ThesisBroken(position, mid, trendlineBreached))
+            if (_holdState == HoldState.ExitConfirmed)
             {
-                _requestedCloseReason = "THESIS_BROKEN";
+                _requestedCloseReason = "STRUCTURAL_EXIT_CONFIRMED";
                 _trade.LastExitReason = _requestedCloseReason;
-                Print("THESIS EXIT | id={0} active={1}/{2} micro={3}/{4} trendlineBroken={5} health={6:F2}",
-                    position.Id, _active.Direction, _active.Phase, _micro.Direction, _micro.Phase, trendlineBreached, health);
+                Print("EXIT CONFIRMED | id={0} active={1}/{2} micro={3}/{4} trendlineBroken={5} health={6:F2} confirmTicks={7}", position.Id, _active.Direction, _active.Phase, _micro.Direction, _micro.Phase, trendlineBreached, health, _exitConfirmTicks);
                 ClosePosition(position);
                 return;
             }
 
             UpdateAdaptiveVirtualTrail(position, health, trendlineBreached);
-            SyncServerStop(position);
+            CheckVirtualStopFirst(position, bid, ask);
+        }
+
+        private void UpdateHoldState(Position position, double mid, bool trendlineBreached)
+        {
+            Direction tradeDirection = position.TradeType == TradeType.Buy ? Direction.Up : Direction.Down;
+            Direction opposite = Opposite(tradeDirection);
+            double buffer = Math.Max(CurrentSpread() * 0.22, _noiseEma * 1.8);
+
+            bool protectedBroken = tradeDirection == Direction.Up
+                ? _active.ProtectedPrice > 0 && mid < _active.ProtectedPrice - buffer
+                : _active.ProtectedPrice > 0 && mid > _active.ProtectedPrice + buffer;
+
+            bool oppositeMicroEstablished = _micro.Direction == opposite &&
+                (_micro.Phase == MountainPhase.Established || _micro.Phase == MountainPhase.Resumption || _micro.Phase == MountainPhase.Mature);
+
+            int oppositeAligned = _ticks.Aligned(opposite, 4);
+            double oppositeImpulse = _ticks.Delta(6);
+            double noise = Math.Max(_noiseEma, Symbol.TickSize * 5);
+            bool oppositeFastPressure = opposite == Direction.Up
+                ? oppositeAligned >= 3 && oppositeImpulse > noise * 0.80
+                : oppositeAligned >= 3 && oppositeImpulse < -noise * 0.80;
+
+            bool structureBroken = _active.Direction == opposite || (protectedBroken && trendlineBreached);
+            bool exitEvidence = structureBroken && (oppositeMicroEstablished || oppositeFastPressure);
+            bool weaknessEvidence = trendlineBreached || protectedBroken || oppositeMicroEstablished ||
+                                    _active.Phase == MountainPhase.Exhaustion || _active.Phase == MountainPhase.Transition;
+
+            if (exitEvidence)
+            {
+                _exitConfirmTicks++;
+                _weaknessTicks++;
+            }
+            else
+            {
+                _exitConfirmTicks = 0;
+                if (weaknessEvidence) _weaknessTicks++;
+                else _weaknessTicks = Math.Max(0, _weaknessTicks - 2);
+            }
+
+            if (_exitConfirmTicks >= ExitConfirmTicks)
+                SetHoldState(HoldState.ExitConfirmed, "structure + opposite pressure confirmed");
+            else if (_weaknessTicks >= WeaknessConfirmTicks)
+                SetHoldState(HoldState.Weakening, "mountain weakening, still holding");
+            else
+                SetHoldState(HoldState.Holding, "active structure intact");
+        }
+
+        private void SetHoldState(HoldState next, string reason)
+        {
+            if (_holdState == next)
+                return;
+            HoldState previous = _holdState;
+            _holdState = next;
+            _holdStateSince = Server.Time;
+            Print("HOLD STATE | {0} -> {1} | {2} | weakTicks={3} exitTicks={4} | FROZEN HISTORY", previous, next, reason, _weaknessTicks, _exitConfirmTicks);
+        }
+
+        private void ResetHoldState(bool inTrade)
+        {
+            _weaknessTicks = 0;
+            _exitConfirmTicks = 0;
+            _virtualTrailTouched = false;
+            _holdState = inTrade ? HoldState.Holding : HoldState.Searching;
+            _holdStateSince = Server.Time;
         }
 
         private void EnsureTradeState(Position position)
@@ -1095,6 +1159,7 @@ namespace cAlgo.Robots
             _trade.EntryTrendline = _active.ProjectTrendline(Server.Time);
             _trade.EntryProtectedPrice = _active.ProtectedPrice;
             _trade.EntryTrailBenchmark = _trailBenchmark;
+            ResetHoldState(true);
         }
 
         private double ComputeTradeHealth(Position position, bool trendlineBreached)
@@ -1138,23 +1203,7 @@ namespace cAlgo.Robots
 
         private bool ThesisBroken(Position position, double mid, bool trendlineBreached)
         {
-            Direction tradeDirection = position.TradeType == TradeType.Buy ? Direction.Up : Direction.Down;
-            Direction opposite = Opposite(tradeDirection);
-
-            if (_active.Direction == opposite)
-                return true;
-
-            bool protectedBroken;
-            double buffer = Math.Max(CurrentSpread() * 0.18, _noiseEma * 1.5);
-            if (tradeDirection == Direction.Up)
-                protectedBroken = _active.ProtectedPrice > 0 && mid < _active.ProtectedPrice - buffer;
-            else
-                protectedBroken = _active.ProtectedPrice > 0 && mid > _active.ProtectedPrice + buffer;
-
-            bool oppositeMicroEstablished = _micro.Direction == opposite &&
-                                            (_micro.Phase == MountainPhase.Established || _micro.Phase == MountainPhase.Resumption || _micro.Phase == MountainPhase.Mature);
-
-            return protectedBroken && trendlineBreached && oppositeMicroEstablished;
+            return _holdState == HoldState.ExitConfirmed;
         }
 
         private void UpdateAdaptiveVirtualTrail(Position position, double health, bool trendlineBreached)
@@ -1167,35 +1216,35 @@ namespace cAlgo.Robots
 
             double healthFactor;
             if (health >= 0.78)
-                healthFactor = 1.12;
+                healthFactor = 1.35;
             else if (health >= 0.60)
-                healthFactor = 1.00;
+                healthFactor = 1.20;
             else if (health >= 0.42)
-                healthFactor = 0.82;
+                healthFactor = 1.00;
             else
-                healthFactor = 0.62;
+                healthFactor = 0.85;
 
             double targetFactor = 1.0;
             if (_trade.TargetBenchmark > 0)
             {
                 double progress = _trade.Mfe / _trade.TargetBenchmark;
                 if (progress >= 1.20)
-                    targetFactor = 0.58;
+                    targetFactor = 0.80;
                 else if (progress >= 1.00)
-                    targetFactor = 0.68;
+                    targetFactor = 0.88;
                 else if (progress >= 0.75)
-                    targetFactor = 0.84;
+                    targetFactor = 0.95;
             }
 
             double phaseFactor = 1.0;
             if (_active.Phase == MountainPhase.Mature)
-                phaseFactor = 0.82;
+                phaseFactor = 0.95;
             else if (_active.Phase == MountainPhase.Exhaustion)
-                phaseFactor = 0.62;
+                phaseFactor = 0.85;
             else if (_active.Phase == MountainPhase.Transition)
-                phaseFactor = 0.52;
+                phaseFactor = 0.78;
 
-            double lineFactor = trendlineBreached ? 0.72 : 1.0;
+            double lineFactor = trendlineBreached ? 0.90 : 1.0;
             double trailDistance = baseDistance * healthFactor * targetFactor * phaseFactor * lineFactor;
             double minimumTrail = Math.Max(spread * 1.12, _noiseEma * 3.5);
             double maximumTrail = Math.Max(minimumTrail, baseDistance * 1.35);
@@ -1203,7 +1252,7 @@ namespace cAlgo.Robots
 
             double protectedDistance = _trade.Mfe - trailDistance;
 
-            double tinyProfitActivation = Math.Max(spread * 1.35, _trade.TargetBenchmark * 0.35);
+            double tinyProfitActivation = Math.Max(spread * 1.60, _trade.TargetBenchmark * 0.60);
             if (_trade.Mfe >= tinyProfitActivation)
                 protectedDistance = Math.Max(protectedDistance, spread * 0.05);
 
@@ -1239,23 +1288,12 @@ namespace cAlgo.Robots
 
         private double StructureTrailCandidate(Position position)
         {
-            double buffer = Math.Max(CurrentSpread() * 0.18, _microThreshold * 0.20);
-
-            if (position.TradeType == TradeType.Buy)
-            {
-                if (_micro.Direction == Direction.Up && _micro.ProtectedPrice > 0)
-                    return _micro.ProtectedPrice - buffer;
-                if (_active.Direction == Direction.Up && _active.ProtectedPrice > 0)
-                    return _active.ProtectedPrice - buffer;
-            }
-            else
-            {
-                if (_micro.Direction == Direction.Down && _micro.ProtectedPrice > 0)
-                    return _micro.ProtectedPrice + buffer;
-                if (_active.Direction == Direction.Down && _active.ProtectedPrice > 0)
-                    return _active.ProtectedPrice + buffer;
-            }
-
+            // Micro structure does not tighten HOLD. Use active mountain structure only.
+            double buffer = Math.Max(CurrentSpread() * 0.28, _activeThreshold * 0.12);
+            if (position.TradeType == TradeType.Buy && _active.Direction == Direction.Up && _active.ProtectedPrice > 0)
+                return _active.ProtectedPrice - buffer;
+            if (position.TradeType == TradeType.Sell && _active.Direction == Direction.Down && _active.ProtectedPrice > 0)
+                return _active.ProtectedPrice + buffer;
             return 0;
         }
 
