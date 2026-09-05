@@ -1,0 +1,47 @@
+name: Build NAI Mountain Brain Trader V5.1
+
+on:
+  push:
+    paths:
+      - 'ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5-1/**'
+      - 'ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5/NAI-MOUNTAIN-BRAIN-TRADER-V5.cs'
+      - '.github/workflows/build-nai-mountain-brain-trader-v5-1.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate V5.1 source from V5
+        run: python3 ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5-1/make_v51.py
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Restore
+        run: dotnet restore ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5-1/NAI-MOUNTAIN-BRAIN-TRADER-V5-1.csproj
+
+      - name: Build
+        run: dotnet build ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5-1/NAI-MOUNTAIN-BRAIN-TRADER-V5-1.csproj -c Release --no-restore
+
+      - name: Locate algo
+        run: |
+          set -e
+          ALGO=$(find ctrader/NAI-MOUNTAIN-BRAIN-TRADER-V5-1 -type f -name '*.algo' | head -n 1)
+          if [ -z "$ALGO" ]; then
+            echo "No .algo artifact found"
+            exit 1
+          fi
+          cp "$ALGO" ./NAI-MOUNTAIN-BRAIN-TRADER-V5-1.algo
+          ls -lh ./NAI-MOUNTAIN-BRAIN-TRADER-V5-1.algo
+
+      - name: Upload V5.1 algo
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAI-MOUNTAIN-BRAIN-TRADER-V5-1
+          path: NAI-MOUNTAIN-BRAIN-TRADER-V5-1.algo
