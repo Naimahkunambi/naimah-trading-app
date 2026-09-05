@@ -1,0 +1,48 @@
+name: Build NAI Mountain Brain V4 Active Trail
+
+on:
+  push:
+    paths:
+      - 'ctrader/NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL/**'
+      - '.github/workflows/build-nai-mountain-brain-v4-active-trail.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate Active Trail source from V3
+        run: python ctrader/NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL/make_active_trail.py
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Restore
+        run: dotnet restore ctrader/NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL/NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL.csproj
+
+      - name: Build
+        run: dotnet build ctrader/NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL/NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL.csproj -c Release --no-restore
+
+      - name: Locate algo
+        shell: bash
+        run: |
+          set -euo pipefail
+          ALGO="$(find ctrader/NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL -type f -name '*.algo' | head -n 1)"
+          if [ -z "$ALGO" ]; then
+            echo 'No .algo file produced by cTrader.Automate build.' >&2
+            exit 1
+          fi
+          cp "$ALGO" NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL.algo
+          ls -lh NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL.algo
+
+      - name: Upload algo
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL
+          path: NAI-MOUNTAIN-BRAIN-V4-ACTIVE-TRAIL.algo
+          if-no-files-found: error
