@@ -1,201 +1,103 @@
 //+------------------------------------------------------------------+
 //|        VWAP_EMA8_BehaviorRespect_V5_0.mq5                       |
 //|                                                                  |
-//| v5.10                                                            |
+//| v5.20                                                            |
 //|                                                                  |
-//| STRATEGY IDENTITY                                                |
-//| VWAP = DIRECTION + RETEST AREA                                   |
-//| LIVE PRICE = RETEST / RECLAIM EXECUTION                          |
-//| EMA8 M5 = RUNNER MANAGEMENT                                      |
+//| CORE                                                             |
+//| VWAP = side + retest / reclaim signal                            |
+//| EMA8 = runner health / context, NOT a mechanical exit            |
 //|                                                                  |
-//| V25 EXECUTION UPGRADES                                           |
-//| 1) VOLATILITY: slow M1 + fast M1 + live tick-window movement.   |
-//| 2) SPEED: no 2x M5 entry gate; cached VWAP/ranges; live entry.   |
-//| 3) COSTS: spread + learned/fallback commission economic floor.   |
+//| HOLD LOGIC                                                       |
+//| Once BUY/SELL is open, HOLD it through EMA/VWAP noise.           |
+//| Do not make little exit/re-entry trades.                          |
+//| Close only when the FULL OPPOSITE VWAP setup confirms, then       |
+//| reverse immediately into the new direction.                      |
+//|                                                                  |
+//| V25 EXECUTION                                                    |
+//| Adaptive slow+fast+live volatility                               |
+//| Cached/incremental VWAP                                          |
+//| Spread + learned commission economic floor                       |
 //+------------------------------------------------------------------+
 #property strict
-#property version "5.10"
+#property version "5.20"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
 
-#define V51_TICK_BUFFER 4096
+#define V52_TICK_BUFFER 4096
 
 //====================================================================
 // INPUTS
 //====================================================================
 
-//--- Trading
-input double InpV51_Lots                         = 0.01;
-input ulong  InpV51_Magic                        = 26090851;
-input int    InpV51_DeviationPoints              = 30;
-input int    InpV51_EmergencySLPoints            = 0;       // 0 = OFF
+input double InpV52_Lots                         = 0.01;
+input ulong  InpV52_Magic                        = 26090852;
+input int    InpV52_DeviationPoints              = 30;
+input int    InpV52_EmergencySLPoints            = 0;       // 0 = OFF
 
-//--- Core strategy clocks
-input ENUM_TIMEFRAMES InpV51_MapTF                = PERIOD_M5;
-input ENUM_TIMEFRAMES InpV51_TriggerTF            = PERIOD_M1;
-input int    InpV51_EMAPeriod                     = 8;
+input ENUM_TIMEFRAMES InpV52_MapTF               = PERIOD_M5;
+input ENUM_TIMEFRAMES InpV52_TriggerTF           = PERIOD_M1;
+input int    InpV52_EMAPeriod                    = 8;
 
-//--- VWAP
-input int    InpV51_VWAPResetHour                 = 0;
-input bool   InpV51_PreferRealVolume              = false;
+// VWAP session
+input int    InpV52_VWAPResetHour                = 0;
+input bool   InpV52_PreferRealVolume             = false;
 
-//====================================================================
-// 1) V25 VOLATILITY ENGINE
-//====================================================================
+// V25 volatility engine
+input int    InpV52_SlowM1Lookback               = 20;
+input int    InpV52_FastM1Lookback               = 5;
+input int    InpV52_LiveVolWindowSeconds         = 30;
+input int    InpV52_LiveVolMinTicks              = 5;
+input double InpV52_LiveVolWeight                 = 1.00;
+input double InpV52_FastM1Weight                  = 0.60;
+input double InpV52_MinAdaptiveVsSlow             = 0.45;
+input double InpV52_MaxAdaptiveVsSlow             = 3.00;
+input int    InpV52_M5RangeLookback               = 12;
 
-// Slow environment
-input int    InpV51_SlowM1Lookback                = 20;
+// VWAP behavior
+input double InpV52_DepartureAdaptiveFrac         = 0.60;
+input double InpV52_RetestBandAdaptiveFrac        = 0.25;
+input double InpV52_ReclaimAdaptiveFrac           = 0.18;
+input double InpV52_VWAPWrongDepthAdaptiveFrac    = 0.18;
+input int    InpV52_VWAPWrongSideSeconds          = 20;
+input int    InpV52_RetestTimeoutMinutes          = 10;
 
-// Faster environment response
-input int    InpV51_FastM1Lookback                = 5;
+// EMA8 is now a HOLD monitor only.
+// It may warn that the runner is weak, but it will NOT close a trade.
+input double InpV52_EMADeepWarningM5RangeFrac     = 0.35;
 
-// Live V25 movement window
-input int    InpV51_LiveVolWindowSeconds          = 30;
-input int    InpV51_LiveVolMinTicks               = 5;
-input double InpV51_LiveVolWeight                  = 1.00;
+// Transaction costs
+input double InpV52_FallbackCommissionPerLotRT    = 58.0;
+input bool   InpV52_AutoLearnCommission           = true;
+input int    InpV52_CommissionHistoryDays         = 90;
+input double InpV52_CostSafetyMultiple            = 1.25;
+input int    InpV52_ExpectedSlippagePoints        = 0;
 
-// Blend completed M1 ranges. Live range can override upward immediately.
-input double InpV51_FastM1Weight                   = 0.60;
-
-// Sanity bounds versus slow M1 environment
-input double InpV51_MinAdaptiveVsSlow              = 0.45;
-input double InpV51_MaxAdaptiveVsSlow              = 3.00;
-
-// M5 range is used only for EMA runner breathing / takeover
-input int    InpV51_M5RangeLookback                = 12;
-
-//====================================================================
-// VWAP BEHAVIOR
-//====================================================================
-
-// A move away from VWAP itself establishes the side.
-// No completed-M5 entry permission gate is used.
-input double InpV51_DepartureAdaptiveFrac          = 0.60;
-
-// Price entering this band starts a VWAP retest interaction.
-input double InpV51_RetestBandAdaptiveFrac         = 0.25;
-
-// Natural live reclaim distance before transaction-cost floor.
-input double InpV51_ReclaimAdaptiveFrac            = 0.18;
-
-// VWAP pierce is allowed. Failure requires DEPTH + TIME.
-input double InpV51_VWAPWrongDepthAdaptiveFrac     = 0.18;
-input int    InpV51_VWAPWrongSideSeconds           = 20;
-
-// Stale interaction protection
-input int    InpV51_RetestTimeoutMinutes           = 10;
+// UI / logs
+input int    InpV52_PanelUpdateMilliseconds       = 500;
+input bool   InpV52_VerboseLog                    = true;
 
 //====================================================================
-// EMA8 RUNNER MANAGEMENT
+// TYPES / STATE
 //====================================================================
 
-// Once executable MFE reaches this fraction of normal M5 range,
-// management responsibility transfers from VWAP to EMA8.
-input double InpV51_EMATakeoverM5RangeFrac         = 0.70;
-
-// One deep close through EMA8 exits immediately.
-// Otherwise tolerate a shallow first close and require repeated loss.
-input double InpV51_EMADeepBreakM5RangeFrac        = 0.35;
-input int    InpV51_EMAWrongSideCloses             = 2;
-
-input bool   InpV51_UseEarlyVWAPFailureExit        = true;
-
-//====================================================================
-// 3) TRANSACTION COST ENGINE
-//====================================================================
-
-// Fallback round-trip commission in ACCOUNT CURRENCY per 1.00 lot.
-// 58.0 means 0.58 account-currency units at 0.01 lot.
-// Auto-learning below replaces this once completed symbol trades exist.
-input double InpV51_FallbackCommissionPerLotRT     = 58.0;
-input bool   InpV51_AutoLearnCommission            = true;
-input int    InpV51_CommissionHistoryDays          = 90;
-
-// Entry reclaim/departure must be at least this multiple of
-// live spread + round-trip commission price-equivalent.
-input double InpV51_CostSafetyMultiple             = 1.25;
-
-// Optional expected slippage cost, expressed as symbol points.
-input int    InpV51_ExpectedSlippagePoints         = 0;
-
-//====================================================================
-// PERFORMANCE / DISPLAY
-//====================================================================
-
-input int    InpV51_PanelUpdateMilliseconds        = 500;
-input bool   InpV51_VerboseLog                     = true;
-
-//====================================================================
-// STATE
-//====================================================================
-
-enum V51_SETUP_STATE
+enum V52_SETUP_STATE
 {
-   V51_IDLE = 0,
-   V51_BUY_DEPARTED,
-   V51_BUY_RETEST,
-   V51_SELL_DEPARTED,
-   V51_SELL_RETEST
+   V52_IDLE = 0,
+   V52_BUY_DEPARTED,
+   V52_BUY_RETEST,
+   V52_SELL_DEPARTED,
+   V52_SELL_RETEST
 };
 
-V51_SETUP_STATE g_state = V51_IDLE;
+enum V52_SIGNAL
+{
+   V52_SIGNAL_NONE = 0,
+   V52_SIGNAL_BUY,
+   V52_SIGNAL_SELL
+};
 
-int g_emaHandle = INVALID_HANDLE;
-
-// New-bar clocks
-datetime g_lastM1Bar = 0;
-datetime g_lastM5Bar = 0;
-
-// Cached M1/M5 environment
-double g_slowM1Range = 0.0;
-double g_fastM1Range = 0.0;
-double g_avgM5Range  = 0.0;
-double g_currentM1Open = 0.0;
-
-// Live tick-window buffer
-long   g_tickTimeMsc[V51_TICK_BUFFER];
-double g_tickBid[V51_TICK_BUFFER];
-int    g_tickHead = 0;
-int    g_tickStored = 0;
-
-double g_liveTickRange = 0.0;
-double g_adaptiveRange = 0.0;
-
-// Incremental VWAP cache for COMPLETED M5 bars in current session
-datetime g_vwapSessionStart = 0;
-double   g_vwapCompletedPV   = 0.0;
-double   g_vwapCompletedVol  = 0.0;
-double   g_liveVWAP          = 0.0;
-bool     g_haveLiveVWAP      = false;
-
-// Retest state
-datetime g_retestStart = 0;
-datetime g_wrongSideSince = 0;
-double   g_retestExtreme = 0.0;
-
-// Position management
-bool   g_emaTakeover = false;
-int    g_emaWrongCount = 0;
-double g_mfe = 0.0;
-
-// Cost state
-double g_commissionPerLotRT = 0.0;
-double g_lastSpreadDistance = 0.0;
-double g_lastCommissionDistance = 0.0;
-double g_lastFrictionDistance = 0.0;
-double g_lastEstimatedRoundTripCostMoney = 0.0;
-bool   g_refreshCommissionNextM1 = false;
-
-// Panel/log state
-ulong  g_lastPanelMs = 0;
-string g_lastAction = "Waiting";
-
-//====================================================================
-// COMMISSION GROUP FOR AUTO-LEARNING
-//====================================================================
-
-struct V51CommissionGroup
+struct V52CommissionGroup
 {
    long   positionId;
    double cost;
@@ -204,61 +106,111 @@ struct V51CommissionGroup
    bool   hasOut;
 };
 
+V52_SETUP_STATE g_state = V52_IDLE;
+
+int g_emaHandle = INVALID_HANDLE;
+
+datetime g_lastM1Bar = 0;
+datetime g_lastM5Bar = 0;
+
+// Cached ranges
+double g_slowM1Range = 0.0;
+double g_fastM1Range = 0.0;
+double g_avgM5Range  = 0.0;
+
+// Tick-window volatility
+long   g_tickTimeMsc[V52_TICK_BUFFER];
+double g_tickBid[V52_TICK_BUFFER];
+int    g_tickHead = 0;
+int    g_tickStored = 0;
+double g_liveTickRange = 0.0;
+double g_adaptiveRange = 0.0;
+
+// Incremental VWAP cache
+datetime g_vwapSessionStart = 0;
+double   g_vwapCompletedPV  = 0.0;
+double   g_vwapCompletedVol = 0.0;
+double   g_liveVWAP         = 0.0;
+bool     g_haveLiveVWAP     = false;
+
+// Retest state
+datetime g_retestStart = 0;
+datetime g_wrongSideSince = 0;
+double   g_retestExtreme = 0.0;
+
+// Runner state
+double g_mfe = 0.0;
+int    g_emaWrongCloses = 0;
+bool   g_emaDeepWarning = false;
+string g_runnerHealth = "FLAT";
+
+// Cost state
+double g_commissionPerLotRT = 0.0;
+double g_lastSpreadDistance = 0.0;
+double g_lastCommissionDistance = 0.0;
+double g_lastFrictionDistance = 0.0;
+double g_lastEstimatedRTCostMoney = 0.0;
+bool   g_refreshCommissionNextM1 = false;
+
+// UI
+ulong  g_lastPanelMs = 0;
+string g_lastAction = "Waiting";
+
 //====================================================================
 // LOG
 //====================================================================
 
-void V51Log(string text)
+void V52Log(string text)
 {
-   if(InpV51_VerboseLog)
-      Print("[BEHAVIOR V5.10] ", text);
+   if(InpV52_VerboseLog)
+      Print("[BEHAVIOR V5.20] ", text);
 }
 
 //====================================================================
-// GENERAL HELPERS
+// BASIC HELPERS
 //====================================================================
 
-datetime V51SessionStart(datetime when)
+datetime V52SessionStart(datetime when)
 {
    MqlDateTime dt;
    TimeToStruct(when, dt);
 
    int originalHour = dt.hour;
 
-   dt.hour = InpV51_VWAPResetHour;
+   dt.hour = InpV52_VWAPResetHour;
    dt.min  = 0;
    dt.sec  = 0;
 
    datetime start = StructToTime(dt);
 
-   if(originalHour < InpV51_VWAPResetHour)
+   if(originalHour < InpV52_VWAPResetHour)
       start -= 86400;
 
    return start;
 }
 
-bool V51GetBar(ENUM_TIMEFRAMES tf,
+bool V52GetBar(ENUM_TIMEFRAMES tf,
                int shift,
                MqlRates &bar)
 {
-   MqlRates rates[1];
+   MqlRates arr[1];
 
-   if(CopyRates(_Symbol, tf, shift, 1, rates) != 1)
+   if(CopyRates(_Symbol, tf, shift, 1, arr) != 1)
       return false;
 
-   bar = rates[0];
+   bar = arr[0];
    return true;
 }
 
-double V51BarVolume(const MqlRates &bar)
+double V52BarVolume(const MqlRates &bar)
 {
-   if(InpV51_PreferRealVolume && bar.real_volume > 0)
+   if(InpV52_PreferRealVolume && bar.real_volume > 0)
       return (double)bar.real_volume;
 
    return (double)bar.tick_volume;
 }
 
-bool V51AverageRange(ENUM_TIMEFRAMES tf,
+bool V52AverageRange(ENUM_TIMEFRAMES tf,
                      int startShift,
                      int count,
                      double &result)
@@ -285,14 +237,14 @@ bool V51AverageRange(ENUM_TIMEFRAMES tf,
       }
    }
 
-   if(valid == 0)
+   if(valid <= 0)
       return false;
 
    result = sum / valid;
    return true;
 }
 
-double V51NormalizeVolume(double requested)
+double V52NormalizeVolume(double requested)
 {
    double minVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
@@ -321,23 +273,24 @@ double V51NormalizeVolume(double requested)
 }
 
 //====================================================================
-// 1) LIVE V25 VOLATILITY ENGINE
+// VOLATILITY ENGINE
 //====================================================================
 
-void V51RecordTick(const MqlTick &tick)
+void V52RecordTick(const MqlTick &tick)
 {
    g_tickTimeMsc[g_tickHead] = tick.time_msc;
    g_tickBid[g_tickHead] = tick.bid;
 
    g_tickHead++;
-   if(g_tickHead >= V51_TICK_BUFFER)
+
+   if(g_tickHead >= V52_TICK_BUFFER)
       g_tickHead = 0;
 
-   if(g_tickStored < V51_TICK_BUFFER)
+   if(g_tickStored < V52_TICK_BUFFER)
       g_tickStored++;
 }
 
-bool V51GetLiveTickRange(long nowMsc,
+bool V52GetLiveTickRange(long nowMsc,
                          double &range,
                          int &samples)
 {
@@ -347,17 +300,17 @@ bool V51GetLiveTickRange(long nowMsc,
    if(g_tickStored <= 0)
       return false;
 
-   long cutoff = (long)MathMax(1, InpV51_LiveVolWindowSeconds) * 1000;
+   long cutoff = (long)MathMax(1, InpV52_LiveVolWindowSeconds) * 1000;
 
-   double hi = -DBL_MAX;
-   double lo = DBL_MAX;
+   double hi = -1.0e100;
+   double lo =  1.0e100;
 
    for(int k = 0; k < g_tickStored; k++)
    {
       int idx = g_tickHead - 1 - k;
 
       while(idx < 0)
-         idx += V51_TICK_BUFFER;
+         idx += V52_TICK_BUFFER;
 
       long age = nowMsc - g_tickTimeMsc[idx];
 
@@ -375,65 +328,58 @@ bool V51GetLiveTickRange(long nowMsc,
       samples++;
    }
 
-   if(samples < MathMax(2, InpV51_LiveVolMinTicks) ||
-      hi == -DBL_MAX ||
-      lo == DBL_MAX)
-   {
+   if(samples < MathMax(2, InpV52_LiveVolMinTicks))
       return false;
-   }
 
    range = MathMax(0.0, hi - lo);
    return true;
 }
 
-void V51RefreshM1RangeCache()
+void V52RefreshM1RangeCache()
 {
    double slow = 0.0;
    double fast = 0.0;
 
-   if(V51AverageRange(InpV51_TriggerTF,
+   if(V52AverageRange(InpV52_TriggerTF,
                       1,
-                      InpV51_SlowM1Lookback,
+                      InpV52_SlowM1Lookback,
                       slow))
    {
       g_slowM1Range = slow;
    }
 
-   if(V51AverageRange(InpV51_TriggerTF,
+   if(V52AverageRange(InpV52_TriggerTF,
                       1,
-                      InpV51_FastM1Lookback,
+                      InpV52_FastM1Lookback,
                       fast))
    {
       g_fastM1Range = fast;
    }
-
-   g_currentM1Open = iOpen(_Symbol, InpV51_TriggerTF, 0);
 }
 
-void V51RefreshM5RangeCache()
+void V52RefreshM5RangeCache()
 {
    double r = 0.0;
 
-   if(V51AverageRange(InpV51_MapTF,
+   if(V52AverageRange(InpV52_MapTF,
                       1,
-                      InpV51_M5RangeLookback,
+                      InpV52_M5RangeLookback,
                       r))
    {
       g_avgM5Range = r;
    }
 }
 
-double V51AdaptiveRange(long nowMsc)
+double V52AdaptiveRange(long nowMsc)
 {
    double slow = g_slowM1Range;
    double fast = g_fastM1Range;
-
    double base = 0.0;
 
    if(slow > 0.0 && fast > 0.0)
    {
-      double wFast = MathMax(0.0, MathMin(1.0, InpV51_FastM1Weight));
-      base = slow * (1.0 - wFast) + fast * wFast;
+      double wf = MathMax(0.0, MathMin(1.0, InpV52_FastM1Weight));
+      base = slow * (1.0 - wf) + fast * wf;
    }
    else if(fast > 0.0)
    {
@@ -447,11 +393,12 @@ double V51AdaptiveRange(long nowMsc)
    double liveRange = 0.0;
    int samples = 0;
 
-   if(V51GetLiveTickRange(nowMsc, liveRange, samples))
+   if(V52GetLiveTickRange(nowMsc, liveRange, samples))
    {
       g_liveTickRange = liveRange;
+
       base = MathMax(base,
-                     liveRange * MathMax(0.0, InpV51_LiveVolWeight));
+                     liveRange * MathMax(0.0, InpV52_LiveVolWeight));
    }
    else
    {
@@ -460,9 +407,9 @@ double V51AdaptiveRange(long nowMsc)
 
    if(slow > 0.0)
    {
-      double minR = slow * MathMax(0.05, InpV51_MinAdaptiveVsSlow);
-      double maxR = slow * MathMax(InpV51_MinAdaptiveVsSlow,
-                                   InpV51_MaxAdaptiveVsSlow);
+      double minR = slow * MathMax(0.05, InpV52_MinAdaptiveVsSlow);
+      double maxR = slow * MathMax(InpV52_MinAdaptiveVsSlow,
+                                   InpV52_MaxAdaptiveVsSlow);
 
       base = MathMax(minR, MathMin(maxR, base));
    }
@@ -472,30 +419,29 @@ double V51AdaptiveRange(long nowMsc)
 }
 
 //====================================================================
-// 2) FAST INCREMENTAL VWAP
+// FAST / INCREMENTAL VWAP
 //====================================================================
 
-bool V51RebuildVWAPCompletedCache()
+bool V52RebuildVWAPCompletedCache()
 {
-   datetime currentOpen = iTime(_Symbol, InpV51_MapTF, 0);
+   datetime currentOpen = iTime(_Symbol, InpV52_MapTF, 0);
 
    if(currentOpen <= 0)
       return false;
 
-   datetime sessionStart = V51SessionStart(currentOpen);
+   datetime sessionStart = V52SessionStart(currentOpen);
 
    g_vwapSessionStart = sessionStart;
-   g_vwapCompletedPV = 0.0;
+   g_vwapCompletedPV  = 0.0;
    g_vwapCompletedVol = 0.0;
 
-   // At the first M5 bar of the session there are no completed bars yet.
    if(currentOpen <= sessionStart)
       return true;
 
    MqlRates bars[];
 
    int copied = CopyRates(_Symbol,
-                          InpV51_MapTF,
+                          InpV52_MapTF,
                           sessionStart,
                           currentOpen - 1,
                           bars);
@@ -505,7 +451,7 @@ bool V51RebuildVWAPCompletedCache()
 
    for(int i = 0; i < copied; i++)
    {
-      double vol = V51BarVolume(bars[i]);
+      double vol = V52BarVolume(bars[i]);
 
       if(vol <= 0.0)
          continue;
@@ -521,21 +467,21 @@ bool V51RebuildVWAPCompletedCache()
    return true;
 }
 
-bool V51UpdateLiveVWAP()
+bool V52UpdateLiveVWAP()
 {
    MqlRates current;
 
-   if(!V51GetBar(InpV51_MapTF, 0, current))
+   if(!V52GetBar(InpV52_MapTF, 0, current))
    {
       g_haveLiveVWAP = false;
       return false;
    }
 
-   datetime requiredSession = V51SessionStart(current.time);
+   datetime requiredSession = V52SessionStart(current.time);
 
    if(g_vwapSessionStart != requiredSession)
    {
-      if(!V51RebuildVWAPCompletedCache())
+      if(!V52RebuildVWAPCompletedCache())
       {
          g_haveLiveVWAP = false;
          return false;
@@ -545,15 +491,13 @@ bool V51UpdateLiveVWAP()
    double pv = g_vwapCompletedPV;
    double vv = g_vwapCompletedVol;
 
-   double currentVol = V51BarVolume(current);
+   double currentVol = V52BarVolume(current);
 
    if(currentVol > 0.0)
    {
-      double currentHLC3 = (current.high +
-                            current.low +
-                            current.close) / 3.0;
+      double hlc3 = (current.high + current.low + current.close) / 3.0;
 
-      pv += currentHLC3 * currentVol;
+      pv += hlc3 * currentVol;
       vv += currentVol;
    }
 
@@ -565,7 +509,6 @@ bool V51UpdateLiveVWAP()
 
    g_liveVWAP = pv / vv;
    g_haveLiveVWAP = true;
-
    return true;
 }
 
@@ -573,7 +516,7 @@ bool V51UpdateLiveVWAP()
 // EMA8
 //====================================================================
 
-bool V51GetEMA(int shift,
+bool V52GetEMA(int shift,
                double &ema)
 {
    if(g_emaHandle == INVALID_HANDLE)
@@ -592,10 +535,10 @@ bool V51GetEMA(int shift,
 }
 
 //====================================================================
-// POSITION HELPERS
+// POSITION
 //====================================================================
 
-bool V51FindPosition(ulong &ticket,
+bool V52FindPosition(ulong &ticket,
                      ENUM_POSITION_TYPE &type,
                      double &openPrice,
                      double &floatingProfit)
@@ -614,7 +557,7 @@ bool V51FindPosition(ulong &ticket,
       if(PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
 
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpV51_Magic)
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpV52_Magic)
          continue;
 
       ticket = t;
@@ -628,26 +571,24 @@ bool V51FindPosition(ulong &ticket,
    return false;
 }
 
-bool V51HasPosition()
+bool V52HasPosition()
 {
    ulong ticket;
    ENUM_POSITION_TYPE type;
    double openPrice;
    double profit;
 
-   return V51FindPosition(ticket, type, openPrice, profit);
+   return V52FindPosition(ticket, type, openPrice, profit);
 }
 
 //====================================================================
-// 3) COMMISSION + SPREAD ENGINE
+// COMMISSION / COST ENGINE
 //====================================================================
 
-int V51FindCommissionGroup(V51CommissionGroup &groups[],
+int V52FindCommissionGroup(V52CommissionGroup &groups[],
                            long positionId)
 {
-   int n = ArraySize(groups);
-
-   for(int i = 0; i < n; i++)
+   for(int i = 0; i < ArraySize(groups); i++)
    {
       if(groups[i].positionId == positionId)
          return i;
@@ -656,21 +597,20 @@ int V51FindCommissionGroup(V51CommissionGroup &groups[],
    return -1;
 }
 
-void V51RefreshCommissionEstimate()
+void V52RefreshCommissionEstimate()
 {
-   g_commissionPerLotRT = MathMax(0.0, InpV51_FallbackCommissionPerLotRT);
+   g_commissionPerLotRT = MathMax(0.0, InpV52_FallbackCommissionPerLotRT);
 
-   if(!InpV51_AutoLearnCommission)
+   if(!InpV52_AutoLearnCommission)
       return;
 
    datetime toTime = TimeCurrent();
-   datetime fromTime = toTime - (datetime)MathMax(1, InpV51_CommissionHistoryDays) * 86400;
+   datetime fromTime = toTime - (datetime)MathMax(1, InpV52_CommissionHistoryDays) * 86400;
 
    if(!HistorySelect(fromTime, toTime))
       return;
 
-   V51CommissionGroup groups[];
-
+   V52CommissionGroup groups[];
    int deals = HistoryDealsTotal();
 
    for(int i = 0; i < deals; i++)
@@ -695,15 +635,14 @@ void V51RefreshCommissionEstimate()
       double commission = MathAbs(HistoryDealGetDouble(deal, DEAL_COMMISSION));
       double fee = MathAbs(HistoryDealGetDouble(deal, DEAL_FEE));
 
-      int idx = V51FindCommissionGroup(groups, positionId);
+      int idx = V52FindCommissionGroup(groups, positionId);
 
       if(idx < 0)
       {
-         int oldSize = ArraySize(groups);
-         ArrayResize(groups, oldSize + 1);
+         int n = ArraySize(groups);
+         ArrayResize(groups, n + 1);
 
-         idx = oldSize;
-
+         idx = n;
          groups[idx].positionId = positionId;
          groups[idx].cost = 0.0;
          groups[idx].entryVolume = 0.0;
@@ -731,9 +670,7 @@ void V51RefreshCommissionEstimate()
    double totalEntryVolume = 0.0;
    int completed = 0;
 
-   int groupsTotal = ArraySize(groups);
-
-   for(int i = 0; i < groupsTotal; i++)
+   for(int i = 0; i < ArraySize(groups); i++)
    {
       if(!groups[i].hasIn ||
          !groups[i].hasOut ||
@@ -749,19 +686,17 @@ void V51RefreshCommissionEstimate()
 
    if(completed > 0 && totalEntryVolume > 0.0)
    {
-      // Money cost per 1.00 lot for a completed round trip.
       g_commissionPerLotRT = totalCost / totalEntryVolume;
 
-      V51Log("Commission learned from " +
-             IntegerToString(completed) +
-             " completed " + _Symbol +
-             " positions: " +
+      V52Log("Commission learned: " +
              DoubleToString(g_commissionPerLotRT, 4) +
-             " account-currency / lot RT");
+             " account-currency / lot RT from " +
+             IntegerToString(completed) +
+             " completed positions");
    }
 }
 
-double V51TickValuePerLot()
+double V52TickValuePerLot()
 {
    double v = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
 
@@ -777,7 +712,7 @@ double V51TickValuePerLot()
    return MathMax(vp, vl);
 }
 
-double V51FrictionDistance(const MqlTick &tick,
+double V52FrictionDistance(const MqlTick &tick,
                            double lots,
                            double &moneyCost)
 {
@@ -787,49 +722,41 @@ double V51FrictionDistance(const MqlTick &tick,
    double commissionMoney = MathMax(0.0, g_commissionPerLotRT) * lots;
 
    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double tickValue = V51TickValuePerLot();
+   double tickValue = V52TickValuePerLot();
 
    if(tickSize > 0.0 && tickValue > 0.0)
    {
       double moneyPerPriceUnitPerLot = tickValue / tickSize;
 
       if(moneyPerPriceUnitPerLot > 0.0)
-      {
-         commissionDistance =
-            MathMax(0.0, g_commissionPerLotRT) /
-            moneyPerPriceUnitPerLot;
+         commissionDistance = MathMax(0.0, g_commissionPerLotRT) /
+                              moneyPerPriceUnitPerLot;
 
-         spreadMoney =
-            (spread / tickSize) * tickValue * lots;
-      }
+      spreadMoney = (spread / tickSize) * tickValue * lots;
    }
 
    double slippageDistance =
-      MathMax(0, InpV51_ExpectedSlippagePoints) * _Point;
+      MathMax(0, InpV52_ExpectedSlippagePoints) * _Point;
 
    double slippageMoney = 0.0;
 
    if(tickSize > 0.0 && tickValue > 0.0)
-   {
-      slippageMoney =
-         (slippageDistance / tickSize) * tickValue * lots;
-   }
+      slippageMoney = (slippageDistance / tickSize) * tickValue * lots;
 
    g_lastSpreadDistance = spread;
    g_lastCommissionDistance = commissionDistance;
    g_lastFrictionDistance = spread + commissionDistance + slippageDistance;
+   g_lastEstimatedRTCostMoney = spreadMoney + commissionMoney + slippageMoney;
 
-   moneyCost = spreadMoney + commissionMoney + slippageMoney;
-   g_lastEstimatedRoundTripCostMoney = moneyCost;
-
+   moneyCost = g_lastEstimatedRTCostMoney;
    return g_lastFrictionDistance;
 }
 
 //====================================================================
-// TRADE RESULT
+// TRADE HELPERS
 //====================================================================
 
-bool V51TradeOK()
+bool V52TradeOK()
 {
    uint rc = trade.ResultRetcode();
 
@@ -838,29 +765,38 @@ bool V51TradeOK()
           rc == TRADE_RETCODE_PLACED;
 }
 
-//====================================================================
-// ORDER FUNCTIONS
-//====================================================================
-
-bool V51OpenBuy(double effectiveReclaim,
-                double adaptiveRange,
-                double friction)
+void V52ResetSignalState()
 {
-   if(V51HasPosition())
+   g_state = V52_IDLE;
+   g_retestStart = 0;
+   g_wrongSideSince = 0;
+   g_retestExtreme = 0.0;
+}
+
+void V52ResetRunnerState()
+{
+   g_mfe = 0.0;
+   g_emaWrongCloses = 0;
+   g_emaDeepWarning = false;
+   g_runnerHealth = "NEW POSITION - HOLD";
+}
+
+bool V52OpenBuy()
+{
+   if(V52HasPosition())
       return false;
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
       return false;
 
-   double lots = V51NormalizeVolume(InpV51_Lots);
-
+   double lots = V52NormalizeVolume(InpV52_Lots);
    double sl = 0.0;
 
-   if(InpV51_EmergencySLPoints > 0)
+   if(InpV52_EmergencySLPoints > 0)
    {
       sl = NormalizeDouble(tick.ask -
-                           InpV51_EmergencySLPoints * _Point,
+                           InpV52_EmergencySLPoints * _Point,
                            _Digits);
    }
 
@@ -869,52 +805,39 @@ bool V51OpenBuy(double effectiveReclaim,
                        0.0,
                        sl,
                        0.0,
-                       "V51_VWAP_RECLAIM_BUY");
+                       "V52_HOLD_BUY");
 
-   if(!ok || !V51TradeOK())
+   if(!ok || !V52TradeOK())
    {
-      V51Log("BUY failed: " + trade.ResultRetcodeDescription());
+      V52Log("BUY failed: " + trade.ResultRetcodeDescription());
       return false;
    }
 
-   g_state = V51_IDLE;
-   g_retestStart = 0;
-   g_wrongSideSince = 0;
-   g_emaTakeover = false;
-   g_emaWrongCount = 0;
-   g_mfe = 0.0;
+   V52ResetSignalState();
+   V52ResetRunnerState();
 
-   g_lastAction =
-      "BUY LIVE RECLAIM | vol=" +
-      DoubleToString(adaptiveRange, 2) +
-      " reclaim=" +
-      DoubleToString(effectiveReclaim, 2) +
-      " friction=" +
-      DoubleToString(friction, 2);
+   g_lastAction = "BUY OPENED - HOLD UNTIL FULL SELL SIGNAL";
+   V52Log(g_lastAction);
 
-   V51Log(g_lastAction);
    return true;
 }
 
-bool V51OpenSell(double effectiveReclaim,
-                 double adaptiveRange,
-                 double friction)
+bool V52OpenSell()
 {
-   if(V51HasPosition())
+   if(V52HasPosition())
       return false;
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
       return false;
 
-   double lots = V51NormalizeVolume(InpV51_Lots);
-
+   double lots = V52NormalizeVolume(InpV52_Lots);
    double sl = 0.0;
 
-   if(InpV51_EmergencySLPoints > 0)
+   if(InpV52_EmergencySLPoints > 0)
    {
       sl = NormalizeDouble(tick.bid +
-                           InpV51_EmergencySLPoints * _Point,
+                           InpV52_EmergencySLPoints * _Point,
                            _Digits);
    }
 
@@ -923,160 +846,243 @@ bool V51OpenSell(double effectiveReclaim,
                         0.0,
                         sl,
                         0.0,
-                        "V51_VWAP_RECLAIM_SELL");
+                        "V52_HOLD_SELL");
 
-   if(!ok || !V51TradeOK())
+   if(!ok || !V52TradeOK())
    {
-      V51Log("SELL failed: " + trade.ResultRetcodeDescription());
+      V52Log("SELL failed: " + trade.ResultRetcodeDescription());
       return false;
    }
 
-   g_state = V51_IDLE;
-   g_retestStart = 0;
-   g_wrongSideSince = 0;
-   g_emaTakeover = false;
-   g_emaWrongCount = 0;
-   g_mfe = 0.0;
+   V52ResetSignalState();
+   V52ResetRunnerState();
 
-   g_lastAction =
-      "SELL LIVE RECLAIM | vol=" +
-      DoubleToString(adaptiveRange, 2) +
-      " reclaim=" +
-      DoubleToString(effectiveReclaim, 2) +
-      " friction=" +
-      DoubleToString(friction, 2);
+   g_lastAction = "SELL OPENED - HOLD UNTIL FULL BUY SIGNAL";
+   V52Log(g_lastAction);
 
-   V51Log(g_lastAction);
    return true;
 }
 
-bool V51ClosePosition(ulong ticket,
-                      string reason)
+bool V52CloseCurrent(ulong ticket,
+                     string reason)
 {
    bool ok = trade.PositionClose(ticket);
 
-   if(!ok || !V51TradeOK())
+   if(!ok || !V52TradeOK())
    {
-      V51Log("EXIT failed: " + trade.ResultRetcodeDescription());
+      V52Log("CLOSE failed: " + trade.ResultRetcodeDescription());
       return false;
    }
 
-   g_lastAction = "EXIT: " + reason;
-   V51Log(g_lastAction);
+   g_lastAction = "CLOSE FOR REVERSAL: " + reason;
+   V52Log(g_lastAction);
 
-   g_state = V51_IDLE;
-   g_retestStart = 0;
-   g_wrongSideSince = 0;
-   g_emaTakeover = false;
-   g_emaWrongCount = 0;
-   g_mfe = 0.0;
-
-   // Refresh commission once history has had a chance to register the close.
    g_refreshCommissionNextM1 = true;
-
    return true;
 }
 
+bool V52ExecuteSignal(V52_SIGNAL signal)
+{
+   if(signal == V52_SIGNAL_NONE)
+      return false;
+
+   ulong ticket;
+   ENUM_POSITION_TYPE type;
+   double openPrice;
+   double floatingProfit;
+
+   bool havePosition =
+      V52FindPosition(ticket, type, openPrice, floatingProfit);
+
+   // Flat: normal entry.
+   if(!havePosition)
+   {
+      if(signal == V52_SIGNAL_BUY)
+         return V52OpenBuy();
+
+      return V52OpenSell();
+   }
+
+   // Same-side signal: DO NOTHING. Keep holding the existing runner.
+   if((type == POSITION_TYPE_BUY  && signal == V52_SIGNAL_BUY) ||
+      (type == POSITION_TYPE_SELL && signal == V52_SIGNAL_SELL))
+   {
+      V52ResetSignalState();
+      return false;
+   }
+
+   // Opposite FULL signal: this is the ONLY normal exit.
+   string reason =
+      (signal == V52_SIGNAL_BUY ?
+       "FULL BUY VWAP SIGNAL" :
+       "FULL SELL VWAP SIGNAL");
+
+   if(!V52CloseCurrent(ticket, reason))
+      return false;
+
+   // Synchronous CTrade close is complete here. Reverse immediately.
+   bool reversed = false;
+
+   if(signal == V52_SIGNAL_BUY)
+      reversed = V52OpenBuy();
+   else
+      reversed = V52OpenSell();
+
+   if(reversed)
+   {
+      g_lastAction =
+         (signal == V52_SIGNAL_BUY ?
+          "REVERSED SELL -> BUY" :
+          "REVERSED BUY -> SELL");
+
+      V52Log(g_lastAction);
+   }
+
+   return reversed;
+}
+
 //====================================================================
-// LIVE VWAP ENTRY ENGINE
+// WHICH SIGNAL ARE WE ALLOWED TO SEARCH FOR?
 //====================================================================
 
-void V51ProcessEntry(const MqlTick &tick)
+bool V52AllowBuyCandidate()
 {
-   if(V51HasPosition() || !g_haveLiveVWAP)
+   ulong ticket;
+   ENUM_POSITION_TYPE type;
+   double openPrice;
+   double floatingProfit;
+
+   if(!V52FindPosition(ticket, type, openPrice, floatingProfit))
+      return true;
+
+   // While SELL is open, only look for the BUY that will replace it.
+   return type == POSITION_TYPE_SELL;
+}
+
+bool V52AllowSellCandidate()
+{
+   ulong ticket;
+   ENUM_POSITION_TYPE type;
+   double openPrice;
+   double floatingProfit;
+
+   if(!V52FindPosition(ticket, type, openPrice, floatingProfit))
+      return true;
+
+   // While BUY is open, only look for the SELL that will replace it.
+   return type == POSITION_TYPE_BUY;
+}
+
+//====================================================================
+// LIVE SIGNAL ENGINE
+//====================================================================
+
+void V52ProcessSignal(const MqlTick &tick)
+{
+   if(!g_haveLiveVWAP)
       return;
 
-   // MT5 chart bars are Bid-based, so use Bid for VWAP behavior.
-   // Orders still execute at Ask for buys and Bid for sells.
    double price = tick.bid;
-   double vwap = g_liveVWAP;
+   double vwap  = g_liveVWAP;
 
-   double adaptive = V51AdaptiveRange(tick.time_msc);
+   double adaptive = V52AdaptiveRange(tick.time_msc);
 
    if(adaptive <= 0.0)
       return;
 
    double naturalDeparture =
-      adaptive * MathMax(0.0, InpV51_DepartureAdaptiveFrac);
+      adaptive * MathMax(0.0, InpV52_DepartureAdaptiveFrac);
 
    double band =
-      adaptive * MathMax(0.0, InpV51_RetestBandAdaptiveFrac);
+      adaptive * MathMax(0.0, InpV52_RetestBandAdaptiveFrac);
 
    double naturalReclaim =
-      adaptive * MathMax(0.0, InpV51_ReclaimAdaptiveFrac);
+      adaptive * MathMax(0.0, InpV52_ReclaimAdaptiveFrac);
 
    double wrongDepth =
-      adaptive * MathMax(0.0, InpV51_VWAPWrongDepthAdaptiveFrac);
+      adaptive * MathMax(0.0, InpV52_VWAPWrongDepthAdaptiveFrac);
 
+   double lots = V52NormalizeVolume(InpV52_Lots);
    double moneyCost = 0.0;
-   double lots = V51NormalizeVolume(InpV51_Lots);
-   double friction = V51FrictionDistance(tick, lots, moneyCost);
+   double friction = V52FrictionDistance(tick, lots, moneyCost);
 
    double costFloor =
-      friction * MathMax(1.0, InpV51_CostSafetyMultiple);
+      friction * MathMax(1.0, InpV52_CostSafetyMultiple);
 
-   // Transaction cost is execution reality, not a new strategy filter.
-   // We simply refuse to define a meaningful departure/reclaim smaller
-   // than the amount the trade must pay to exist.
    double departure = MathMax(naturalDeparture, costFloor);
    double reclaim   = MathMax(naturalReclaim, costFloor);
 
+   bool allowBuy  = V52AllowBuyCandidate();
+   bool allowSell = V52AllowSellCandidate();
+
    // ---------------------------------------------------------------
-   // IDLE
-   // No 1x/2x completed-M5 permission gate.
-   // Moving a meaningful distance to one side of VWAP ESTABLISHES it.
+   // IDLE: establish a meaningful side away from VWAP.
+   // When a trade is already open, ONLY the opposite side can arm.
    // ---------------------------------------------------------------
-   if(g_state == V51_IDLE)
+   if(g_state == V52_IDLE)
    {
-      if(price >= vwap + departure)
+      if(allowBuy && price >= vwap + departure)
       {
-         g_state = V51_BUY_DEPARTED;
-         g_lastAction = "BUY side established live; waiting VWAP return";
-         V51Log(g_lastAction);
+         g_state = V52_BUY_DEPARTED;
+         g_lastAction = "BUY side established; waiting VWAP return";
+         V52Log(g_lastAction);
          return;
       }
 
-      if(price <= vwap - departure)
+      if(allowSell && price <= vwap - departure)
       {
-         g_state = V51_SELL_DEPARTED;
-         g_lastAction = "SELL side established live; waiting VWAP return";
-         V51Log(g_lastAction);
+         g_state = V52_SELL_DEPARTED;
+         g_lastAction = "SELL side established; waiting VWAP return";
+         V52Log(g_lastAction);
          return;
       }
 
       return;
    }
 
+   // If position direction changed externally, discard a now-invalid candidate.
+   if((g_state == V52_BUY_DEPARTED || g_state == V52_BUY_RETEST) && !allowBuy)
+   {
+      V52ResetSignalState();
+      return;
+   }
+
+   if((g_state == V52_SELL_DEPARTED || g_state == V52_SELL_RETEST) && !allowSell)
+   {
+      V52ResetSignalState();
+      return;
+   }
+
    // ---------------------------------------------------------------
-   // DEPARTURE -> RETURN
+   // DEPARTURE -> RETEST
    // ---------------------------------------------------------------
-   if(g_state == V51_BUY_DEPARTED)
+   if(g_state == V52_BUY_DEPARTED)
    {
       if(price <= vwap + band)
       {
-         g_state = V51_BUY_RETEST;
+         g_state = V52_BUY_RETEST;
          g_retestStart = TimeCurrent();
          g_retestExtreme = price;
          g_wrongSideSince = 0;
 
-         g_lastAction = "BUY VWAP RETEST LIVE";
-         V51Log(g_lastAction);
+         g_lastAction = "BUY VWAP RETEST ACTIVE";
+         V52Log(g_lastAction);
       }
 
       return;
    }
 
-   if(g_state == V51_SELL_DEPARTED)
+   if(g_state == V52_SELL_DEPARTED)
    {
       if(price >= vwap - band)
       {
-         g_state = V51_SELL_RETEST;
+         g_state = V52_SELL_RETEST;
          g_retestStart = TimeCurrent();
          g_retestExtreme = price;
          g_wrongSideSince = 0;
 
-         g_lastAction = "SELL VWAP RETEST LIVE";
-         V51Log(g_lastAction);
+         g_lastAction = "SELL VWAP RETEST ACTIVE";
+         V52Log(g_lastAction);
       }
 
       return;
@@ -1085,24 +1091,20 @@ void V51ProcessEntry(const MqlTick &tick)
    // ---------------------------------------------------------------
    // BUY RETEST
    // ---------------------------------------------------------------
-   if(g_state == V51_BUY_RETEST)
+   if(g_state == V52_BUY_RETEST)
    {
       g_retestExtreme = MathMin(g_retestExtreme, price);
 
-      if(InpV51_RetestTimeoutMinutes > 0 &&
+      if(InpV52_RetestTimeoutMinutes > 0 &&
          g_retestStart > 0 &&
          TimeCurrent() - g_retestStart >
-            InpV51_RetestTimeoutMinutes * 60)
+            InpV52_RetestTimeoutMinutes * 60)
       {
-         g_state = V51_IDLE;
-         g_wrongSideSince = 0;
-         g_lastAction = "BUY retest expired";
-         V51Log(g_lastAction);
+         V52ResetSignalState();
+         g_lastAction = "BUY retest expired; existing position unchanged";
          return;
       }
 
-      // V25 can pierce VWAP violently.
-      // Failure = meaningful depth AND remaining there.
       if(price < vwap - wrongDepth)
       {
          if(g_wrongSideSince == 0)
@@ -1110,12 +1112,10 @@ void V51ProcessEntry(const MqlTick &tick)
 
          int secondsWrong = (int)(TimeCurrent() - g_wrongSideSince);
 
-         if(secondsWrong >= MathMax(1, InpV51_VWAPWrongSideSeconds))
+         if(secondsWrong >= MathMax(1, InpV52_VWAPWrongSideSeconds))
          {
-            g_state = V51_IDLE;
-            g_wrongSideSince = 0;
-            g_lastAction = "BUY retest failed: VWAP accepted below";
-            V51Log(g_lastAction);
+            V52ResetSignalState();
+            g_lastAction = "BUY candidate failed; existing position unchanged";
             return;
          }
       }
@@ -1129,7 +1129,7 @@ void V51ProcessEntry(const MqlTick &tick)
 
       if(reclaimedVWAP && bouncedFromLow)
       {
-         V51OpenBuy(reclaim, adaptive, friction);
+         V52ExecuteSignal(V52_SIGNAL_BUY);
       }
 
       return;
@@ -1138,19 +1138,17 @@ void V51ProcessEntry(const MqlTick &tick)
    // ---------------------------------------------------------------
    // SELL RETEST
    // ---------------------------------------------------------------
-   if(g_state == V51_SELL_RETEST)
+   if(g_state == V52_SELL_RETEST)
    {
       g_retestExtreme = MathMax(g_retestExtreme, price);
 
-      if(InpV51_RetestTimeoutMinutes > 0 &&
+      if(InpV52_RetestTimeoutMinutes > 0 &&
          g_retestStart > 0 &&
          TimeCurrent() - g_retestStart >
-            InpV51_RetestTimeoutMinutes * 60)
+            InpV52_RetestTimeoutMinutes * 60)
       {
-         g_state = V51_IDLE;
-         g_wrongSideSince = 0;
-         g_lastAction = "SELL retest expired";
-         V51Log(g_lastAction);
+         V52ResetSignalState();
+         g_lastAction = "SELL retest expired; existing position unchanged";
          return;
       }
 
@@ -1161,12 +1159,10 @@ void V51ProcessEntry(const MqlTick &tick)
 
          int secondsWrong = (int)(TimeCurrent() - g_wrongSideSince);
 
-         if(secondsWrong >= MathMax(1, InpV51_VWAPWrongSideSeconds))
+         if(secondsWrong >= MathMax(1, InpV52_VWAPWrongSideSeconds))
          {
-            g_state = V51_IDLE;
-            g_wrongSideSince = 0;
-            g_lastAction = "SELL retest failed: VWAP accepted above";
-            V51Log(g_lastAction);
+            V52ResetSignalState();
+            g_lastAction = "SELL candidate failed; existing position unchanged";
             return;
          }
       }
@@ -1180,7 +1176,7 @@ void V51ProcessEntry(const MqlTick &tick)
 
       if(reclaimedVWAP && droppedFromHigh)
       {
-         V51OpenSell(reclaim, adaptive, friction);
+         V52ExecuteSignal(V52_SIGNAL_SELL);
       }
 
       return;
@@ -1188,265 +1184,177 @@ void V51ProcessEntry(const MqlTick &tick)
 }
 
 //====================================================================
-// LIVE POSITION MANAGEMENT
+// RUNNER MANAGEMENT
 //====================================================================
 
-void V51ProcessLivePosition(const MqlTick &tick)
+void V52UpdateRunnerMFE(const MqlTick &tick)
 {
    ulong ticket;
    ENUM_POSITION_TYPE type;
    double openPrice;
    double floatingProfit;
 
-   if(!V51FindPosition(ticket, type, openPrice, floatingProfit))
+   if(!V52FindPosition(ticket, type, openPrice, floatingProfit))
+   {
+      g_mfe = 0.0;
       return;
+   }
 
-   if(!g_haveLiveVWAP)
-      return;
-
-   double executableExitPrice =
+   double exitPrice =
       (type == POSITION_TYPE_BUY ? tick.bid : tick.ask);
 
    double favorable =
       (type == POSITION_TYPE_BUY ?
-       executableExitPrice - openPrice :
-       openPrice - executableExitPrice);
+       exitPrice - openPrice :
+       openPrice - exitPrice);
 
    if(favorable > g_mfe)
       g_mfe = favorable;
-
-   // ---------------------------------------------------------------
-   // EMA TAKEOVER
-   // ---------------------------------------------------------------
-   if(!g_emaTakeover &&
-      g_avgM5Range > 0.0 &&
-      g_mfe >= g_avgM5Range *
-               MathMax(0.0, InpV51_EMATakeoverM5RangeFrac))
-   {
-      g_emaTakeover = true;
-      g_wrongSideSince = 0;
-
-      g_lastAction = "EMA8 TAKEOVER - RUNNER MODE";
-      V51Log(g_lastAction);
-   }
-
-   // ---------------------------------------------------------------
-   // EARLY VWAP FAILURE BEFORE EMA TAKES OVER
-   // ---------------------------------------------------------------
-   if(InpV51_UseEarlyVWAPFailureExit &&
-      !g_emaTakeover)
-   {
-      double adaptive = V51AdaptiveRange(tick.time_msc);
-
-      if(adaptive <= 0.0)
-         return;
-
-      double wrongDepth =
-         adaptive * MathMax(0.0, InpV51_VWAPWrongDepthAdaptiveFrac);
-
-      // Chart/VWAP relationship uses Bid price.
-      double chartPrice = tick.bid;
-
-      bool wrong =
-         (type == POSITION_TYPE_BUY ?
-          chartPrice < g_liveVWAP - wrongDepth :
-          chartPrice > g_liveVWAP + wrongDepth);
-
-      if(wrong)
-      {
-         if(g_wrongSideSince == 0)
-            g_wrongSideSince = TimeCurrent();
-
-         int secondsWrong = (int)(TimeCurrent() - g_wrongSideSince);
-
-         if(secondsWrong >= MathMax(1, InpV51_VWAPWrongSideSeconds))
-         {
-            V51ClosePosition(
-               ticket,
-               type == POSITION_TYPE_BUY ?
-               "VWAP accepted below before EMA takeover" :
-               "VWAP accepted above before EMA takeover"
-            );
-            return;
-         }
-      }
-      else
-      {
-         g_wrongSideSince = 0;
-      }
-   }
 }
 
-//====================================================================
-// EMA8 MANAGEMENT ON COMPLETED M5 BAR
-//====================================================================
-
-void V51ManageEMAOnCompletedM5()
+void V52ReviewEMAOnCompletedM5()
 {
    ulong ticket;
    ENUM_POSITION_TYPE type;
    double openPrice;
    double floatingProfit;
 
-   if(!V51FindPosition(ticket, type, openPrice, floatingProfit))
+   if(!V52FindPosition(ticket, type, openPrice, floatingProfit))
+   {
+      g_emaWrongCloses = 0;
+      g_emaDeepWarning = false;
+      g_runnerHealth = "FLAT";
       return;
-
-   if(!g_emaTakeover || g_avgM5Range <= 0.0)
-      return;
+   }
 
    MqlRates bar;
    double ema = 0.0;
 
-   if(!V51GetBar(InpV51_MapTF, 1, bar) ||
-      !V51GetEMA(1, ema))
+   if(!V52GetBar(InpV52_MapTF, 1, bar) ||
+      !V52GetEMA(1, ema))
    {
       return;
    }
 
-   bool wrongSide = false;
+   bool wrong = false;
    double depth = 0.0;
 
    if(type == POSITION_TYPE_BUY)
    {
-      wrongSide = bar.close < ema;
+      wrong = bar.close < ema;
 
-      if(wrongSide)
+      if(wrong)
          depth = ema - bar.close;
    }
    else
    {
-      wrongSide = bar.close > ema;
+      wrong = bar.close > ema;
 
-      if(wrongSide)
+      if(wrong)
          depth = bar.close - ema;
    }
 
-   if(!wrongSide)
+   if(!wrong)
    {
-      if(g_emaWrongCount > 0)
-         V51Log("EMA8 reclaimed - normal breathing, HOLD");
-
-      g_emaWrongCount = 0;
-      g_lastAction = "EMA8 respected - HOLD";
+      g_emaWrongCloses = 0;
+      g_emaDeepWarning = false;
+      g_runnerHealth = "EMA8 RESPECTED - HOLD";
       return;
    }
 
-   double depthFrac = depth / g_avgM5Range;
+   g_emaWrongCloses++;
 
-   if(depthFrac >= MathMax(0.0, InpV51_EMADeepBreakM5RangeFrac))
+   double depthFrac = 0.0;
+
+   if(g_avgM5Range > 0.0)
+      depthFrac = depth / g_avgM5Range;
+
+   g_emaDeepWarning =
+      depthFrac >= MathMax(0.0, InpV52_EMADeepWarningM5RangeFrac);
+
+   // IMPORTANT: EMA loss is INFORMATION only in v5.20.
+   // We keep the trade until a full opposite VWAP setup confirms.
+   if(g_emaDeepWarning)
    {
-      V51ClosePosition(
-         ticket,
-         "EMA8 REAL LOSS: deep close " +
-         DoubleToString(depthFrac, 2) +
-         "x M5 range"
-      );
-      return;
+      g_runnerHealth =
+         "EMA8 DEEP LOSS WARNING - STILL HOLDING FOR OPPOSITE VWAP SIGNAL";
    }
-
-   g_emaWrongCount++;
-
-   if(g_emaWrongCount >= MathMax(1, InpV51_EMAWrongSideCloses))
+   else
    {
-      V51ClosePosition(
-         ticket,
-         "EMA8 REAL LOSS: " +
-         IntegerToString(g_emaWrongCount) +
-         " consecutive shallow closes"
-      );
-      return;
+      g_runnerHealth =
+         "EMA8 BREATHING/WRONG SIDE - STILL HOLDING";
    }
-
-   g_lastAction =
-      "EMA8 breathing - HOLD " +
-      IntegerToString(g_emaWrongCount) +
-      "/" +
-      IntegerToString(MathMax(1, InpV51_EMAWrongSideCloses));
-
-   V51Log(g_lastAction);
 }
 
 //====================================================================
 // NEW BAR EVENTS
 //====================================================================
 
-void V51ProcessNewM1()
+void V52ProcessNewM1()
 {
-   datetime current = iTime(_Symbol, InpV51_TriggerTF, 0);
+   datetime current = iTime(_Symbol, InpV52_TriggerTF, 0);
 
    if(current <= 0 || current == g_lastM1Bar)
       return;
 
    g_lastM1Bar = current;
-
-   V51RefreshM1RangeCache();
+   V52RefreshM1RangeCache();
 
    if(g_refreshCommissionNextM1)
    {
-      V51RefreshCommissionEstimate();
+      V52RefreshCommissionEstimate();
       g_refreshCommissionNextM1 = false;
    }
 }
 
-void V51ProcessNewM5()
+void V52ProcessNewM5()
 {
-   datetime current = iTime(_Symbol, InpV51_MapTF, 0);
+   datetime current = iTime(_Symbol, InpV52_MapTF, 0);
 
    if(current <= 0 || current == g_lastM5Bar)
       return;
 
    g_lastM5Bar = current;
 
-   // Heavy work happens once per M5 bar, not every tick.
-   V51RebuildVWAPCompletedCache();
-   V51RefreshM5RangeCache();
-
-   // Manage the runner using the M5 bar that just completed.
-   V51ManageEMAOnCompletedM5();
+   V52RebuildVWAPCompletedCache();
+   V52RefreshM5RangeCache();
+   V52ReviewEMAOnCompletedM5();
 }
 
 //====================================================================
 // PANEL
 //====================================================================
 
-string V51StateName()
+string V52StateName()
 {
    switch(g_state)
    {
-      case V51_BUY_DEPARTED:  return "BUY DEPARTED";
-      case V51_BUY_RETEST:    return "BUY RETEST";
-      case V51_SELL_DEPARTED: return "SELL DEPARTED";
-      case V51_SELL_RETEST:   return "SELL RETEST";
+      case V52_BUY_DEPARTED:  return "BUY DEPARTED";
+      case V52_BUY_RETEST:    return "BUY RETEST";
+      case V52_SELL_DEPARTED: return "SELL DEPARTED";
+      case V52_SELL_RETEST:   return "SELL RETEST";
       default:                 return "IDLE";
    }
 }
 
-void V51Panel(const MqlTick &tick)
+void V52Panel(const MqlTick &tick)
 {
    ulong nowMs = GetTickCount64();
 
    if(g_lastPanelMs > 0 &&
-      nowMs - g_lastPanelMs < (ulong)MathMax(50, InpV51_PanelUpdateMilliseconds))
+      nowMs - g_lastPanelMs <
+         (ulong)MathMax(50, InpV52_PanelUpdateMilliseconds))
    {
       return;
    }
 
    g_lastPanelMs = nowMs;
 
-   double ema = 0.0;
-   bool haveEMA = V51GetEMA(0, ema);
-
-   double adaptive = V51AdaptiveRange(tick.time_msc);
-
-   double lots = V51NormalizeVolume(InpV51_Lots);
+   double adaptive = V52AdaptiveRange(tick.time_msc);
+   double lots = V52NormalizeVolume(InpV52_Lots);
    double moneyCost = 0.0;
-   double friction = V51FrictionDistance(tick, lots, moneyCost);
-   double costFloor = friction * MathMax(1.0, InpV51_CostSafetyMultiple);
-
-   double naturalReclaim =
-      adaptive * MathMax(0.0, InpV51_ReclaimAdaptiveFrac);
-
-   double effectiveReclaim = MathMax(naturalReclaim, costFloor);
+   double friction = V52FrictionDistance(tick, lots, moneyCost);
+   double costFloor = friction * MathMax(1.0, InpV52_CostSafetyMultiple);
 
    ulong ticket;
    ENUM_POSITION_TYPE type;
@@ -1455,37 +1363,27 @@ void V51Panel(const MqlTick &tick)
 
    string position = "NONE";
 
-   if(V51FindPosition(ticket, type, openPrice, floatingProfit))
-      position = (type == POSITION_TYPE_BUY ? "BUY" : "SELL");
-
-   int wrongSeconds = 0;
-
-   if(g_wrongSideSince > 0)
-      wrongSeconds = (int)(TimeCurrent() - g_wrongSideSince);
+   if(V52FindPosition(ticket, type, openPrice, floatingProfit))
+      position = (type == POSITION_TYPE_BUY ? "BUY - HOLDING" : "SELL - HOLDING");
 
    Comment(
-      "VWAP + EMA8 BEHAVIOR v5.10\n",
-      "STATE: ", V51StateName(), "\n",
+      "VWAP + EMA8 BEHAVIOR v5.20\n",
+      "MODE: HOLD UNTIL FULL OPPOSITE VWAP SIGNAL\n",
+      "POSITION: ", position, "\n",
+      "SIGNAL STATE: ", V52StateName(), "\n",
       "VWAP: ",
       (g_haveLiveVWAP ? DoubleToString(g_liveVWAP, _Digits) : "n/a"),
-      "\nEMA8 M5: ",
-      (haveEMA ? DoubleToString(ema, _Digits) : "n/a"),
+      "\nRUNNER HEALTH: ", g_runnerHealth,
+      "\nEMA WRONG CLOSES: ", IntegerToString(g_emaWrongCloses),
+      "\nMFE: ", DoubleToString(g_mfe, 2),
       "\nSLOW M1 RANGE: ", DoubleToString(g_slowM1Range, 2),
       "\nFAST M1 RANGE: ", DoubleToString(g_fastM1Range, 2),
-      "\nLIVE ", IntegerToString(InpV51_LiveVolWindowSeconds),
+      "\nLIVE ", IntegerToString(InpV52_LiveVolWindowSeconds),
       "s RANGE: ", DoubleToString(g_liveTickRange, 2),
       "\nADAPTIVE RANGE: ", DoubleToString(adaptive, 2),
-      "\nSPREAD DIST: ", DoubleToString(g_lastSpreadDistance, 2),
-      "\nCOMMISSION / LOT RT: ", DoubleToString(g_commissionPerLotRT, 4),
-      "\nCOMMISSION DIST: ", DoubleToString(g_lastCommissionDistance, 2),
-      "\nEST RT COST MONEY: ", DoubleToString(moneyCost, 4),
+      "\nEST RT COST: ", DoubleToString(moneyCost, 4),
       "\nCOST FLOOR: ", DoubleToString(costFloor, 2),
-      "\nEFFECTIVE RECLAIM: ", DoubleToString(effectiveReclaim, 2),
-      "\nPOSITION: ", position,
-      "\nEMA TAKEOVER: ", (g_emaTakeover ? "YES - RUNNER" : "NO - VWAP THESIS"),
-      "\nEMA WRONG CLOSES: ", IntegerToString(g_emaWrongCount),
-      "\nVWAP WRONG SEC: ", IntegerToString(wrongSeconds),
-      "\nMFE EXECUTABLE: ", DoubleToString(g_mfe, 2),
+      "\nCOMMISSION / LOT RT: ", DoubleToString(g_commissionPerLotRT, 4),
       "\nLAST: ", g_lastAction
    );
 }
@@ -1496,51 +1394,43 @@ void V51Panel(const MqlTick &tick)
 
 int OnInit()
 {
-   if(InpV51_MapTF != PERIOD_M5)
+   if(InpV52_MapTF != PERIOD_M5 ||
+      InpV52_TriggerTF != PERIOD_M1)
    {
-      Print("v5.10 requires M5 map timeframe.");
+      Print("v5.20 requires M5 map + M1/live execution.");
       return INIT_PARAMETERS_INCORRECT;
    }
 
-   if(InpV51_TriggerTF != PERIOD_M1)
+   if(InpV52_Lots <= 0.0 ||
+      InpV52_EMAPeriod < 1 ||
+      InpV52_SlowM1Lookback < 2 ||
+      InpV52_FastM1Lookback < 2 ||
+      InpV52_M5RangeLookback < 2 ||
+      InpV52_LiveVolWindowSeconds < 1 ||
+      InpV52_LiveVolMinTicks < 2 ||
+      InpV52_FastM1Weight < 0.0 ||
+      InpV52_FastM1Weight > 1.0 ||
+      InpV52_MinAdaptiveVsSlow <= 0.0 ||
+      InpV52_MaxAdaptiveVsSlow < InpV52_MinAdaptiveVsSlow ||
+      InpV52_DepartureAdaptiveFrac < 0.0 ||
+      InpV52_RetestBandAdaptiveFrac < 0.0 ||
+      InpV52_ReclaimAdaptiveFrac < 0.0 ||
+      InpV52_VWAPWrongDepthAdaptiveFrac < 0.0 ||
+      InpV52_VWAPWrongSideSeconds < 1 ||
+      InpV52_RetestTimeoutMinutes < 0 ||
+      InpV52_FallbackCommissionPerLotRT < 0.0 ||
+      InpV52_CommissionHistoryDays < 1 ||
+      InpV52_CostSafetyMultiple < 1.0 ||
+      InpV52_VWAPResetHour < 0 ||
+      InpV52_VWAPResetHour > 23)
    {
-      Print("v5.10 requires M1 trigger/range timeframe.");
-      return INIT_PARAMETERS_INCORRECT;
-   }
-
-   if(InpV51_Lots <= 0.0 ||
-      InpV51_EMAPeriod < 1 ||
-      InpV51_SlowM1Lookback < 2 ||
-      InpV51_FastM1Lookback < 2 ||
-      InpV51_M5RangeLookback < 2 ||
-      InpV51_LiveVolWindowSeconds < 1 ||
-      InpV51_LiveVolMinTicks < 2 ||
-      InpV51_FastM1Weight < 0.0 ||
-      InpV51_FastM1Weight > 1.0 ||
-      InpV51_MinAdaptiveVsSlow <= 0.0 ||
-      InpV51_MaxAdaptiveVsSlow < InpV51_MinAdaptiveVsSlow ||
-      InpV51_DepartureAdaptiveFrac < 0.0 ||
-      InpV51_RetestBandAdaptiveFrac < 0.0 ||
-      InpV51_ReclaimAdaptiveFrac < 0.0 ||
-      InpV51_VWAPWrongDepthAdaptiveFrac < 0.0 ||
-      InpV51_VWAPWrongSideSeconds < 1 ||
-      InpV51_RetestTimeoutMinutes < 0 ||
-      InpV51_EMATakeoverM5RangeFrac < 0.0 ||
-      InpV51_EMADeepBreakM5RangeFrac < 0.0 ||
-      InpV51_EMAWrongSideCloses < 1 ||
-      InpV51_FallbackCommissionPerLotRT < 0.0 ||
-      InpV51_CommissionHistoryDays < 1 ||
-      InpV51_CostSafetyMultiple < 1.0 ||
-      InpV51_VWAPResetHour < 0 ||
-      InpV51_VWAPResetHour > 23)
-   {
-      Print("v5.10 invalid input parameters.");
+      Print("v5.20 invalid inputs.");
       return INIT_PARAMETERS_INCORRECT;
    }
 
    g_emaHandle = iMA(_Symbol,
-                     InpV51_MapTF,
-                     InpV51_EMAPeriod,
+                     InpV52_MapTF,
+                     InpV52_EMAPeriod,
                      0,
                      MODE_EMA,
                      PRICE_CLOSE);
@@ -1551,31 +1441,32 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   trade.SetExpertMagicNumber(InpV51_Magic);
-   trade.SetDeviationInPoints(InpV51_DeviationPoints);
+   trade.SetExpertMagicNumber(InpV52_Magic);
+   trade.SetDeviationInPoints(InpV52_DeviationPoints);
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetAsyncMode(false);
 
+   g_state = V52_IDLE;
    g_lastM1Bar = 0;
    g_lastM5Bar = 0;
-   g_state = V51_IDLE;
 
-   V51RefreshM1RangeCache();
-   V51RefreshM5RangeCache();
-   V51RebuildVWAPCompletedCache();
-   V51RefreshCommissionEstimate();
+   V52RefreshM1RangeCache();
+   V52RefreshM5RangeCache();
+   V52RebuildVWAPCompletedCache();
+   V52RefreshCommissionEstimate();
 
    MqlTick tick;
+
    if(SymbolInfoTick(_Symbol, tick))
    {
-      V51RecordTick(tick);
-      V51UpdateLiveVWAP();
-      V51AdaptiveRange(tick.time_msc);
+      V52RecordTick(tick);
+      V52UpdateLiveVWAP();
+      V52AdaptiveRange(tick.time_msc);
    }
 
-   V51Log(
-      "INIT v5.10 | FAST live VWAP reclaim | adaptive V25 volatility | "
-      "spread+commission economic floor | EMA8 runner"
+   V52Log(
+      "INIT v5.20 | HOLD THROUGH NOISE | no EMA/VWAP micro exits | "
+      "reverse only on full opposite VWAP retest/reclaim"
    );
 
    return INIT_SUCCEEDED;
@@ -1596,24 +1487,22 @@ void OnTick()
    if(!SymbolInfoTick(_Symbol, tick))
       return;
 
-   // Ultra-light work first: record the live V25 tick.
-   V51RecordTick(tick);
+   V52RecordTick(tick);
 
-   // Cached range/VWAP rebuilds only when a new bar begins.
-   V51ProcessNewM1();
-   V51ProcessNewM5();
+   // Heavy history work only on new bars.
+   V52ProcessNewM1();
+   V52ProcessNewM5();
 
-   // Current-session VWAP only adds the live M5 bar to cached sums.
-   if(!V51UpdateLiveVWAP())
+   if(!V52UpdateLiveVWAP())
       return;
 
-   // Existing trade gets priority over a new entry.
-   V51ProcessLivePosition(tick);
+   // Keep measuring the existing mountain/valley while we hold it.
+   V52UpdateRunnerMFE(tick);
 
-   if(!V51HasPosition())
-      V51ProcessEntry(tick);
+   // Crucially, signal engine keeps running WHILE a position is open.
+   // It searches only for the opposite full VWAP setup.
+   V52ProcessSignal(tick);
 
-   // UI refresh is throttled so it does not slow a 1-second market.
-   V51Panel(tick);
+   V52Panel(tick);
 }
 //+------------------------------------------------------------------+
