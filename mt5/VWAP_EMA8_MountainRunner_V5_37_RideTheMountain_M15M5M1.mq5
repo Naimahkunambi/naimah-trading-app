@@ -1,5 +1,5 @@
 #property strict
-#property version "5.37"
+#property version "5.371"
 #include <Trade/Trade.mqh>
 CTrade trade;
 
@@ -18,11 +18,9 @@ input ENUM_TIMEFRAMES EntryTF=PERIOD_M1;
 input int VWAPResetHour=0;
 input bool PreferRealVolume=false;
 
-// M15 DIRECTION
 input int M15PivotWing=2;
 input double MinM15StructureStepPoints=0.0;
 
-// M5 MAP / BREAKOUT ZONE
 input int M5PivotWing=2;
 input int M5RangeLookback=12;
 input double BreakoutBufferM5RangeFrac=0.10;
@@ -30,13 +28,11 @@ input double RetestZoneM5RangeFrac=0.20;
 input int BreakoutExpiryMinutes=90;
 input bool OneTradePerBreakout=true;
 
-// M1 ENTRY
 input double MaxEntryDistanceM5RangeFrac=0.80;
 input double SLBufferM5RangeFrac=0.05;
 input double MinConfirmationM5RangeFrac=0.10;
 input int MaxRetestMinutes=30;
 
-// COST CONTROL
 input double CommissionPerLotRT=58.0;
 input double CostSafetyMultiple=1.25;
 input int ExpectedSlippagePoints=0;
@@ -87,12 +83,6 @@ bool GetBar(ENUM_TIMEFRAMES tf,int shift,MqlRates &bar)
    MqlRates a[1];
    if(CopyRates(_Symbol,tf,shift,1,a)!=1)return false;
    bar=a[0];return true;
-}
-
-double BarVol(const MqlRates &b)
-{
-   if(PreferRealVolume&&b.real_volume>0)return(double)b.real_volume;
-   return(double)b.tick_volume;
 }
 
 bool AvgRange(ENUM_TIMEFRAMES tf,int startShift,int count,double &out)
@@ -242,7 +232,7 @@ void DetectM5Swing()
    else if(lo)AppendSwing(m5Type,m5Price,m5Time,m5Count,-1,lp,lt);
 }
 
-bool LastTwoOfType(int types[],double prices[],datetime times[],int count,int wanted,double &prev,double &last,datetime &lastTime)
+bool LastTwoOfType(int &types[],double &prices[],datetime &times[],int count,int wanted,double &prev,double &last,datetime &lastTime)
 {
    int found=0;
    for(int i=count-1;i>=0;i--){
@@ -281,6 +271,8 @@ bool LatestM5Swing(int wanted,double &price,datetime &when)
    }
    return false;
 }
+
+bool OpenFromRetest(TrendDir dir,double confirmClose);
 
 void ArmM5Breakout()
 {
@@ -337,12 +329,12 @@ void UpdateRetestFromM1()
 
       if(mapDir==TREND_BUY){
          bool heldZone=(b.close>=mapBreakLevel);
-         bool brokePullback=(b.close>=prev.high&&b.close-prev.high>=0.0);
+         bool brokePullback=(b.close>=prev.high);
          bool meaningful=(b.close-retestLow)>=confirmFloor;
          if(heldZone&&brokePullback&&meaningful)OpenFromRetest(TREND_BUY,b.close);
       }else if(mapDir==TREND_SELL){
          bool heldZone=(b.close<=mapBreakLevel);
-         bool brokePullback=(b.close<=prev.low&&prev.low-b.close>=0.0);
+         bool brokePullback=(b.close<=prev.low);
          bool meaningful=(retestHigh-b.close)>=confirmFloor;
          if(heldZone&&brokePullback&&meaningful)OpenFromRetest(TREND_SELL,b.close);
       }
@@ -441,7 +433,7 @@ void Panel()
    ulong now=GetTickCount64();if(lastPanelMs>0&&now-lastPanelMs<(ulong)MathMax(50,PanelUpdateMilliseconds))return;lastPanelMs=now;
    ulong tk;ENUM_POSITION_TYPE ty;double op,pf;string pos="NONE";
    if(FindPos(tk,ty,op,pf))pos=(ty==POSITION_TYPE_BUY?"BUY":"SELL")+string(" | STRUCT EXIT LEVEL ")+DoubleToString(positionStructureLevel,_Digits);
-   Comment("RIDE THE MOUNTAIN v5.37 | M15 -> M5 -> M1\n",
+   Comment("RIDE THE MOUNTAIN v5.371 | M15 -> M5 -> M1\n",
            "POSITION: ",pos,
            "\nM15 DIRECTION: ",TrendName(),
            "\nM15 HIGH: ",DoubleToString(m15LastHigh,_Digits)," | PREV HIGH: ",DoubleToString(m15PrevHigh,_Digits),
@@ -465,7 +457,7 @@ int OnInit()
    trade.SetAsyncMode(false);
    double x=0;if(AvgRange(MapTF,1,M5RangeLookback,x))avgM5Range=x;
    ResetMap();
-   Log("INIT V5.37 RIDE THE MOUNTAIN");
+   Log("INIT V5.371 RIDE THE MOUNTAIN");
    Log("M15 = DIRECTION + STRUCTURE EXIT | M5 = BREAKOUT MAP | M1 = RETEST CONFIRMATION ENTRY");
    Log("NO TAKE PROFIT | FIXED RETEST SL | EXIT ONLY ON M15 STRUCTURE BREAK OR SL");
    return INIT_SUCCEEDED;
@@ -473,7 +465,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
-   Log("DEINIT V5.37 | armed="+IntegerToString(breakoutsArmed)+" | retests="+IntegerToString(retestsSeen)+" | entries="+IntegerToString(entriesTaken)+" | structure exits="+IntegerToString(structureExits));
+   Log("DEINIT V5.371 | armed="+IntegerToString(breakoutsArmed)+" | retests="+IntegerToString(retestsSeen)+" | entries="+IntegerToString(entriesTaken)+" | structure exits="+IntegerToString(structureExits));
    Comment("");
 }
 
